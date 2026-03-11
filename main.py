@@ -4,6 +4,7 @@
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -61,8 +62,79 @@ def collect_claude() -> list[dict]:
     return records
 
 
+def collect_codex() -> list[dict]:
+    """Parse Codex JSONL logs into token records."""
+    records = []
+    sessions_dir = Path.home() / ".codex" / "sessions"
+    if not sessions_dir.exists():
+        return records
+
+    for f in sessions_dir.rglob("*.jsonl"):
+        session_id = f.stem
+        project = session_id
+        prev_cumulative = None
+
+        with open(f) as fh:
+            for line in fh:
+                # Extract project from session_meta entry
+                if '"session_meta"' in line:
+                    try:
+                        obj = json.loads(line)
+                        cwd = (obj.get("payload") or {}).get("cwd", "")
+                        if cwd:
+                            project = Path(cwd).name
+                    except json.JSONDecodeError:
+                        pass
+                    continue
+
+                if '"token_count"' not in line:
+                    continue
+
+                try:
+                    obj = json.loads(line)
+                    payload = obj.get("payload") or {}
+                    if payload.get("type") != "token_count":
+                        continue
+                    info = payload.get("info")
+                    if not info:
+                        continue
+                    total_usage = info.get("total_token_usage") or {}
+                    last_usage = info.get("last_token_usage") or {}
+                    cum_total = total_usage.get("total_tokens")
+
+                    if cum_total is not None and cum_total == prev_cumulative:
+                        continue
+
+                    tokens = last_usage.get("total_tokens")
+                    if not tokens and cum_total is not None and prev_cumulative is not None:
+                        tokens = cum_total - prev_cumulative
+                    if cum_total is not None:
+                        prev_cumulative = cum_total
+
+                    ts = obj.get("timestamp")
+                    if not tokens or tokens <= 0 or not ts:
+                        continue
+
+                    records.append({
+                        "tool": "Codex",
+                        "project": project,
+                        "session": session_id,
+                        "date": ts[:10],
+                        "model": "",
+                        "input_tokens": last_usage.get("input_tokens") or 0,
+                        "output_tokens": last_usage.get("output_tokens") or 0,
+                        "cache_write_tokens": 0,
+                        "cache_read_tokens": last_usage.get("cached_input_tokens") or 0,
+                        "total_tokens": tokens,
+                    })
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+    return records
+
+
 COLLECTORS = {
     "claude": collect_claude,
+    "codex": collect_codex,
 }
 
 QUERIES = {
@@ -144,13 +216,21 @@ def main():
         return 1
 
     db = duckdb.connect()
-    cols = list(records[0].keys())
-    placeholders = ", ".join(["?"] * len(cols))
-    col_defs = ", ".join(f"{c} VARCHAR" if isinstance(records[0][c], str) else f"{c} INTEGER"
-                         for c in cols)
-    db.execute(f"CREATE TABLE tokens ({col_defs})")
-    db.executemany(f"INSERT INTO tokens VALUES ({placeholders})",
-                   [tuple(r.values()) for r in records])
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
+        for r in records:
+            json.dump(r, tmp)
+            tmp.write("\n")
+        tmp_path = tmp.name
+    db.execute(f"""CREATE TABLE tokens AS SELECT * FROM read_json('{tmp_path}',
+        format='newline_delimited',
+        columns={{
+            tool: 'VARCHAR', project: 'VARCHAR', session: 'VARCHAR',
+            date: 'VARCHAR', model: 'VARCHAR',
+            input_tokens: 'INTEGER', output_tokens: 'INTEGER',
+            cache_write_tokens: 'INTEGER', cache_read_tokens: 'INTEGER',
+            total_tokens: 'INTEGER'
+        }})""")
+    Path(tmp_path).unlink()
 
     if args.sql:
         db.sql(args.sql).show()
