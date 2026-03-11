@@ -2,139 +2,93 @@
 """AI coding tool token analytics powered by DuckDB."""
 
 import argparse
-import json
+import os
 import sys
-import tempfile
-from pathlib import Path
 
 import duckdb
 
+HOME = os.path.expanduser("~")
 
-def collect_claude() -> list[dict]:
-    """Parse Claude Code JSONL logs into token records."""
-    records = []
-    projects_dir = Path.home() / ".claude" / "projects"
-    if not projects_dir.exists():
-        return records
+CLAUDE_SQL = f"""
+SELECT
+    'Claude Code' as tool,
+    coalesce(nullif(split_part(cwd, '/', -1), ''),
+             regexp_extract(filename, 'projects/([^/]+)/', 1)) as project,
+    cast(sessionId as VARCHAR) as session,
+    timestamp[:10] as date,
+    cast(message.model as VARCHAR) as model,
+    coalesce(cast(message.usage.input_tokens as INTEGER), 0) as input_tokens,
+    coalesce(cast(message.usage.output_tokens as INTEGER), 0) as output_tokens,
+    coalesce(cast(message.usage.cache_creation_input_tokens as INTEGER), 0) as cache_write_tokens,
+    coalesce(cast(message.usage.cache_read_input_tokens as INTEGER), 0) as cache_read_tokens,
+    coalesce(cast(message.usage.input_tokens as INTEGER), 0)
+      + coalesce(cast(message.usage.output_tokens as INTEGER), 0)
+      + coalesce(cast(message.usage.cache_creation_input_tokens as INTEGER), 0)
+      + coalesce(cast(message.usage.cache_read_input_tokens as INTEGER), 0) as total_tokens
+FROM read_json('{HOME}/.claude/projects/*/*.jsonl',
+    format='newline_delimited', filename=true, union_by_name=true,
+    ignore_errors=true, maximum_depth=3, maximum_object_size=67108864)
+WHERE type = 'assistant'
+  AND (isSidechain IS NULL OR isSidechain = false)
+  AND message.model != '<synthetic>'
+  AND message.usage IS NOT NULL
+  AND timestamp IS NOT NULL
+  AND NOT contains(filename, '/subagents/')
+"""
 
-    for f in projects_dir.glob("*/*.jsonl"):
-        if "subagents" in f.parts:
-            continue
-        dir_name = f.parent.name
-        with open(f) as fh:
-            for line in fh:
-                if '"assistant"' not in line or '"usage"' not in line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") != "assistant" or obj.get("isSidechain"):
-                        continue
-                    msg = obj.get("message") or {}
-                    if msg.get("model") == "<synthetic>":
-                        continue
-                    u = msg.get("usage") or {}
-                    ts = obj.get("timestamp")
-                    if not u or not ts:
-                        continue
-                    inp = u.get("input_tokens") or 0
-                    out = u.get("output_tokens") or 0
-                    cache_w = u.get("cache_creation_input_tokens") or 0
-                    cache_r = u.get("cache_read_input_tokens") or 0
-                    total = inp + out + cache_w + cache_r
-                    if total <= 0:
-                        continue
-                    cwd = obj.get("cwd", "")
-                    project = Path(cwd).name if cwd else dir_name
-                    records.append({
-                        "tool": "Claude Code",
-                        "project": project,
-                        "session": obj.get("sessionId", ""),
-                        "date": ts[:10],
-                        "model": msg.get("model", ""),
-                        "input_tokens": inp,
-                        "output_tokens": out,
-                        "cache_write_tokens": cache_w,
-                        "cache_read_tokens": cache_r,
-                        "total_tokens": total,
-                    })
-                except (json.JSONDecodeError, KeyError):
-                    continue
-    return records
+CODEX_SQL = f"""
+WITH raw AS (
+    SELECT filename, type, timestamp, payload
+    FROM read_json('{HOME}/.codex/sessions/**/*.jsonl',
+        format='newline_delimited', filename=true, union_by_name=true,
+        ignore_errors=true, maximum_depth=4, maximum_object_size=67108864)
+    WHERE type IN ('session_meta', 'event_msg')
+),
+projects AS (
+    SELECT filename, split_part(trim(cast(payload.cwd as VARCHAR), '"'), '/', -1) as project
+    FROM raw WHERE type = 'session_meta'
+),
+token_entries AS (
+    SELECT
+        r.filename, r.timestamp,
+        cast(r.payload.info.total_token_usage.total_tokens as BIGINT) as cum_total,
+        cast(r.payload.info.last_token_usage.total_tokens as BIGINT) as last_total,
+        coalesce(cast(r.payload.info.last_token_usage.input_tokens as INTEGER), 0) as input_tokens,
+        coalesce(cast(r.payload.info.last_token_usage.output_tokens as INTEGER), 0) as output_tokens,
+        coalesce(cast(r.payload.info.last_token_usage.cached_input_tokens as INTEGER), 0) as cache_read_tokens,
+        LAG(cast(r.payload.info.total_token_usage.total_tokens as BIGINT))
+            OVER (PARTITION BY r.filename ORDER BY r.timestamp) as prev_cum
+    FROM raw r
+    WHERE r.type = 'event_msg'
+      AND trim(cast(r.payload.type as VARCHAR), '"') = 'token_count'
+      AND r.payload.info IS NOT NULL
+      AND r.timestamp IS NOT NULL
+)
+SELECT
+    'Codex' as tool,
+    coalesce(p.project, regexp_extract(t.filename, '([^/]+)[.]jsonl', 1)) as project,
+    regexp_extract(t.filename, '([^/]+)[.]jsonl', 1) as session,
+    t.timestamp[:10] as date,
+    '' as model,
+    t.input_tokens, t.output_tokens, 0 as cache_write_tokens, t.cache_read_tokens,
+    CASE
+        WHEN t.last_total > 0 THEN t.last_total
+        WHEN t.cum_total IS NOT NULL AND t.prev_cum IS NOT NULL THEN t.cum_total - t.prev_cum
+        ELSE 0
+    END as total_tokens
+FROM token_entries t
+LEFT JOIN projects p ON t.filename = p.filename
+WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
+  AND CASE
+        WHEN t.last_total > 0 THEN t.last_total
+        WHEN t.cum_total IS NOT NULL AND t.prev_cum IS NOT NULL THEN t.cum_total - t.prev_cum
+        ELSE 0
+      END > 0
+"""
 
-
-def collect_codex() -> list[dict]:
-    """Parse Codex JSONL logs into token records."""
-    records = []
-    sessions_dir = Path.home() / ".codex" / "sessions"
-    if not sessions_dir.exists():
-        return records
-
-    for f in sessions_dir.rglob("*.jsonl"):
-        session_id = f.stem
-        project = session_id
-        prev_cumulative = None
-
-        with open(f) as fh:
-            for line in fh:
-                # Extract project from session_meta entry
-                if '"session_meta"' in line:
-                    try:
-                        obj = json.loads(line)
-                        cwd = (obj.get("payload") or {}).get("cwd", "")
-                        if cwd:
-                            project = Path(cwd).name
-                    except json.JSONDecodeError:
-                        pass
-                    continue
-
-                if '"token_count"' not in line:
-                    continue
-
-                try:
-                    obj = json.loads(line)
-                    payload = obj.get("payload") or {}
-                    if payload.get("type") != "token_count":
-                        continue
-                    info = payload.get("info")
-                    if not info:
-                        continue
-                    total_usage = info.get("total_token_usage") or {}
-                    last_usage = info.get("last_token_usage") or {}
-                    cum_total = total_usage.get("total_tokens")
-
-                    if cum_total is not None and cum_total == prev_cumulative:
-                        continue
-
-                    tokens = last_usage.get("total_tokens")
-                    if not tokens and cum_total is not None and prev_cumulative is not None:
-                        tokens = cum_total - prev_cumulative
-                    if cum_total is not None:
-                        prev_cumulative = cum_total
-
-                    ts = obj.get("timestamp")
-                    if not tokens or tokens <= 0 or not ts:
-                        continue
-
-                    records.append({
-                        "tool": "Codex",
-                        "project": project,
-                        "session": session_id,
-                        "date": ts[:10],
-                        "model": "",
-                        "input_tokens": last_usage.get("input_tokens") or 0,
-                        "output_tokens": last_usage.get("output_tokens") or 0,
-                        "cache_write_tokens": 0,
-                        "cache_read_tokens": last_usage.get("cached_input_tokens") or 0,
-                        "total_tokens": tokens,
-                    })
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    continue
-    return records
-
-
-COLLECTORS = {
-    "claude": collect_claude,
-    "codex": collect_codex,
+SOURCES = {
+    "claude": ("Claude Code", CLAUDE_SQL),
+    "codex": ("Codex", CODEX_SQL),
 }
 
 QUERIES = {
@@ -196,7 +150,7 @@ def main():
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
     parser.add_argument("--by", choices=list(QUERIES), default="project",
                         help="Group results by (default: project)")
-    parser.add_argument("--tool", choices=[*COLLECTORS, "all"], default="all",
+    parser.add_argument("--tool", choices=[*SOURCES, "all"], default="all",
                         help="Which tool to analyze (default: all)")
     parser.add_argument("--limit", type=int, default=30,
                         help="Max rows to display (default: 30)")
@@ -204,33 +158,25 @@ def main():
                         help="Run custom SQL against the 'tokens' table")
     args = parser.parse_args()
 
-    records = []
-    tools = COLLECTORS if args.tool == "all" else {args.tool: COLLECTORS[args.tool]}
-    for name, fn in tools.items():
-        rows = fn()
-        records.extend(rows)
-        print(f"  {name}: {len(rows)} entries", file=sys.stderr)
+    db = duckdb.connect()
+    sources = SOURCES if args.tool == "all" else {args.tool: SOURCES[args.tool]}
+    parts = []
+    for key, (name, sql) in sources.items():
+        try:
+            parts.append(sql)
+        except Exception as e:
+            print(f"  {name}: skipped ({e})", file=sys.stderr)
 
-    if not records:
+    if not parts:
         print("No data found.")
         return 1
 
-    db = duckdb.connect()
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
-        for r in records:
-            json.dump(r, tmp)
-            tmp.write("\n")
-        tmp_path = tmp.name
-    db.execute(f"""CREATE TABLE tokens AS SELECT * FROM read_json('{tmp_path}',
-        format='newline_delimited',
-        columns={{
-            tool: 'VARCHAR', project: 'VARCHAR', session: 'VARCHAR',
-            date: 'VARCHAR', model: 'VARCHAR',
-            input_tokens: 'INTEGER', output_tokens: 'INTEGER',
-            cache_write_tokens: 'INTEGER', cache_read_tokens: 'INTEGER',
-            total_tokens: 'INTEGER'
-        }})""")
-    Path(tmp_path).unlink()
+    db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({p})" for p in parts))
+
+    row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+    if row_count == 0:
+        print("No data found.")
+        return 1
 
     if args.sql:
         db.sql(args.sql).show()
