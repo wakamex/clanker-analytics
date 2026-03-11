@@ -4,10 +4,18 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import duckdb
 
 HOME = os.path.expanduser("~")
+CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
+CACHE_FILE = CACHE_DIR / "tokens.parquet"
+
+SOURCE_DIRS = [
+    Path(HOME) / ".claude" / "projects",
+    Path(HOME) / ".codex" / "sessions",
+]
 
 CLAUDE_SQL = f"""
 SELECT
@@ -146,6 +154,42 @@ def fmt(n: int) -> str:
     return str(n)
 
 
+def sources_mtime() -> float:
+    """Newest mtime across all source JSONL files."""
+    newest = 0.0
+    for d in SOURCE_DIRS:
+        if not d.exists():
+            continue
+        for f in d.rglob("*.jsonl"):
+            mt = f.stat().st_mtime
+            if mt > newest:
+                newest = mt
+    return newest
+
+
+def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
+    """Load tokens table from cache or rebuild from source files."""
+    if not refresh and CACHE_FILE.exists():
+        cache_mt = CACHE_FILE.stat().st_mtime
+        if sources_mtime() <= cache_mt:
+            db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE}'")
+            print("  (cached)", file=sys.stderr)
+            return
+
+    # Rebuild from source
+    parts = []
+    for name, sql in SOURCES.values():
+        parts.append(sql)
+
+    db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({p})" for p in parts))
+
+    row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+    if row_count > 0:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        db.execute(f"COPY tokens TO '{CACHE_FILE}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        print(f"  cached {row_count} rows → {CACHE_FILE}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
     parser.add_argument("--by", choices=list(QUERIES), default="project",
@@ -156,27 +200,23 @@ def main():
                         help="Max rows to display (default: 30)")
     parser.add_argument("--sql", type=str,
                         help="Run custom SQL against the 'tokens' table")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Force rebuild of cache from source files")
     args = parser.parse_args()
 
     db = duckdb.connect()
-    sources = SOURCES if args.tool == "all" else {args.tool: SOURCES[args.tool]}
-    parts = []
-    for key, (name, sql) in sources.items():
-        try:
-            parts.append(sql)
-        except Exception as e:
-            print(f"  {name}: skipped ({e})", file=sys.stderr)
-
-    if not parts:
-        print("No data found.")
-        return 1
-
-    db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({p})" for p in parts))
+    load_tokens(db, args.refresh)
 
     row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
     if row_count == 0:
         print("No data found.")
         return 1
+
+    # Apply tool filter by narrowing the table
+    if args.tool != "all":
+        tool_name = SOURCES[args.tool][0]
+        db.execute(f"CREATE OR REPLACE VIEW tokens_all AS SELECT * FROM tokens")
+        db.execute(f"DELETE FROM tokens WHERE tool != '{tool_name}'")
 
     if args.sql:
         db.sql(args.sql).show()
