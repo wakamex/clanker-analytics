@@ -103,19 +103,19 @@ QUERIES = {
     "project": """
         SELECT project, tool,
                count(*)::INT as turns,
-               sum(total_tokens)::BIGINT as total_tokens,
-               sum(input_tokens)::BIGINT as input_tok,
-               sum(output_tokens)::BIGINT as output_tok,
+               fmt(sum(total_tokens)) as total,
+               fmt(sum(input_tokens)) as input,
+               fmt(sum(output_tokens)) as output,
                min(date) as first_seen,
                max(date) as last_seen
         FROM tokens
         GROUP BY project, tool
-        ORDER BY total_tokens DESC
+        ORDER BY sum(total_tokens) DESC
         LIMIT {limit}
     """,
     "date": """
         SELECT date, tool,
-               sum(total_tokens)::BIGINT as total_tokens,
+               fmt(sum(total_tokens)) as total,
                count(*)::INT as turns
         FROM tokens
         GROUP BY date, tool
@@ -125,20 +125,20 @@ QUERIES = {
     "model": """
         SELECT model, tool,
                count(*)::INT as turns,
-               sum(total_tokens)::BIGINT as total_tokens
+               fmt(sum(total_tokens)) as total
         FROM tokens
         WHERE model != ''
         GROUP BY model, tool
-        ORDER BY total_tokens DESC
+        ORDER BY sum(total_tokens) DESC
     """,
     "session": """
         SELECT tool, project, session,
-               sum(total_tokens)::BIGINT as total_tokens,
+               fmt(sum(total_tokens)) as total,
                count(*)::INT as turns,
                min(date) as date
         FROM tokens
         GROUP BY tool, project, session
-        ORDER BY total_tokens DESC
+        ORDER BY sum(total_tokens) DESC
         LIMIT {limit}
     """,
 }
@@ -165,6 +165,19 @@ def sources_mtime() -> float:
             if mt > newest:
                 newest = mt
     return newest
+
+
+def register_fmt(db: duckdb.DuckDBPyConnection) -> None:
+    """Register a human-readable token formatter as a DuckDB macro."""
+    db.execute("""
+        CREATE MACRO fmt(n) AS
+        CASE
+            WHEN n >= 1e9  THEN printf('%.1fB', n / 1e9)
+            WHEN n >= 1e6  THEN printf('%.1fM', n / 1e6)
+            WHEN n >= 1e3  THEN printf('%.1fk', n / 1e3)
+            ELSE cast(n AS VARCHAR)
+        END
+    """)
 
 
 def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
@@ -205,6 +218,7 @@ def main():
     args = parser.parse_args()
 
     db = duckdb.connect()
+    register_fmt(db)
     load_tokens(db, args.refresh)
 
     row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
