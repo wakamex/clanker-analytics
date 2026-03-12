@@ -243,10 +243,10 @@ def main():
         db.execute(f"DELETE FROM tokens WHERE tool != '{tool_name}'")
 
     if args.sql:
-        db.sql(args.sql).show()
+        db.sql(args.sql).show(max_rows=100)
         return 0
 
-    db.sql(QUERIES[args.by].format(limit=args.limit)).show()
+    db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
 
     print()
     for tool, projects, total in db.sql("""
