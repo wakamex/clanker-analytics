@@ -106,9 +106,7 @@ QUERIES = {
                fmt(sum(total_tokens)) as total,
                fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
-               printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out",
-               fmt(sum(cache_read_tokens)) as cached,
-               printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)) as "cache%",
+               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
                min(date) as first_seen,
                max(date) as last_seen
         FROM tokens
@@ -121,7 +119,7 @@ QUERIES = {
                fmt(sum(total_tokens)) as total,
                fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
-               printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out",
+               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
                count(*)::INT as turns
         FROM tokens
         GROUP BY date, tool
@@ -134,7 +132,7 @@ QUERIES = {
                fmt(sum(total_tokens)) as total,
                fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
-               printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out"
+               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache"
         FROM tokens
         WHERE model != ''
         GROUP BY model, tool
@@ -145,7 +143,7 @@ QUERIES = {
                fmt(sum(total_tokens)) as total,
                fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
-               printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out",
+               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
                count(*)::INT as turns,
                min(date) as date
         FROM tokens
@@ -183,12 +181,12 @@ def register_fmt(db: duckdb.DuckDBPyConnection) -> None:
     """Register a human-readable token formatter as a DuckDB macro."""
     db.execute("""
         CREATE MACRO fmt(n) AS
-        CASE
+        lpad(CASE
             WHEN n >= 1e9  THEN printf('%.1fB', n / 1e9)
             WHEN n >= 1e6  THEN printf('%.1fM', n / 1e6)
             WHEN n >= 1e3  THEN printf('%.1fk', n / 1e3)
             ELSE cast(n AS VARCHAR)
-        END
+        END, 7, ' ')
     """)
 
 
