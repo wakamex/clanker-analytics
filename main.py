@@ -103,19 +103,19 @@ QUERIES = {
     "project": """
         SELECT project, tool,
                count(*)::INT as turns,
-               sum(total_tokens)::BIGINT as total,
-               sum(input_tokens)::BIGINT as input,
-               sum(output_tokens)::BIGINT as output,
+               sum(total_tokens)::BIGINT as total_tokens,
+               sum(input_tokens)::BIGINT as input_tok,
+               sum(output_tokens)::BIGINT as output_tok,
                min(date) as first_seen,
                max(date) as last_seen
         FROM tokens
         GROUP BY project, tool
-        ORDER BY total DESC
+        ORDER BY total_tokens DESC
         LIMIT {limit}
     """,
     "date": """
         SELECT date, tool,
-               sum(total_tokens)::BIGINT as total,
+               sum(total_tokens)::BIGINT as total_tokens,
                count(*)::INT as turns
         FROM tokens
         GROUP BY date, tool
@@ -125,20 +125,20 @@ QUERIES = {
     "model": """
         SELECT model, tool,
                count(*)::INT as turns,
-               sum(total_tokens)::BIGINT as total
+               sum(total_tokens)::BIGINT as total_tokens
         FROM tokens
         WHERE model != ''
         GROUP BY model, tool
-        ORDER BY total DESC
+        ORDER BY total_tokens DESC
     """,
     "session": """
         SELECT tool, project, session,
-               sum(total_tokens)::BIGINT as total,
+               sum(total_tokens)::BIGINT as total_tokens,
                count(*)::INT as turns,
                min(date) as date
         FROM tokens
         GROUP BY tool, project, session
-        ORDER BY total DESC
+        ORDER BY total_tokens DESC
         LIMIT {limit}
     """,
 }
