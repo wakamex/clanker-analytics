@@ -107,6 +107,8 @@ QUERIES = {
                fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
                printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out",
+               fmt(sum(cache_read_tokens)) as cached,
+               printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)) as "cache%",
                min(date) as first_seen,
                max(date) as last_seen
         FROM tokens
