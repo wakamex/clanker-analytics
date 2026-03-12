@@ -104,8 +104,9 @@ QUERIES = {
         SELECT project, tool,
                count(*)::INT as turns,
                fmt(sum(total_tokens)) as total,
-               fmt(sum(input_tokens)) as input,
-               fmt(sum(output_tokens)) as output,
+               printf('%s/%s',
+                   fmt(sum(input_tokens)),
+                   fmt(sum(output_tokens))) as "in/out",
                min(date) as first_seen,
                max(date) as last_seen
         FROM tokens
@@ -116,6 +117,7 @@ QUERIES = {
     "date": """
         SELECT date, tool,
                fmt(sum(total_tokens)) as total,
+               printf('%s/%s', fmt(sum(input_tokens)), fmt(sum(output_tokens))) as "in/out",
                count(*)::INT as turns
         FROM tokens
         GROUP BY date, tool
@@ -125,7 +127,8 @@ QUERIES = {
     "model": """
         SELECT model, tool,
                count(*)::INT as turns,
-               fmt(sum(total_tokens)) as total
+               fmt(sum(total_tokens)) as total,
+               printf('%s/%s', fmt(sum(input_tokens)), fmt(sum(output_tokens))) as "in/out"
         FROM tokens
         WHERE model != ''
         GROUP BY model, tool
@@ -134,6 +137,7 @@ QUERIES = {
     "session": """
         SELECT tool, project, session,
                fmt(sum(total_tokens)) as total,
+               printf('%s/%s', fmt(sum(input_tokens)), fmt(sum(output_tokens))) as "in/out",
                count(*)::INT as turns,
                min(date) as date
         FROM tokens
@@ -209,8 +213,8 @@ def main():
                         help="Group results by (default: project)")
     parser.add_argument("--tool", choices=[*SOURCES, "all"], default="all",
                         help="Which tool to analyze (default: all)")
-    parser.add_argument("--limit", type=int, default=30,
-                        help="Max rows to display (default: 30)")
+    parser.add_argument("--limit", type=int, default=50,
+                        help="Max rows to display (default: 50)")
     parser.add_argument("--sql", type=str,
                         help="Run custom SQL against the 'tokens' table")
     parser.add_argument("--refresh", action="store_true",
