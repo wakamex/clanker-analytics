@@ -104,7 +104,7 @@ QUERIES = {
         SELECT project, tool,
                count(*)::INT as turns,
                fmt(sum(total_tokens)) as total,
-               fmt(sum(input_tokens)) as input,
+               fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
                printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out",
                min(date) as first_seen,
@@ -117,7 +117,7 @@ QUERIES = {
     "date": """
         SELECT date, tool,
                fmt(sum(total_tokens)) as total,
-               fmt(sum(input_tokens)) as input,
+               fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
                printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out",
                count(*)::INT as turns
@@ -130,7 +130,7 @@ QUERIES = {
         SELECT model, tool,
                count(*)::INT as turns,
                fmt(sum(total_tokens)) as total,
-               fmt(sum(input_tokens)) as input,
+               fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
                printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out"
         FROM tokens
@@ -141,7 +141,7 @@ QUERIES = {
     "session": """
         SELECT tool, project, session,
                fmt(sum(total_tokens)) as total,
-               fmt(sum(input_tokens)) as input,
+               fmt(sum(total_tokens) - sum(output_tokens)) as input,
                fmt(sum(output_tokens)) as output,
                printf('%.1f', (sum(total_tokens) - sum(output_tokens))::FLOAT / greatest(sum(output_tokens), 1)) as "in/out",
                count(*)::INT as turns,
