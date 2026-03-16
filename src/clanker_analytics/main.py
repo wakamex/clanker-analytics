@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -99,57 +100,94 @@ SOURCES = {
     "codex": ("Codex", CODEX_SQL),
 }
 
+COST_PER_ROW = """
+    CASE
+        WHEN tool = 'Codex' THEN
+            (input_tokens * 1.25 + cache_write_tokens * 1.25
+             + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
+        ELSE CASE
+            WHEN model LIKE '%opus%' THEN
+                (input_tokens * 5.0 + cache_write_tokens * 6.25
+                 + cache_read_tokens * 0.50 + output_tokens * 25.0) / 1e6
+            WHEN model LIKE '%haiku%' THEN
+                (input_tokens * 1.0 + cache_write_tokens * 1.25
+                 + cache_read_tokens * 0.10 + output_tokens * 5.0) / 1e6
+            ELSE
+                (input_tokens * 3.0 + cache_write_tokens * 3.75
+                 + cache_read_tokens * 0.30 + output_tokens * 15.0) / 1e6
+        END
+    END
+"""
+
+COST_EXPR = f"fmtcost(sum({COST_PER_ROW}))"
+
+SUMMARY_COLS = f"""
+    count(*)::INT as turns,
+    fmt(sum(total_tokens)) as total,
+    fmt(sum(total_tokens) - 0.9 * sum(cache_read_tokens)) as billable,
+    fmt(sum(output_tokens)) as output,
+    lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
+    {COST_EXPR} as "api_cost",
+    sum(total_tokens)::BIGINT as _sort
+"""
+
 QUERIES = {
-    "project": """
-        SELECT project, tool,
-               count(*)::INT as turns,
-               fmt(sum(total_tokens)) as total,
-               fmt(sum(total_tokens) - sum(output_tokens)) as input,
-               fmt(sum(output_tokens)) as output,
-               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
-               min(date) as first_seen,
-               max(date) as last_seen
-        FROM tokens
-        GROUP BY project, tool
-        ORDER BY sum(total_tokens) DESC
-        LIMIT {limit}
+    "project": f"""
+        SELECT * EXCLUDE (_sort) FROM (
+            SELECT '*' as project, '*' as tool, {SUMMARY_COLS},
+                   min(date) as first_seen, max(date) as last_seen
+            FROM tokens
+            UNION ALL
+            SELECT '*' as project, tool, {SUMMARY_COLS},
+                   min(date) as first_seen, max(date) as last_seen
+            FROM tokens GROUP BY tool
+            UNION ALL
+            SELECT project, tool, {SUMMARY_COLS},
+                   min(date) as first_seen, max(date) as last_seen
+            FROM tokens GROUP BY project, tool
+        ) ORDER BY (project = '*' AND tool = '*') DESC, (project = '*') DESC, _sort DESC
+        LIMIT {{limit}}
     """,
-    "date": """
-        SELECT date, tool,
-               fmt(sum(total_tokens)) as total,
-               fmt(sum(total_tokens) - sum(output_tokens)) as input,
-               fmt(sum(output_tokens)) as output,
-               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
-               count(*)::INT as turns
-        FROM tokens
-        GROUP BY date, tool
-        ORDER BY date DESC
-        LIMIT {limit}
+    "date": f"""
+        SELECT * EXCLUDE (_sort) FROM (
+            SELECT '*' as date, '*' as tool, {SUMMARY_COLS}
+            FROM tokens
+            UNION ALL
+            SELECT '*' as date, tool, {SUMMARY_COLS}
+            FROM tokens GROUP BY tool
+            UNION ALL
+            SELECT date, tool, {SUMMARY_COLS}
+            FROM tokens GROUP BY date, tool
+        ) ORDER BY (date = '*' AND tool = '*') DESC, (date = '*') DESC, date DESC, _sort DESC
+        LIMIT {{limit}}
     """,
-    "model": """
-        SELECT model, tool,
-               count(*)::INT as turns,
-               fmt(sum(total_tokens)) as total,
-               fmt(sum(total_tokens) - sum(output_tokens)) as input,
-               fmt(sum(output_tokens)) as output,
-               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache"
-        FROM tokens
-        WHERE model != ''
-        GROUP BY model, tool
-        ORDER BY sum(total_tokens) DESC
+    "model": f"""
+        SELECT * EXCLUDE (_sort) FROM (
+            SELECT '*' as model, '*' as tool, {SUMMARY_COLS}
+            FROM tokens
+            UNION ALL
+            SELECT '*' as model, tool, {SUMMARY_COLS}
+            FROM tokens GROUP BY tool
+            UNION ALL
+            SELECT model, tool, {SUMMARY_COLS}
+            FROM tokens WHERE model != '' GROUP BY model, tool
+        ) ORDER BY (model = '*' AND tool = '*') DESC, (model = '*') DESC, _sort DESC
     """,
-    "session": """
-        SELECT tool, project, session,
-               fmt(sum(total_tokens)) as total,
-               fmt(sum(total_tokens) - sum(output_tokens)) as input,
-               fmt(sum(output_tokens)) as output,
-               lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
-               count(*)::INT as turns,
-               min(date) as date
-        FROM tokens
-        GROUP BY tool, project, session
-        ORDER BY sum(total_tokens) DESC
-        LIMIT {limit}
+    "session": f"""
+        SELECT * EXCLUDE (_sort) FROM (
+            SELECT '*' as tool, '*' as project, '*' as session, {SUMMARY_COLS},
+                   min(date) as date
+            FROM tokens
+            UNION ALL
+            SELECT tool, '*' as project, '*' as session, {SUMMARY_COLS},
+                   min(date) as date
+            FROM tokens GROUP BY tool
+            UNION ALL
+            SELECT tool, project, session, {SUMMARY_COLS},
+                   min(date) as date
+            FROM tokens GROUP BY tool, project, session
+        ) ORDER BY (tool = '*' AND project = '*') DESC, (project = '*') DESC, _sort DESC
+        LIMIT {{limit}}
     """,
 }
 
@@ -177,8 +215,8 @@ def sources_mtime() -> float:
     return newest
 
 
-def register_fmt(db: duckdb.DuckDBPyConnection) -> None:
-    """Register a human-readable token formatter as a DuckDB macro."""
+def register_macros(db: duckdb.DuckDBPyConnection) -> None:
+    """Register formatting macros."""
     db.execute("""
         CREATE MACRO fmt(n) AS
         lpad(CASE
@@ -187,6 +225,14 @@ def register_fmt(db: duckdb.DuckDBPyConnection) -> None:
             WHEN n >= 1e3  THEN printf('%.1fk', n / 1e3)
             ELSE cast(n AS VARCHAR)
         END, 7, ' ')
+    """)
+    db.execute("""
+        CREATE MACRO fmtcost(n) AS
+        CASE
+            WHEN n < 10   THEN printf('$%.2f', n)
+            WHEN n < 100  THEN printf('$%.1f', n)
+            ELSE printf('$%.0f', n)
+        END
     """)
 
 
@@ -223,12 +269,16 @@ def main():
                         help="Max rows to display (default: 50)")
     parser.add_argument("--sql", type=str,
                         help="Run custom SQL against the 'tokens' table")
+    parser.add_argument("--since", type=str,
+                        help="Only include data since date (e.g. 24h, 7d, 2026-03-01)")
+    parser.add_argument("--share", action="store_true",
+                        help="Generate shareable PNG card and copy to clipboard")
     parser.add_argument("--refresh", action="store_true",
                         help="Force rebuild of cache from source files")
     args = parser.parse_args()
 
     db = duckdb.connect()
-    register_fmt(db)
+    register_macros(db)
     load_tokens(db, args.refresh)
 
     row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
@@ -242,18 +292,28 @@ def main():
         db.execute(f"CREATE OR REPLACE VIEW tokens_all AS SELECT * FROM tokens")
         db.execute(f"DELETE FROM tokens WHERE tool != '{tool_name}'")
 
+    # Apply --since filter
+    if args.since:
+        m = re.fullmatch(r'(\d+)([hdw])', args.since)
+        if m:
+            n, unit = int(m.group(1)), m.group(2)
+            interval = {'h': 'HOUR', 'd': 'DAY', 'w': 'WEEK'}[unit]
+            db.execute(f"DELETE FROM tokens WHERE date < (current_date - INTERVAL {n} {interval})::DATE::VARCHAR")
+        else:
+            db.execute(f"DELETE FROM tokens WHERE date < '{args.since}'")
+
     if args.sql:
         db.sql(args.sql).show(max_rows=100)
         return 0
 
-    db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
+    if args.share:
+        from clanker_analytics.share import generate, copy_and_open
+        path = generate(db, args.since)
+        total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        copy_and_open(path, total_cost, args.since)
+        return 0
 
-    print()
-    for tool, projects, total in db.sql("""
-        SELECT tool, count(DISTINCT project)::INT, sum(total_tokens)::BIGINT
-        FROM tokens GROUP BY tool
-    """).fetchall():
-        print(f"{tool}: {fmt(total)} across {projects} projects")
+    db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
 
 
 if __name__ == "__main__":
