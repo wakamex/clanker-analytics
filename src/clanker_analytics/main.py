@@ -2,6 +2,7 @@
 """AI coding tool token analytics powered by DuckDB."""
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -9,13 +10,59 @@ from pathlib import Path
 
 import duckdb
 
-HOME = os.path.expanduser("~")
+HOME = os.path.expanduser("~").replace("\\", "/")
+
+# Plan detection from cached usage-limits.json files
+PLAN_COSTS = {
+    # Claude
+    "pro": 20, "max_5x": 100, "max_20x": 200,
+    # Codex / ChatGPT (handled separately — "pro" means $200 for Codex)
+    "plus": 20,
+    # Gemini (normalized from g1-pro-tier, g1-ultra-tier)
+    "pro": 20, "ultra": 250, "free": 0,
+}
+
+def detect_plans() -> dict[str, tuple[str, int]]:
+    """Detect subscription plans by shelling out to usage tools. Returns {tool: (plan_name, monthly_cost)}."""
+    import subprocess
+    plans = {}
+
+    cmds = {
+        "Claude Code": "ccusage json",
+        "Codex": "codex-cli-usage json",
+        "Gemini": "gemini-cli-usage json",
+    }
+    for tool, cmd in cmds.items():
+        try:
+            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                continue
+            data = json.loads(result.stdout)
+            plan = (data.get("plan")
+                    or data.get("account_quota", {}).get("user_tier")
+                    or "unknown")
+            # Normalize display names
+            plan = (plan.replace("default_claude_", "")
+                        .replace("g1-pro-tier", "pro")
+                        .replace("g1-ultra-tier", "ultra"))
+            if tool == "Codex" and plan == "pro":
+                cost = 200
+            elif tool == "Codex" and plan == "plus":
+                cost = 20
+            else:
+                cost = PLAN_COSTS.get(plan, 0)
+            plans[tool] = (plan, cost)
+        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+
+    return plans
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 
 SOURCE_DIRS = [
     Path(HOME) / ".claude" / "projects",
     Path(HOME) / ".codex" / "sessions",
+    Path(HOME) / ".gemini" / "tmp",
 ]
 
 CLAUDE_SQL = f"""
@@ -42,7 +89,7 @@ WHERE type = 'assistant'
   AND message.model != '<synthetic>'
   AND message.usage IS NOT NULL
   AND timestamp IS NOT NULL
-  AND NOT contains(filename, '/subagents/')
+  AND NOT contains(replace(filename, '\\', '/'), '/subagents/')
 """
 
 CODEX_SQL = f"""
@@ -95,9 +142,37 @@ WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
       END > 0
 """
 
+GEMINI_SQL = f"""
+WITH raw AS (
+    SELECT filename,
+           regexp_extract(filename, 'tmp/([^/]+)/', 1) as project_raw,
+           cast(sessionId as VARCHAR) as session,
+           unnest(messages) as m
+    FROM read_json('{HOME}/.gemini/tmp/*/chats/*.json',
+        format='auto', filename=true, union_by_name=true,
+        ignore_errors=true, maximum_depth=5, maximum_object_size=67108864)
+)
+SELECT
+    'Gemini' as tool,
+    CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
+         THEN project_raw[:8] ELSE project_raw END as project,
+    session,
+    m.timestamp[:10] as date,
+    cast(m.model as VARCHAR) as model,
+    coalesce(m.tokens.input::INT, 0) as input_tokens,
+    coalesce(m.tokens.output::INT, 0) as output_tokens,
+    0 as cache_write_tokens,
+    coalesce(m.tokens.cached::INT, 0) as cache_read_tokens,
+    coalesce(m.tokens.total::INT, 0) as total_tokens
+FROM raw
+WHERE m.tokens IS NOT NULL
+  AND m.tokens.total > 0
+"""
+
 SOURCES = {
     "claude": ("Claude Code", CLAUDE_SQL),
     "codex": ("Codex", CODEX_SQL),
+    "gemini": ("Gemini", GEMINI_SQL),
 }
 
 COST_PER_ROW = """
@@ -105,6 +180,9 @@ COST_PER_ROW = """
         WHEN tool = 'Codex' THEN
             (input_tokens * 1.25 + cache_write_tokens * 1.25
              + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
+        WHEN tool = 'Gemini' THEN
+            (input_tokens * 1.25 + cache_read_tokens * 0.315
+             + output_tokens * 10.0) / 1e6
         ELSE CASE
             WHEN model LIKE '%opus%' THEN
                 (input_tokens * 5.0 + cache_write_tokens * 6.25
@@ -241,7 +319,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
     if not refresh and CACHE_FILE.exists():
         cache_mt = CACHE_FILE.stat().st_mtime
         if sources_mtime() <= cache_mt:
-            db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE}'")
+            db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
             print("  (cached)", file=sys.stderr)
             return
 
@@ -255,7 +333,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
     row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
     if row_count > 0:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        db.execute(f"COPY tokens TO '{CACHE_FILE}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
         print(f"  cached {row_count} rows → {CACHE_FILE}", file=sys.stderr)
 
 
@@ -271,8 +349,10 @@ def main():
                         help="Run custom SQL against the 'tokens' table")
     parser.add_argument("--since", type=str,
                         help="Only include data since date (e.g. 24h, 7d, 2026-03-01)")
+    parser.add_argument("--chart", action="store_true",
+                        help="Generate PNG chart")
     parser.add_argument("--share", action="store_true",
-                        help="Generate shareable PNG card and copy to clipboard")
+                        help="Generate PNG chart, copy to clipboard, and open X")
     parser.add_argument("--refresh", action="store_true",
                         help="Force rebuild of cache from source files")
     args = parser.parse_args()
@@ -306,11 +386,16 @@ def main():
         db.sql(args.sql).show(max_rows=100)
         return 0
 
-    if args.share:
+    if args.chart or args.share:
         from clanker_analytics.share import generate, copy_and_open
-        path = generate(db, args.since)
-        total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        copy_and_open(path, total_cost, args.since)
+        plans = detect_plans()
+        path = generate(db, args.since, plans)
+        if args.share:
+            total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+            sub_cost = sum(c for _, c in plans.values())
+            copy_and_open(path, total_cost, args.since, sub_cost)
+        else:
+            print(f"  Card saved to {path}")
         return 0
 
     db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)

@@ -3,18 +3,42 @@ revision = 3
 requires-python = ">=3.13"
 
 [[package]]
+name = "ccusage"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b1/f0/6c5e4407c3f9f2311da897f07447a2d6b5278ba9defde7428f78c0f6432c/ccusage-0.1.1.tar.gz", hash = "sha256:c1b7f1c2452a64906b17cba978a05e833d42e3011307acf0ceb28daf0a9fe147", size = 6084, upload-time = "2026-03-07T22:11:45.49Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/ff/8ecbf1af946d66ea6f45f4eed1305114a5ecc5564ae9e791ee3674f2896f/ccusage-0.1.1-py3-none-any.whl", hash = "sha256:bc9c33dfe199483ea27c0d2afb10be5b46dce5708070fb6c58bfce057af5fb85", size = 6758, upload-time = "2026-03-07T22:11:44.089Z" },
+]
+
+[[package]]
 name = "clanker-analytics"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ccusage" },
+    { name = "codex-cli-usage" },
     { name = "duckdb" },
+    { name = "gemini-cli-usage" },
     { name = "matplotlib" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "ccusage" },
+    { name = "codex-cli-usage" },
     { name = "duckdb", specifier = ">=1.5.0" },
+    { name = "gemini-cli-usage" },
     { name = "matplotlib", specifier = ">=3.9" },
+]
+
+[[package]]
+name = "codex-cli-usage"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/42/73/e4639e7367a31b64719052c8d8140b5f1c680600776fdff94fad8cf4a121/codex_cli_usage-0.1.0.tar.gz", hash = "sha256:d3757d8a3e8602501e8df996e10197f25a63843b44a8551bb223d5383543ad7c", size = 5384, upload-time = "2026-03-07T22:26:40.499Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/ab/4836765e951005c9a5a83cebfb83e37f0e42bf1b64573bec5429c0a838ec/codex_cli_usage-0.1.0-py3-none-any.whl", hash = "sha256:0cd4227e662e47ffc31876657ede2d352d9b756ce48f75351f78d8448e199963", size = 6134, upload-time = "2026-03-07T22:26:39.379Z" },
 ]
 
 [[package]]
@@ -134,6 +158,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/90/aa/dfbbe24c6a6afc5c203d90cc0343e24bcbb09e76d67c4d6eef8c2558d7ba/fonttools-4.62.1-cp314-cp314t-win32.whl", hash = "sha256:b820fcb92d4655513d8402d5b219f94481c4443d825b4372c75a2072aa4b357a", size = 2348021, upload-time = "2026-03-13T13:54:16.98Z" },
     { url = "https://files.pythonhosted.org/packages/13/6f/ae9c4e4dd417948407b680855c2c7790efb52add6009aaecff1e3bc50e8e/fonttools-4.62.1-cp314-cp314t-win_amd64.whl", hash = "sha256:59b372b4f0e113d3746b88985f1c796e7bf830dd54b28374cd85c2b8acd7583e", size = 2414147, upload-time = "2026-03-13T13:54:19.416Z" },
     { url = "https://files.pythonhosted.org/packages/fd/ba/56147c165442cc5ba7e82ecf301c9a68353cede498185869e6e02b4c264f/fonttools-4.62.1-py3-none-any.whl", hash = "sha256:7487782e2113861f4ddcc07c3436450659e3caa5e470b27dc2177cade2d8e7fd", size = 1152647, upload-time = "2026-03-13T13:54:22.735Z" },
+]
+
+[[package]]
+name = "gemini-cli-usage"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/33/131d9ed55a5719d1f77a2d9b72f8f440c422d5f90a89f2da0b06a8324e2e/gemini_cli_usage-0.1.0.tar.gz", hash = "sha256:0495907ab500f255a5ef9fc660e6d7d788021575603c4fefa5fcf0013aea9db5", size = 9008, upload-time = "2026-03-14T18:43:55.111Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/64/88a32bed4865f42cbd3ec55c8ffdb83afb34aec19f237a13ac659b3b1d80/gemini_cli_usage-0.1.0-py3-none-any.whl", hash = "sha256:3d1af83efef82a2a5df968b74fa322d51b44044b71512b0d471d51aa208dca2e", size = 7958, upload-time = "2026-03-14T18:43:53.897Z" },
 ]
 
 [[package]]
