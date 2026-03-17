@@ -204,7 +204,10 @@ COST_PER_ROW = """
             (input_tokens * 1.25 + cache_write_tokens * 1.25
              + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
         WHEN tool = 'Gemini' THEN CASE
-            WHEN model LIKE '%2.5%' THEN
+            WHEN model LIKE '%flash%' THEN
+                (input_tokens * 0.15 + cache_read_tokens * 0.0375
+                 + output_tokens * 0.60) / 1e6
+            WHEN model LIKE '%2.5%pro%' THEN
                 (input_tokens * 1.25 + cache_read_tokens * 0.125
                  + output_tokens * 10.0) / 1e6
             ELSE
