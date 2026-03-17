@@ -13,7 +13,7 @@ import numpy as np
 
 # Website palette
 BG = "#040506"
-TEXT = "#b6aa99"
+TEXT = "#d4c8b8"
 ACCENT = "#ff9800"
 DIM = "#6b5d4f"
 LIGHT = "#e0e0e0"
@@ -157,7 +157,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
             ax.bar(x, vals, bar_width, bottom=bottoms, color=color, alpha=0.8)
             bottoms += vals
         ax.set_xticks(x)
-        ax.set_xticklabels(projects, rotation=0, ha="center", **_font(9))
+        ax.set_xticklabels(projects, rotation=0, ha="center", **_font(11))
     elif not use_bars and dates:
         x = np.arange(len(dates))
         bottoms = np.zeros(len(dates))
@@ -172,13 +172,13 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         if len(dates) <= 14:
             ax.set_xticks(x)
             ax.set_xticklabels([_short_date(d) for d in dates],
-                               rotation=0, ha="center", **_font(9))
+                               rotation=0, ha="center", **_font(11))
         else:
             step = max(1, len(dates) // 10)
             ticks = list(range(0, len(dates), step))
             ax.set_xticks(ticks)
             ax.set_xticklabels([_short_date(dates[i]) for i in ticks],
-                               rotation=0, ha="center", **_font(9))
+                               rotation=0, ha="center", **_font(11))
 
     # Y axis as dollars
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(
@@ -186,7 +186,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
 
     ax.tick_params(colors=TEXT, which="both")
     for label in ax.get_yticklabels():
-        label.set_fontproperties(fm.FontProperties(fname=FONT_PATH, size=9))
+        label.set_fontproperties(fm.FontProperties(fname=FONT_PATH, size=11))
         label.set_color(TEXT)
     for label in ax.get_xticklabels():
         label.set_color(TEXT)
