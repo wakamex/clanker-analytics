@@ -24,24 +24,7 @@ TOOL_COLORS = {
     "Gemini": "#4285f4",
 }
 
-COST_SQL = """
-    CASE
-        WHEN tool = 'Codex' THEN
-            (input_tokens * 1.25 + cache_write_tokens * 1.25
-             + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
-        ELSE CASE
-            WHEN model LIKE '%opus%' THEN
-                (input_tokens * 5.0 + cache_write_tokens * 6.25
-                 + cache_read_tokens * 0.50 + output_tokens * 25.0) / 1e6
-            WHEN model LIKE '%haiku%' THEN
-                (input_tokens * 1.0 + cache_write_tokens * 1.25
-                 + cache_read_tokens * 0.10 + output_tokens * 5.0) / 1e6
-            ELSE
-                (input_tokens * 3.0 + cache_write_tokens * 3.75
-                 + cache_read_tokens * 0.30 + output_tokens * 15.0) / 1e6
-        END
-    END
-"""
+from clanker_analytics.main import COST_PER_ROW as COST_SQL
 
 FONT_PATH = Path(__file__).parent / "D2CodingLigature.ttf"
 OUTPUT = Path.home() / ".cache" / "clanker-analytics" / "share.png"

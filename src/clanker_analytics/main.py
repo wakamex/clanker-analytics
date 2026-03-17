@@ -203,9 +203,14 @@ COST_PER_ROW = """
         WHEN tool = 'Codex' THEN
             (input_tokens * 1.25 + cache_write_tokens * 1.25
              + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
-        WHEN tool = 'Gemini' THEN
-            (input_tokens * 1.25 + cache_read_tokens * 0.315
-             + output_tokens * 10.0) / 1e6
+        WHEN tool = 'Gemini' THEN CASE
+            WHEN model LIKE '%2.5%' THEN
+                (input_tokens * 1.25 + cache_read_tokens * 0.125
+                 + output_tokens * 10.0) / 1e6
+            ELSE
+                (input_tokens * 2.0 + cache_read_tokens * 0.50
+                 + output_tokens * 12.0) / 1e6
+        END
         ELSE CASE
             WHEN model LIKE '%opus%' THEN
                 (input_tokens * 5.0 + cache_write_tokens * 6.25

@@ -53,7 +53,8 @@ The `api_cost` and `billable` columns use published API pricing. Cache reads are
 | Claude Sonnet | $3/MTok | $0.30/MTok | $3.75/MTok | $15/MTok |
 | Claude Opus | $5/MTok | $0.50/MTok | $6.25/MTok | $25/MTok |
 | GPT-5 | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
-| Gemini 2.5 Pro | $1.25/MTok | $0.315/MTok | (auto) | $10/MTok |
+| Gemini 2.5 Pro | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
+| Gemini 3.1 Pro | $2/MTok | $0.50/MTok | (auto) | $12/MTok |
 
 Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [OpenAI pricing](https://openai.com/api/pricing/), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing)
 
