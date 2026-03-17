@@ -145,7 +145,7 @@ WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
 GEMINI_SQL = f"""
 WITH raw AS (
     SELECT filename,
-           regexp_extract(filename, 'tmp/([^/]+)/', 1) as project_raw,
+           regexp_extract(replace(filename, '\\', '/'), 'tmp/([^/]+)/', 1) as project_raw,
            cast(sessionId as VARCHAR) as session,
            unnest(messages) as m
     FROM read_json('{HOME}/.gemini/tmp/*/chats/*.json',
