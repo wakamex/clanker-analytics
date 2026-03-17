@@ -3,6 +3,7 @@
 
 import argparse
 import cProfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,11 +40,12 @@ def detect_plans() -> dict[str, tuple[str, int]]:
         "Codex": [sys.executable, "-m", "codex_cli_usage", "json"],
         "Gemini": [sys.executable, "-m", "gemini_cli_usage", "json"],
     }
-    for tool, cmd in cmds.items():
+
+    def fetch_plan(tool: str, cmd: list[str]) -> tuple[str, tuple[str, int] | None]:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
-                continue
+                return tool, None
             data = json.loads(result.stdout)
             plan = (data.get("plan")
                     or data.get("account_quota", {}).get("user_tier")
@@ -58,9 +60,16 @@ def detect_plans() -> dict[str, tuple[str, int]]:
                 cost = 20
             else:
                 cost = PLAN_COSTS.get(plan, 0)
-            plans[tool] = (plan, cost)
+            return tool, (plan, cost)
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
-            continue
+            return tool, None
+
+    with ThreadPoolExecutor(max_workers=len(cmds)) as executor:
+        futures = [executor.submit(fetch_plan, tool, cmd) for tool, cmd in cmds.items()]
+        for future in as_completed(futures):
+            tool, result = future.result()
+            if result is not None:
+                plans[tool] = result
 
     return plans
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
