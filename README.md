@@ -4,6 +4,8 @@ Token usage analytics for AI coding tools. Reads local session logs and shows pe
 
 Supports **Claude Code**, **Codex**, and **Gemini CLI**.
 
+![clanker-analytics chart](share.png)
+
 ## Install
 
 ```
