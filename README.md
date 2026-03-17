@@ -85,3 +85,5 @@ Brand colors used in `--chart` / `--share` output:
 ## Requirements
 
 Python 3.13+, DuckDB 1.5+, matplotlib 3.9+.
+
+Tested on Linux, macOS, and Windows (including WSL data auto-discovery).
