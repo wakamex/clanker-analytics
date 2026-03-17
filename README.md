@@ -5,6 +5,7 @@ Token usage analytics for AI coding tools. Reads local session logs and shows pe
 Supports **Claude Code**, **Codex**, and **Gemini CLI**.
 
 ![clanker-analytics chart](share.png)
+![clanker-analytics table](table.png)
 
 ## Install
 
@@ -21,25 +22,15 @@ uvx clanker-analytics
 ## Usage
 
 ```
-clanker-analytics                        # ranked by project (default)
+clanker-analytics                        # 7-day chart (default)
 clanker-analytics --since 24h            # last 24 hours (also: 7d, 2w, 2026-03-01)
-clanker-analytics --by date              # daily totals
-clanker-analytics --by model             # per-model breakdown
-clanker-analytics --by session           # per-session breakdown
-clanker-analytics --tool claude          # Claude Code only
-clanker-analytics --tool codex           # Codex only
-clanker-analytics --tool gemini          # Gemini CLI only
-clanker-analytics --chart                # generate PNG chart
-clanker-analytics --share                # generate chart + open X compose
+clanker-analytics --share                # chart + copy to clipboard + open X
+clanker-analytics --table                # tabular view
+clanker-analytics --table --by date      # table grouped by date (also: model, session)
+clanker-analytics --tool claude          # Claude Code only (also: codex, gemini)
 clanker-analytics --refresh              # force cache rebuild
 clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
 ```
-
-## Table view
-
-Use `--table` for a tabular breakdown:
-
-![clanker-analytics table](table.png)
 
 ## How it works
 
