@@ -323,12 +323,19 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
             print("  (cached)", file=sys.stderr)
             return
 
-    # Rebuild from source
+    # Rebuild from source, skipping tools with no data
     parts = []
     for name, sql in SOURCES.values():
-        parts.append(sql)
+        try:
+            db.sql(f"SELECT 1 FROM ({sql}) LIMIT 0")
+            parts.append(sql)
+        except duckdb.IOException:
+            continue
 
-    db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({p})" for p in parts))
+    if parts:
+        db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({p})" for p in parts))
+    else:
+        db.execute("CREATE TABLE tokens (tool VARCHAR, project VARCHAR, session VARCHAR, date VARCHAR, model VARCHAR, input_tokens INT, output_tokens INT, cache_write_tokens INT, cache_read_tokens INT, total_tokens BIGINT)")
 
     row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
     if row_count > 0:
@@ -337,8 +344,17 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
         print(f"  cached {row_count} rows → {CACHE_FILE}", file=sys.stderr)
 
 
+def _get_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("clanker-analytics")
+    except Exception:
+        return "dev"
+
+
 def main():
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
     parser.add_argument("--by", choices=list(QUERIES), default="project",
                         help="Group results by (default: project)")
     parser.add_argument("--tool", choices=[*SOURCES, "all"], default="all",
