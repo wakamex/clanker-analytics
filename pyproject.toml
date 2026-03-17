@@ -1,6 +1,6 @@
 [project]
 name = "clanker-analytics"
-version = "0.2.0"
+version = "0.2.1"
 description = "AI coding tool token analytics powered by DuckDB"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -11,6 +11,10 @@ dependencies = [
     "codex-cli-usage>=0.1.5",
     "gemini-cli-usage>=0.1.5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/wakamex/clanker-analytics"
+Source = "https://github.com/wakamex/clanker-analytics"
 
 [project.scripts]
 clanker-analytics = "clanker_analytics.main:main"
