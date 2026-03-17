@@ -403,8 +403,10 @@ def main():
                         help="Run custom SQL against the 'tokens' table")
     parser.add_argument("--since", type=str,
                         help="Only include data since date (e.g. 24h, 7d, 2026-03-01)")
-    parser.add_argument("--chart", action="store_true",
-                        help="Generate PNG chart")
+    parser.add_argument("--chart", action="store_true", default=True,
+                        help="Generate PNG chart (default)")
+    parser.add_argument("--table", action="store_true",
+                        help="Show table instead of chart")
     parser.add_argument("--share", action="store_true",
                         help="Generate PNG chart, copy to clipboard, and open X")
     cost_group = parser.add_mutually_exclusive_group()
@@ -445,22 +447,27 @@ def main():
         db.sql(args.sql).show(max_rows=100)
         return 0
 
-    if args.chart or args.share:
-        from clanker_analytics.share import generate, copy_and_open
-        plans = detect_plans()
-        cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
-        path = generate(db, args.since, plans, cost_mode)
-        if not path:
-            pass
-        elif args.share:
-            total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-            sub_cost = sum(c for _, c in plans.values())
-            copy_and_open(path, total_cost or 0, args.since, sub_cost, cost_mode)
-        else:
-            print(f"  Card saved to {path}")
+    if args.table:
+        db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
         return 0
 
-    db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
+    # Default: chart mode
+    from clanker_analytics.share import generate, copy_and_open
+    since = args.since or "7d"
+    if not args.since:
+        # Apply default --since 7d
+        db.execute("DELETE FROM tokens WHERE date < (current_date - INTERVAL 7 DAY)::DATE::VARCHAR")
+    plans = detect_plans()
+    cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
+    path = generate(db, since, plans, cost_mode)
+    if not path:
+        pass
+    elif args.share:
+        total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        sub_cost = sum(c for _, c in plans.values())
+        copy_and_open(path, total_cost or 0, since, sub_cost, cost_mode)
+    else:
+        print(f"  Card saved to {path}")
 
 
 if __name__ == "__main__":

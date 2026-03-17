@@ -1,6 +1,6 @@
 [project]
 name = "clanker-analytics"
-version = "0.1.2"
+version = "0.2.0"
 description = "AI coding tool token analytics powered by DuckDB"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -8,7 +8,7 @@ dependencies = [
     "duckdb>=1.5.0",
     "matplotlib>=3.9",
     "ccusage>=0.1.5",
-    "codex-cli-usage>=0.1.4",
+    "codex-cli-usage>=0.1.5",
     "gemini-cli-usage>=0.1.5",
 ]
 
@@ -23,4 +23,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-artifacts = ["src/clanker_analytics/*.ttf"]
+artifacts = ["src/clanker_analytics/*.ttf", "src/clanker_analytics/emoji/*.png"]

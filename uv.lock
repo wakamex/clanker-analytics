@@ -4,11 +4,11 @@ requires-python = ">=3.13"
 
 [[package]]
 name = "ccusage"
-version = "0.1.1"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b1/f0/6c5e4407c3f9f2311da897f07447a2d6b5278ba9defde7428f78c0f6432c/ccusage-0.1.1.tar.gz", hash = "sha256:c1b7f1c2452a64906b17cba978a05e833d42e3011307acf0ceb28daf0a9fe147", size = 6084, upload-time = "2026-03-07T22:11:45.49Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/47/43581792bde8d349b6f30776b1df901c9e1fa226f9b2cfa87f7986d61531/ccusage-0.1.5.tar.gz", hash = "sha256:dd3135586185d259eec6395be887236e440808473a01d53a1e84b64b3fd9caab", size = 6684, upload-time = "2026-03-17T05:20:28.964Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/ff/8ecbf1af946d66ea6f45f4eed1305114a5ecc5564ae9e791ee3674f2896f/ccusage-0.1.1-py3-none-any.whl", hash = "sha256:bc9c33dfe199483ea27c0d2afb10be5b46dce5708070fb6c58bfce057af5fb85", size = 6758, upload-time = "2026-03-07T22:11:44.089Z" },
+    { url = "https://files.pythonhosted.org/packages/db/9f/e86fc4f17ff360b8b70d5e9cf398bcf842b3a489df858064ceaac36a670a/ccusage-0.1.5-py3-none-any.whl", hash = "sha256:a8c3a8bf649611b317f9d4dba1def3779af68cc6ea330ecd68ba0317441b96c9", size = 7461, upload-time = "2026-03-17T05:20:27.686Z" },
 ]
 
 [[package]]
@@ -30,10 +30,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ccusage" },
-    { name = "codex-cli-usage" },
+    { name = "ccusage", specifier = ">=0.1.5" },
+    { name = "codex-cli-usage", specifier = ">=0.1.5" },
     { name = "duckdb", specifier = ">=1.5.0" },
-    { name = "gemini-cli-usage" },
+    { name = "gemini-cli-usage", specifier = ">=0.1.5" },
     { name = "matplotlib", specifier = ">=3.9" },
 ]
 
@@ -42,11 +42,11 @@ dev = [{ name = "pytest" }]
 
 [[package]]
 name = "codex-cli-usage"
-version = "0.1.0"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/42/73/e4639e7367a31b64719052c8d8140b5f1c680600776fdff94fad8cf4a121/codex_cli_usage-0.1.0.tar.gz", hash = "sha256:d3757d8a3e8602501e8df996e10197f25a63843b44a8551bb223d5383543ad7c", size = 5384, upload-time = "2026-03-07T22:26:40.499Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f1/15/633f079d84e01a1a2fdd1dec76f5b96b54835c1226d67da138d4f6bb0169/codex_cli_usage-0.1.5.tar.gz", hash = "sha256:55273bc102de92722ece9f8380a45fe6e69b35eb813010fcec8d2eebc9f558be", size = 5930, upload-time = "2026-03-17T05:43:07.175Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/ab/4836765e951005c9a5a83cebfb83e37f0e42bf1b64573bec5429c0a838ec/codex_cli_usage-0.1.0-py3-none-any.whl", hash = "sha256:0cd4227e662e47ffc31876657ede2d352d9b756ce48f75351f78d8448e199963", size = 6134, upload-time = "2026-03-07T22:26:39.379Z" },
+    { url = "https://files.pythonhosted.org/packages/94/3b/9ba7d4279bbc0e5f8450fb907bbaabfb037e36b8347af7a6caf80d483177/codex_cli_usage-0.1.5-py3-none-any.whl", hash = "sha256:5a01055590ea86c471d6f6f5c8f36fd120a7a47ecb3105d51768c01f18a37eed", size = 6840, upload-time = "2026-03-17T05:43:05.785Z" },
 ]
 
 [[package]]
@@ -179,11 +179,11 @@ wheels = [
 
 [[package]]
 name = "gemini-cli-usage"
-version = "0.1.0"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/57/33/131d9ed55a5719d1f77a2d9b72f8f440c422d5f90a89f2da0b06a8324e2e/gemini_cli_usage-0.1.0.tar.gz", hash = "sha256:0495907ab500f255a5ef9fc660e6d7d788021575603c4fefa5fcf0013aea9db5", size = 9008, upload-time = "2026-03-14T18:43:55.111Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/c7/065bd35405c1584a4b1a4efe9ff78bb8e96489fb219ddcae98038c19d0b3/gemini_cli_usage-0.1.5.tar.gz", hash = "sha256:cbdddf6f8134f8582993f57df3bde270de98f50e721ad5f3032703a72e2281af", size = 9961, upload-time = "2026-03-17T05:20:33.276Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f4/64/88a32bed4865f42cbd3ec55c8ffdb83afb34aec19f237a13ac659b3b1d80/gemini_cli_usage-0.1.0-py3-none-any.whl", hash = "sha256:3d1af83efef82a2a5df968b74fa322d51b44044b71512b0d471d51aa208dca2e", size = 7958, upload-time = "2026-03-14T18:43:53.897Z" },
+    { url = "https://files.pythonhosted.org/packages/10/9f/8b3540317734bb31832cf536b25022649480c76771adf2c027dbdb75269e/gemini_cli_usage-0.1.5-py3-none-any.whl", hash = "sha256:a7c4500b0e78999f0e9c3ca65548c07411dceb9b0c9e9eb5fe3e3fbb73cb69d7", size = 9101, upload-time = "2026-03-17T05:20:32.335Z" },
 ]
 
 [[package]]

@@ -220,23 +220,73 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
             sub_label = f" for {_fmt_cost(prorated)}"
     else:
         sub_label = ""
-    # Giant dollar amount
-    fig.text(0.05, 0.97, _fmt_cost(total_cost), color=LIGHT, **_font(42, bold=True),
-             ha="left", va="top")
+    # Environmental impact
+    kwh = total_tokens * 0.6 / 1e6
+    liters = total_tokens * 1.0 / 1e6
+    co2_kg = total_tokens * 90 / 1e9
+
+    env_parts = []
+    if kwh >= 1:
+        env_parts.append(f"{kwh:,.0f}kWh")
+    elif kwh >= 0.01:
+        env_parts.append(f"{kwh:.1f}kWh")
+    if liters >= 1000:
+        env_parts.append(f"{liters / 1000:,.1f}m\u00b3")
+    elif liters >= 1:
+        env_parts.append(f"{liters:,.0f}L")
+    if co2_kg >= 1:
+        env_parts.append(f"{co2_kg:,.0f}kg")
+    elif co2_kg >= 0.01:
+        env_parts.append(f"{co2_kg:.1f}kg")
+
+    # Giant headline: dollar amount + eco stats on same line
+    renderer = fig.canvas.get_renderer()
+    fig_width = fig.get_window_extent(renderer=renderer).width
+
+    cost_txt = fig.text(0.05, 0.97, _fmt_cost(total_cost), color=LIGHT,
+                        **_font(42, bold=True), ha="left", va="top")
+    fig.canvas.draw()
+    x_after_cost = 0.05 + cost_txt.get_window_extent(renderer=renderer).width / fig_width + 0.02
+    if env_parts:
+        from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+        from matplotlib.image import imread as mpl_imread
+        emoji_dir = Path(__file__).parent / "emoji"
+        emoji_map = {"kWh": "zap.png", "m\u00b3": "sweat_droplets.png", "L": "sweat_droplets.png", "kg": "factory.png"}
+
+        ex = x_after_cost
+        for part in env_parts:
+            # Find which emoji to use
+            emoji_file = None
+            for suffix, fname in emoji_map.items():
+                if suffix in part:
+                    emoji_file = emoji_dir / fname
+                    break
+
+            if emoji_file and emoji_file.exists():
+                img = mpl_imread(str(emoji_file))
+                im = OffsetImage(img, zoom=0.45)
+                ex += 0.01  # space before emoji
+                ab = AnnotationBbox(im, (ex, 0.955), xycoords='figure fraction',
+                                    frameon=False, box_alignment=(0, 0.5))
+                fig.add_artist(ab)
+                ex += 0.03
+
+            txt = fig.text(ex, 0.97, part, color=TEXT,
+                           **_font(42, bold=True), ha="left", va="top")
+            fig.canvas.draw()
+            ex += txt.get_window_extent(renderer=renderer).width / fig_width + 0.015
 
     # Second line: context
     multiplier = ""
     if sub_cost and total_cost >= sub_cost:
         ratio = total_cost / (sub_cost * days / 30) if days else 0
         if ratio >= 2:
-            multiplier = f"  ({ratio:.0f}x)"
+            multiplier = f" ({ratio:.0f}x)"
     context = f"of AI compute{f' {period}' if period else ''}{sub_label}{multiplier}"
     fig.text(0.05, 0.89, context, color=TEXT, **_font(14),
              ha="left", va="top")
 
     # Third line: colored tool names as legend
-    renderer = fig.canvas.get_renderer()
-    fig_width = fig.get_window_extent(renderer=renderer).width
     x_pos = 0.05
     for i, (t, c) in enumerate(tool_costs):
         if i > 0:
@@ -259,31 +309,12 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     fig.text(x_pos, 0.84, f"  |  {n_projects} projects", color=TEXT, **_font(12),
              ha="left", va="top")
 
-    # Top-right: environmental impact + command
-    kwh = total_tokens * 0.6 / 1e6
-    liters = total_tokens * 1.0 / 1e6
-    co2_kg = total_tokens * 90 / 1e9
-
-    env_parts = []
-    if kwh >= 1:
-        env_parts.append(f"{kwh:,.0f} kWh")
-    elif kwh >= 0.01:
-        env_parts.append(f"{kwh:.1f} kWh")
-    if liters >= 1000:
-        env_parts.append(f"{liters / 1000:,.1f}m³ water")
-    elif liters >= 1:
-        env_parts.append(f"{liters:,.0f}L water")
-    if co2_kg >= 1:
-        env_parts.append(f"{co2_kg:,.0f}kg CO₂")
-    elif co2_kg >= 0.01:
-        env_parts.append(f"{co2_kg:.1f}kg CO₂")
-
-    if env_parts:
-        fig.text(0.95, 0.97, "  |  ".join(env_parts), color=TEXT,
-                 **_font(11), ha="right", va="top")
-
-    since_arg = f" --since {since_label}" if since_label else ""
-    fig.text(0.95, 0.92, f"uvx clanker-analytics{since_arg} --chart", color=DIM,
+    # Bottom-right: command (show full command only if non-default args used)
+    if since_label and since_label != "7d":
+        cmd = f"uvx clanker-analytics --since {since_label}"
+    else:
+        cmd = "uvx clanker-analytics"
+    fig.text(0.95, 0.84, cmd, color=DIM,
              **_font(11), ha="right", va="top")
 
     plt.tight_layout(rect=[0, 0, 1, 0.78])
