@@ -68,8 +68,8 @@ SOURCE_DIRS = [
 CLAUDE_SQL = f"""
 SELECT
     'Claude Code' as tool,
-    coalesce(nullif(split_part(cwd, '/', -1), ''),
-             regexp_extract(filename, 'projects/([^/]+)/', 1)) as project,
+    coalesce(nullif(split_part(replace(cwd, '\\', '/'), '/', -1), ''),
+             regexp_extract(replace(filename, '\\', '/'), 'projects/([^/]+)/', 1)) as project,
     cast(sessionId as VARCHAR) as session,
     timestamp[:10] as date,
     cast(message.model as VARCHAR) as model,
