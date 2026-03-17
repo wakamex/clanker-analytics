@@ -531,14 +531,15 @@ def _build_source_sql(grouped_files: dict[str, list[str]]) -> list[str]:
 
 
 def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
-                 timer: DebugTimer) -> int:
+                 timer: DebugTimer, action: str, detail: str = "") -> int:
     with timer.span("count token rows"):
         row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with timer.span("write parquet cache", CACHE_FILE.as_posix()):
         db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     _write_cache_meta(files)
-    print(f"  cached {row_count} rows → {CACHE_FILE}", file=sys.stderr)
+    detail_part = f"{detail}; " if detail else ""
+    print(f"  {action}: {detail_part}{row_count} rows → {CACHE_FILE}", file=sys.stderr)
     return row_count
 
 
@@ -606,7 +607,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     if refresh:
         timer.note("cache refresh forced by --refresh")
         _rebuild_tokens(db, files, timer)
-        _write_cache(db, files, timer)
+        _write_cache(db, files, timer, "rebuilt cache", "--refresh")
         return
 
     meta = _load_cache_meta()
@@ -635,7 +636,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             timer.note("cache schema missing source_file; rebuilding")
             db.execute("DROP TABLE tokens")
             _rebuild_tokens(db, files, timer)
-            _write_cache(db, files, timer)
+            _write_cache(db, files, timer, "rebuilt cache", "schema migration")
             return
 
         timer.note(
@@ -643,7 +644,13 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         )
         _delete_source_files(db, changed + deleted, timer)
         _append_source_files(db, {path: files[path] for path in changed}, timer)
-        _write_cache(db, files, timer)
+        _write_cache(
+            db,
+            files,
+            timer,
+            "updated cache",
+            f"{len(changed)} changed, {len(deleted)} deleted",
+        )
         return
 
     if CACHE_FILE.exists():
@@ -658,7 +665,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         timer.note(f"cache missing: {CACHE_FILE}")
 
     _rebuild_tokens(db, files, timer)
-    _write_cache(db, files, timer)
+    _write_cache(db, files, timer, "rebuilt cache")
 
 
 def _get_version() -> str:
