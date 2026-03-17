@@ -7,9 +7,9 @@ requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.5.0",
     "matplotlib>=3.9",
-    "ccusage>=0.1.4",
-    "codex-cli-usage>=0.1.3",
-    "gemini-cli-usage>=0.1.3",
+    "ccusage>=0.1.5",
+    "codex-cli-usage>=0.1.4",
+    "gemini-cli-usage>=0.1.5",
 ]
 
 [project.scripts]

@@ -28,13 +28,13 @@ def detect_plans() -> dict[str, tuple[str, int]]:
     plans = {}
 
     cmds = {
-        "Claude Code": "ccusage json",
-        "Codex": "codex-cli-usage json",
-        "Gemini": "gemini-cli-usage json",
+        "Claude Code": [sys.executable, "-m", "ccusage", "json"],
+        "Codex": [sys.executable, "-m", "codex_cli_usage", "json"],
+        "Gemini": [sys.executable, "-m", "gemini_cli_usage", "json"],
     }
     for tool, cmd in cmds.items():
         try:
-            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
                 continue
             data = json.loads(result.stdout)
