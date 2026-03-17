@@ -204,9 +204,9 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     else:
         sub_label = ""
     # Environmental impact
-    kwh = total_tokens * 0.6 / 1e6
-    liters = total_tokens * 1.0 / 1e6
-    co2_kg = total_tokens * 90 / 1e9
+    kwh = billable_tokens * 0.6 / 1e6
+    liters = billable_tokens * 1.0 / 1e6
+    co2_kg = billable_tokens * 90 / 1e9
 
     env_parts = []
     if kwh >= 1:
