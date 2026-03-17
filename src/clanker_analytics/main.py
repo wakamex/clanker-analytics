@@ -68,8 +68,8 @@ SOURCE_DIRS = [
 CLAUDE_SQL = f"""
 SELECT
     'Claude Code' as tool,
-    coalesce(nullif(split_part(replace(cwd, '\\', '/'), '/', -1), ''),
-             regexp_extract(replace(filename, '\\', '/'), 'projects/([^/]+)/', 1)) as project,
+    lower(coalesce(nullif(split_part(replace(cwd, '\\', '/'), '/', -1), ''),
+             regexp_extract(replace(filename, '\\', '/'), 'projects/([^/]+)/', 1))) as project,
     cast(sessionId as VARCHAR) as session,
     timestamp[:10] as date,
     cast(message.model as VARCHAR) as model,
@@ -122,7 +122,7 @@ token_entries AS (
 )
 SELECT
     'Codex' as tool,
-    coalesce(p.project, regexp_extract(t.filename, '([^/]+)[.]jsonl', 1)) as project,
+    lower(coalesce(p.project, regexp_extract(t.filename, '([^/]+)[.]jsonl', 1))) as project,
     regexp_extract(t.filename, '([^/]+)[.]jsonl', 1) as session,
     t.timestamp[:10] as date,
     '' as model,
@@ -155,7 +155,7 @@ WITH raw AS (
 SELECT
     'Gemini' as tool,
     CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
-         THEN project_raw[:8] ELSE project_raw END as project,
+         THEN project_raw[:8] ELSE lower(project_raw) END as project,
     session,
     m.timestamp[:10] as date,
     cast(m.model as VARCHAR) as model,
