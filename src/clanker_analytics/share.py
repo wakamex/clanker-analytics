@@ -184,12 +184,12 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(
         lambda v, _: _fmt_cost(v) if v > 0 else ""))
 
-    ax.tick_params(colors=DIM, which="both")
+    ax.tick_params(colors=TEXT, which="both")
     for label in ax.get_yticklabels():
         label.set_fontproperties(fm.FontProperties(fname=FONT_PATH, size=9))
-        label.set_color(DIM)
+        label.set_color(TEXT)
     for label in ax.get_xticklabels():
-        label.set_color(DIM)
+        label.set_color(TEXT)
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.grid(axis="y", color=DIM, alpha=0.3, linewidth=0.5)
@@ -211,7 +211,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     x_pos = 0.05
     for i, (t, c) in enumerate(tool_costs):
         if i > 0:
-            sep = fig.text(x_pos, 0.89, "  |  ", color=DIM, **_font(11),
+            sep = fig.text(x_pos, 0.89, "  |  ", color=TEXT, **_font(11),
                            ha="left", va="top")
             fig.canvas.draw()
             x_pos += sep.get_window_extent(renderer=renderer).width / fig_width
@@ -229,15 +229,15 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         fig.canvas.draw()
         x_pos += cost_txt.get_window_extent(renderer=renderer).width / fig_width
 
-    fig.text(x_pos, 0.89, f"  |  {n_projects} projects", color=DIM, **_font(11),
+    fig.text(x_pos, 0.89, f"  |  {n_projects} projects", color=TEXT, **_font(11),
              ha="left", va="top")
 
     # Top-right: command + token count
     since_arg = f" --since {since_label}" if since_label else ""
-    fig.text(0.95, 0.95, f"uvx clanker-analytics{since_arg} --chart", color=DIM,
+    fig.text(0.95, 0.95, f"uvx clanker-analytics{since_arg} --chart", color=TEXT,
              **_font(11), ha="right", va="top")
     token_line = f"{_fmt_tokens(total_tokens)} tokens ({_fmt_tokens(billable_tokens)} billable)"
-    fig.text(0.95, 0.90, token_line, color=DIM, **_font(11), ha="right", va="top")
+    fig.text(0.95, 0.90, token_line, color=TEXT, **_font(11), ha="right", va="top")
 
     plt.tight_layout(rect=[0, 0, 1, 0.85])
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
