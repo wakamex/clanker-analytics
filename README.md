@@ -58,6 +58,18 @@ The `api_cost` and `billable` columns use published API pricing. Cache reads are
 
 Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [OpenAI pricing](https://openai.com/api/pricing/), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing)
 
+## Environmental impact estimates
+
+The `--chart` / `--share` output shows estimated environmental impact per million tokens:
+
+| Metric | Per 1M tokens | Source |
+|---|---|---|
+| Electricity | 0.6 kWh | [Epoch AI](https://epoch.ai/gradient-updates/how-much-energy-does-chatgpt-use), [arxiv:2505.09598](https://arxiv.org/abs/2505.09598) |
+| Water | 1 liter | [Li & Ren (2023)](https://cacm.acm.org/sustainability-and-computing/making-ai-less-thirsty/), adjusted for modern models |
+| CO2 | 90 g | [Ritchie (2025)](https://hannahritchie.substack.com/p/ai-footprint-august-2025) |
+
+These are rough estimates — actual impact varies 10-100x depending on model, hardware, and data center location. No provider publishes official per-token figures.
+
 ## Chart colors
 
 Brand colors used in `--chart` / `--share` output:

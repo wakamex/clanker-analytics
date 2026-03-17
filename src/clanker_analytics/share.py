@@ -220,45 +220,73 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
             sub_label = f" for {_fmt_cost(prorated)}"
     else:
         sub_label = ""
-    headline = f"{_fmt_cost(total_cost)} of AI compute{f' {period}' if period else ''}{sub_label}"
-    fig.text(0.05, 0.95, headline, color=LIGHT, **_font(22, bold=True),
+    # Giant dollar amount
+    fig.text(0.05, 0.97, _fmt_cost(total_cost), color=LIGHT, **_font(42, bold=True),
              ha="left", va="top")
 
-    # Subtitle: colored tool names as legend
+    # Second line: context
+    multiplier = ""
+    if sub_cost and total_cost >= sub_cost:
+        ratio = total_cost / (sub_cost * days / 30) if days else 0
+        if ratio >= 2:
+            multiplier = f"  ({ratio:.0f}x)"
+    context = f"of AI compute{f' {period}' if period else ''}{sub_label}{multiplier}"
+    fig.text(0.05, 0.89, context, color=TEXT, **_font(14),
+             ha="left", va="top")
+
+    # Third line: colored tool names as legend
     renderer = fig.canvas.get_renderer()
     fig_width = fig.get_window_extent(renderer=renderer).width
     x_pos = 0.05
     for i, (t, c) in enumerate(tool_costs):
         if i > 0:
-            sep = fig.text(x_pos, 0.89, "  |  ", color=TEXT, **_font(11),
+            sep = fig.text(x_pos, 0.84, "  |  ", color=TEXT, **_font(12),
                            ha="left", va="top")
             fig.canvas.draw()
             x_pos += sep.get_window_extent(renderer=renderer).width / fig_width
-        # Tool name in its color, with plan if known
         color = TOOL_COLORS.get(t, "#c4862c")
         plan_info = plans.get(t) if plans else None
         label = f"{t} ({plan_info[0]})" if plan_info else t
-        name_txt = fig.text(x_pos, 0.89, label, color=color, **_font(11, bold=True),
+        name_txt = fig.text(x_pos, 0.84, label, color=color, **_font(12, bold=True),
                             ha="left", va="top")
         fig.canvas.draw()
         x_pos += name_txt.get_window_extent(renderer=renderer).width / fig_width
-        # Cost in default text color
-        cost_txt = fig.text(x_pos, 0.89, f" {_fmt_cost(c)}", color=TEXT, **_font(11),
+        cost_txt = fig.text(x_pos, 0.84, f" {_fmt_cost(c)}", color=TEXT, **_font(12),
                             ha="left", va="top")
         fig.canvas.draw()
         x_pos += cost_txt.get_window_extent(renderer=renderer).width / fig_width
 
-    fig.text(x_pos, 0.89, f"  |  {n_projects} projects", color=TEXT, **_font(11),
+    fig.text(x_pos, 0.84, f"  |  {n_projects} projects", color=TEXT, **_font(12),
              ha="left", va="top")
 
-    # Top-right: command + token count
-    since_arg = f" --since {since_label}" if since_label else ""
-    fig.text(0.95, 0.95, f"uvx clanker-analytics{since_arg} --chart", color=TEXT,
-             **_font(11), ha="right", va="top")
-    token_line = f"{_fmt_tokens(total_tokens)} tokens ({_fmt_tokens(billable_tokens)} billable)"
-    fig.text(0.95, 0.90, token_line, color=TEXT, **_font(11), ha="right", va="top")
+    # Top-right: environmental impact + command
+    kwh = total_tokens * 0.6 / 1e6
+    liters = total_tokens * 1.0 / 1e6
+    co2_kg = total_tokens * 90 / 1e9
 
-    plt.tight_layout(rect=[0, 0, 1, 0.85])
+    env_parts = []
+    if kwh >= 1:
+        env_parts.append(f"{kwh:,.0f} kWh")
+    elif kwh >= 0.01:
+        env_parts.append(f"{kwh:.1f} kWh")
+    if liters >= 1000:
+        env_parts.append(f"{liters / 1000:,.1f}m³ water")
+    elif liters >= 1:
+        env_parts.append(f"{liters:,.0f}L water")
+    if co2_kg >= 1:
+        env_parts.append(f"{co2_kg:,.0f}kg CO₂")
+    elif co2_kg >= 0.01:
+        env_parts.append(f"{co2_kg:.1f}kg CO₂")
+
+    if env_parts:
+        fig.text(0.95, 0.97, "  |  ".join(env_parts), color=TEXT,
+                 **_font(11), ha="right", va="top")
+
+    since_arg = f" --since {since_label}" if since_label else ""
+    fig.text(0.95, 0.92, f"uvx clanker-analytics{since_arg} --chart", color=DIM,
+             **_font(11), ha="right", va="top")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.78])
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
     plt.close(fig)
