@@ -103,7 +103,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     total_cost = total_cost or 0
     if total_tokens == 0:
         print("  No data in selected range.")
-        return OUTPUT
+        return None
 
     # Get api cost per tool
     tool_costs = db.sql(f"""

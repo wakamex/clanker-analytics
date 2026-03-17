@@ -445,14 +445,14 @@ class TestChartGeneration:
         finally:
             share_mod.OUTPUT = orig
 
-    def test_generate_empty_data_no_crash(self, tmp_path):
+    def test_generate_empty_data_returns_none(self, tmp_path):
         db = _make_db()  # empty
         import clanker_analytics.share as share_mod
         orig = share_mod.OUTPUT
         share_mod.OUTPUT = tmp_path / "test.png"
         try:
             path = share_mod.generate(db, "24h", {})
-            # Should return without crashing
+            assert path is None
         finally:
             share_mod.OUTPUT = orig
 

@@ -406,10 +406,12 @@ def main():
         from clanker_analytics.share import generate, copy_and_open
         plans = detect_plans()
         path = generate(db, args.since, plans)
-        if args.share:
+        if not path:
+            pass
+        elif args.share:
             total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
             sub_cost = sum(c for _, c in plans.values())
-            copy_and_open(path, total_cost, args.since, sub_cost)
+            copy_and_open(path, total_cost or 0, args.since, sub_cost)
         else:
             print(f"  Card saved to {path}")
         return 0
