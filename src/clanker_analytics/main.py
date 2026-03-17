@@ -2,10 +2,17 @@
 """AI coding tool token analytics powered by DuckDB."""
 
 import argparse
+import cProfile
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
+import io
 import json
 import os
+import pstats
 import re
 import sys
+import time
 from pathlib import Path
 
 import duckdb
@@ -58,12 +65,34 @@ def detect_plans() -> dict[str, tuple[str, int]]:
     return plans
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
+CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
+CACHE_SCHEMA_VERSION = 2
 
-SOURCE_DIRS = [
-    Path(HOME) / ".claude" / "projects",
-    Path(HOME) / ".codex" / "sessions",
-    Path(HOME) / ".gemini" / "tmp",
+SOURCE_TREES = [
+    ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
+    ("Codex", Path(HOME) / ".codex" / "sessions", "*.jsonl"),
+    ("Gemini", Path(HOME) / ".gemini" / "tmp", "chats/*.json"),
 ]
+
+TOKEN_SCHEMA = """
+    tool VARCHAR,
+    project VARCHAR,
+    session VARCHAR,
+    date VARCHAR,
+    model VARCHAR,
+    input_tokens INT,
+    output_tokens INT,
+    cache_write_tokens INT,
+    cache_read_tokens INT,
+    total_tokens BIGINT,
+    source_file VARCHAR
+"""
+
+TOKEN_INSERT_COLUMNS = """
+    tool, project, session, date, model,
+    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+    total_tokens, source_file
+"""
 
 # On Windows, discover WSL home paths for additional data sources
 _WSL_HOMES: list[str] = []
@@ -88,7 +117,18 @@ if sys.platform == "win32":
     except (FileNotFoundError, OSError, _sp.TimeoutExpired):
         pass
 
-CLAUDE_SQL = f"""
+def _sql_literal(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _sql_file_list(paths: list[str]) -> str:
+    if len(paths) == 1:
+        return _sql_literal(paths[0])
+    return "[" + ", ".join(_sql_literal(p) for p in paths) + "]"
+
+
+def _claude_sql(source_expr: str) -> str:
+    return f"""
 SELECT
     'Claude Code' as tool,
     lower(coalesce(nullif(split_part(replace(cwd, '\\', '/'), '/', -1), ''),
@@ -103,8 +143,9 @@ SELECT
     coalesce(cast(message.usage.input_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.output_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.cache_creation_input_tokens as INTEGER), 0)
-      + coalesce(cast(message.usage.cache_read_input_tokens as INTEGER), 0) as total_tokens
-FROM read_json('{HOME}/.claude/projects/*/*.jsonl',
+      + coalesce(cast(message.usage.cache_read_input_tokens as INTEGER), 0) as total_tokens,
+    replace(filename, '\\', '/') as source_file
+FROM read_json({source_expr},
     format='newline_delimited', filename=true, union_by_name=true,
     ignore_errors=true, maximum_depth=3, maximum_object_size=67108864)
 WHERE type = 'assistant'
@@ -115,10 +156,12 @@ WHERE type = 'assistant'
   AND NOT contains(replace(filename, '\\', '/'), '/subagents/')
 """
 
-CODEX_SQL = f"""
+
+def _codex_sql(source_expr: str) -> str:
+    return f"""
 WITH raw AS (
-    SELECT filename, type, timestamp, payload
-    FROM read_json('{HOME}/.codex/sessions/**/*.jsonl',
+    SELECT replace(filename, '\\', '/') as filename, type, timestamp, payload
+    FROM read_json({source_expr},
         format='newline_delimited', filename=true, union_by_name=true,
         ignore_errors=true, maximum_depth=4, maximum_object_size=67108864)
     WHERE type IN ('session_meta', 'event_msg')
@@ -154,7 +197,8 @@ SELECT
         WHEN t.last_total > 0 THEN t.last_total
         WHEN t.cum_total IS NOT NULL AND t.prev_cum IS NOT NULL THEN t.cum_total - t.prev_cum
         ELSE 0
-    END as total_tokens
+    END as total_tokens,
+    t.filename as source_file
 FROM token_entries t
 LEFT JOIN projects p ON t.filename = p.filename
 WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
@@ -165,13 +209,15 @@ WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
       END > 0
 """
 
-GEMINI_SQL = f"""
+
+def _gemini_sql(source_expr: str) -> str:
+    return f"""
 WITH raw AS (
-    SELECT filename,
+    SELECT replace(filename, '\\', '/') as filename,
            regexp_extract(replace(filename, '\\', '/'), 'tmp/([^/]+)/', 1) as project_raw,
            cast(sessionId as VARCHAR) as session,
            unnest(messages) as m
-    FROM read_json('{HOME}/.gemini/tmp/*/chats/*.json',
+    FROM read_json({source_expr},
         format='auto', filename=true, union_by_name=true,
         ignore_errors=true, maximum_depth=5, maximum_object_size=67108864)
 )
@@ -186,16 +232,18 @@ SELECT
     coalesce(m.tokens.output::INT, 0) as output_tokens,
     0 as cache_write_tokens,
     coalesce(m.tokens.cached::INT, 0) as cache_read_tokens,
-    coalesce(m.tokens.total::INT, 0) as total_tokens
+    coalesce(m.tokens.total::INT, 0) as total_tokens,
+    filename as source_file
 FROM raw
 WHERE m.tokens IS NOT NULL
   AND m.tokens.total > 0
 """
 
+
 SOURCES = {
-    "claude": ("Claude Code", CLAUDE_SQL),
-    "codex": ("Codex", CODEX_SQL),
-    "gemini": ("Gemini", GEMINI_SQL),
+    "claude": ("Claude Code", _claude_sql),
+    "codex": ("Codex", _codex_sql),
+    "gemini": ("Gemini", _gemini_sql),
 }
 
 COST_PER_ROW = """
@@ -301,6 +349,64 @@ QUERIES = {
 }
 
 
+@dataclass
+class TimingSample:
+    label: str
+    seconds: float
+    detail: str = ""
+
+
+class DebugTimer:
+    def __init__(self, enabled: bool = False):
+        self.enabled = enabled
+        self.started = time.perf_counter()
+        self.samples: list[TimingSample] = []
+        self.notes: list[str] = []
+
+    @contextmanager
+    def span(self, label: str, detail: str | None = None):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record(label, time.perf_counter() - started, detail)
+
+    def record(self, label: str, seconds: float, detail: str | None = None) -> None:
+        if not self.enabled:
+            return
+        self.samples.append(TimingSample(label, seconds, detail or ""))
+
+    def note(self, message: str) -> None:
+        if self.enabled:
+            self.notes.append(message)
+
+    def report(self) -> None:
+        if not self.enabled:
+            return
+        total = time.perf_counter() - self.started
+        print("\n[debug] timing summary", file=sys.stderr)
+        for note in self.notes:
+            print(f"[debug] note: {note}", file=sys.stderr)
+        for sample in self.samples:
+            detail = f" ({sample.detail})" if sample.detail else ""
+            print(f"[debug] {sample.label:<26} {sample.seconds:7.3f}s{detail}", file=sys.stderr)
+        print(f"[debug] {'total':<26} {total:7.3f}s", file=sys.stderr)
+
+
+def _fmt_debug_ts(ts: float) -> str:
+    if ts <= 0:
+        return "n/a"
+    return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
+
+
+def _print_profile(profile: cProfile.Profile, limit: int = 30) -> None:
+    stream = io.StringIO()
+    stats = pstats.Stats(profile, stream=stream).strip_dirs().sort_stats("cumulative")
+    stats.print_stats(limit)
+    print("\n[profile] top functions by cumulative time", file=sys.stderr)
+    print(stream.getvalue().rstrip(), file=sys.stderr)
+
+
 def fmt(n: int) -> str:
     if n >= 1_000_000_000:
         return f"{n / 1_000_000_000:.1f}B"
@@ -311,27 +417,161 @@ def fmt(n: int) -> str:
     return str(n)
 
 
-def sources_mtime() -> float:
-    """Newest mtime across all source JSONL files."""
-    newest = 0.0
-    all_dirs = list(SOURCE_DIRS)
+@dataclass(frozen=True)
+class SourceSnapshot:
+    tool: str
+    mtime_ns: int
+    size: int
+
+    def to_json(self) -> dict[str, int | str]:
+        return {
+            "tool": self.tool,
+            "mtime_ns": self.mtime_ns,
+            "size": self.size,
+        }
+
+
+def _iter_source_trees() -> list[tuple[str, Path, str]]:
+    trees = list(SOURCE_TREES)
     for wsl_home in _WSL_HOMES:
-        all_dirs.extend([
-            Path(wsl_home) / ".claude" / "projects",
-            Path(wsl_home) / ".codex" / "sessions",
-            Path(wsl_home) / ".gemini" / "tmp",
+        trees.extend([
+            ("Claude Code", Path(wsl_home) / ".claude" / "projects", "*.jsonl"),
+            ("Codex", Path(wsl_home) / ".codex" / "sessions", "*.jsonl"),
+            ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.json"),
         ])
-    for d in all_dirs:
+    return trees
+
+
+def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
+    files: dict[str, SourceSnapshot] = {}
+    dir_count = 0
+    started = time.perf_counter()
+    for tool, root, pattern in _iter_source_trees():
         try:
-            if not d.exists():
+            if not root.exists():
                 continue
-            for f in d.rglob("*.jsonl"):
-                mt = f.stat().st_mtime
-                if mt > newest:
-                    newest = mt
+            dir_count += 1
+            for path in root.rglob(pattern):
+                stat = path.stat()
+                files[path.as_posix()] = SourceSnapshot(
+                    tool=tool,
+                    mtime_ns=stat.st_mtime_ns,
+                    size=stat.st_size,
+                )
         except OSError:
             continue
-    return newest
+    return files, dir_count, time.perf_counter() - started
+
+
+def sources_mtime() -> tuple[float, int, int, float]:
+    """Newest mtime across all source files plus basic scan stats."""
+    files, dir_count, elapsed = scan_source_files()
+    newest = max((meta.mtime_ns / 1e9 for meta in files.values()), default=0.0)
+    return newest, len(files), dir_count, elapsed
+
+
+def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot]] | None:
+    if not CACHE_META_FILE.exists():
+        return None
+    try:
+        data = json.loads(CACHE_META_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    try:
+        version = int(data.get("version", 0))
+        raw_files = data.get("files", {})
+        files = {
+            path: SourceSnapshot(
+                tool=str(meta["tool"]),
+                mtime_ns=int(meta["mtime_ns"]),
+                size=int(meta["size"]),
+            )
+            for path, meta in raw_files.items()
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+    return version, files
+
+
+def _write_cache_meta(files: dict[str, SourceSnapshot]) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": CACHE_SCHEMA_VERSION,
+        "files": {path: meta.to_json() for path, meta in sorted(files.items())},
+    }
+    CACHE_META_FILE.write_text(json.dumps(payload, separators=(",", ":")))
+
+
+def _empty_tokens_table(db: duckdb.DuckDBPyConnection) -> None:
+    db.execute(f"CREATE TABLE tokens ({TOKEN_SCHEMA})")
+
+
+def _table_has_source_file(db: duckdb.DuckDBPyConnection) -> bool:
+    cols = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
+    return "source_file" in cols
+
+
+def _group_files_by_tool(files: dict[str, SourceSnapshot]) -> dict[str, list[str]]:
+    grouped = {tool_name: [] for tool_name, _ in SOURCES.values()}
+    for path, meta in files.items():
+        grouped.setdefault(meta.tool, []).append(path)
+    for paths in grouped.values():
+        paths.sort()
+    return grouped
+
+
+def _build_source_sql(grouped_files: dict[str, list[str]]) -> list[str]:
+    parts = []
+    for tool_name, builder in SOURCES.values():
+        paths = grouped_files.get(tool_name, [])
+        if paths:
+            parts.append(builder(_sql_file_list(paths)))
+    return parts
+
+
+def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
+                 timer: DebugTimer) -> int:
+    with timer.span("count token rows"):
+        row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with timer.span("write parquet cache", CACHE_FILE.as_posix()):
+        db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+    _write_cache_meta(files)
+    print(f"  cached {row_count} rows → {CACHE_FILE}", file=sys.stderr)
+    return row_count
+
+
+def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
+                    timer: DebugTimer) -> None:
+    parts = _build_source_sql(_group_files_by_tool(files))
+    if parts:
+        with timer.span("build tokens table", f"{len(parts)} sources"):
+            db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({part})" for part in parts))
+    else:
+        _empty_tokens_table(db)
+
+
+def _delete_source_files(db: duckdb.DuckDBPyConnection, paths: list[str],
+                         timer: DebugTimer) -> None:
+    if not paths:
+        return
+    with timer.span("drop changed rows", f"{len(paths)} files"):
+        db.execute(f"DELETE FROM tokens WHERE source_file IN ({', '.join(_sql_literal(p) for p in paths)})")
+
+
+def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
+                         timer: DebugTimer) -> None:
+    if not files:
+        return
+    parts = _build_source_sql(_group_files_by_tool(files))
+    if not parts:
+        return
+    with timer.span("append changed files", f"{len(files)} files"):
+        db.execute(
+            f"INSERT INTO tokens ({TOKEN_INSERT_COLUMNS}) "
+            + " UNION ALL ".join(f"SELECT * FROM ({part})" for part in parts)
+        )
 
 
 def register_macros(db: duckdb.DuckDBPyConnection) -> None:
@@ -355,39 +595,70 @@ def register_macros(db: duckdb.DuckDBPyConnection) -> None:
     """)
 
 
-def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
+def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
+                timing: DebugTimer | None = None) -> None:
     """Load tokens table from cache or rebuild from source files."""
-    if not refresh and CACHE_FILE.exists():
-        cache_mt = CACHE_FILE.stat().st_mtime
-        if sources_mtime() <= cache_mt:
-            db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
+    timer = timing or DebugTimer(False)
+    files, dir_count, scan_seconds = scan_source_files()
+    timer.record("scan source mtimes", scan_seconds,
+                 f"{len(files)} files in {dir_count} dirs")
+
+    if refresh:
+        timer.note("cache refresh forced by --refresh")
+        _rebuild_tokens(db, files, timer)
+        _write_cache(db, files, timer)
+        return
+
+    meta = _load_cache_meta()
+    cache_mt = CACHE_FILE.stat().st_mtime if CACHE_FILE.exists() else 0.0
+    newest_source = max((meta.mtime_ns / 1e9 for meta in files.values()), default=0.0)
+
+    if CACHE_FILE.exists() and meta and meta[0] == CACHE_SCHEMA_VERSION:
+        _, cached_files = meta
+        changed = sorted(
+            path for path, snapshot in files.items()
+            if cached_files.get(path) != snapshot
+        )
+        deleted = sorted(path for path in cached_files if path not in files)
+        if not changed and not deleted:
+            with timer.span("load parquet cache", CACHE_FILE.as_posix()):
+                db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
             print("  (cached)", file=sys.stderr)
+            timer.note(
+                f"cache hit: {len(files)} source files unchanged since cache {_fmt_debug_ts(cache_mt)}"
+            )
             return
 
-    # Rebuild from source, skipping tools with no data
-    parts = []
-    all_sources = list(SOURCES.values())
-    # On Windows, also try WSL home directories
-    for wsl_home in _WSL_HOMES:
-        for name, sql in SOURCES.values():
-            all_sources.append((name, sql.replace(HOME, wsl_home)))
-    for name, sql in all_sources:
-        try:
-            db.sql(f"SELECT 1 FROM ({sql}) LIMIT 0")
-            parts.append(sql)
-        except duckdb.IOException:
-            continue
+        with timer.span("load parquet cache", CACHE_FILE.as_posix()):
+            db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
+        if not _table_has_source_file(db):
+            timer.note("cache schema missing source_file; rebuilding")
+            db.execute("DROP TABLE tokens")
+            _rebuild_tokens(db, files, timer)
+            _write_cache(db, files, timer)
+            return
 
-    if parts:
-        db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({p})" for p in parts))
+        timer.note(
+            f"incremental update: {len(changed)} changed, {len(deleted)} deleted; newest source {_fmt_debug_ts(newest_source)}"
+        )
+        _delete_source_files(db, changed + deleted, timer)
+        _append_source_files(db, {path: files[path] for path in changed}, timer)
+        _write_cache(db, files, timer)
+        return
+
+    if CACHE_FILE.exists():
+        if meta is None:
+            timer.note("cache metadata missing or invalid; rebuilding")
+        else:
+            timer.note(f"cache metadata version {meta[0]} != {CACHE_SCHEMA_VERSION}; rebuilding")
+        timer.note(
+            f"cache stale: newest source {_fmt_debug_ts(newest_source)} > cache {_fmt_debug_ts(cache_mt)}"
+        )
     else:
-        db.execute("CREATE TABLE tokens (tool VARCHAR, project VARCHAR, session VARCHAR, date VARCHAR, model VARCHAR, input_tokens INT, output_tokens INT, cache_write_tokens INT, cache_read_tokens INT, total_tokens BIGINT)")
+        timer.note(f"cache missing: {CACHE_FILE}")
 
-    row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
-    if row_count > 0:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-        print(f"  cached {row_count} rows → {CACHE_FILE}", file=sys.stderr)
+    _rebuild_tokens(db, files, timer)
+    _write_cache(db, files, timer)
 
 
 def _get_version() -> str:
@@ -398,7 +669,74 @@ def _get_version() -> str:
         return "dev"
 
 
-def main():
+def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
+    timer = timing or DebugTimer(False)
+    db = duckdb.connect()
+    with timer.span("register macros"):
+        register_macros(db)
+    with timer.span("load tokens"):
+        load_tokens(db, args.refresh, timer)
+
+    with timer.span("count rows"):
+        row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+    if row_count == 0:
+        print("No data found.")
+        return 1
+
+    # Apply tool filter by narrowing the table
+    if args.tool != "all":
+        tool_name = SOURCES[args.tool][0]
+        with timer.span("filter tool", tool_name):
+            db.execute(f"CREATE OR REPLACE VIEW tokens_all AS SELECT * FROM tokens")
+            db.execute(f"DELETE FROM tokens WHERE tool != '{tool_name}'")
+
+    # Apply --since filter
+    if args.since:
+        with timer.span("filter since", args.since):
+            m = re.fullmatch(r'(\d+)([hdw])', args.since)
+            if m:
+                n, unit = int(m.group(1)), m.group(2)
+                interval = {'h': 'HOUR', 'd': 'DAY', 'w': 'WEEK'}[unit]
+                db.execute(f"DELETE FROM tokens WHERE date < (current_date - INTERVAL {n} {interval})::DATE::VARCHAR")
+            else:
+                db.execute(f"DELETE FROM tokens WHERE date < '{args.since}'")
+
+    if args.sql:
+        with timer.span("run custom sql"):
+            db.sql(args.sql).show(max_rows=100)
+        return 0
+
+    if args.table:
+        with timer.span("render table", args.by):
+            db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
+        return 0
+
+    # Default: chart mode
+    with timer.span("import share module"):
+        from clanker_analytics.share import generate, copy_and_open
+    since = args.since or "7d"
+    if not args.since:
+        # Apply default --since 7d
+        with timer.span("apply default since", since):
+            db.execute("DELETE FROM tokens WHERE date < (current_date - INTERVAL 7 DAY)::DATE::VARCHAR")
+    with timer.span("detect plans"):
+        plans = detect_plans()
+    cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
+    with timer.span("generate chart", since):
+        path = generate(db, since, plans, cost_mode)
+    if not path:
+        pass
+    elif args.share:
+        with timer.span("share card"):
+            total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+            sub_cost = sum(c for _, c in plans.values())
+            copy_and_open(path, total_cost or 0, since, sub_cost, cost_mode)
+    else:
+        print(f"  Card saved to {path}")
+    return 0
+
+
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
     parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
     parser.add_argument("--by", choices=list(QUERIES), default="project",
@@ -424,58 +762,23 @@ def main():
                             help="Show pro-rated subscription cost for the period")
     parser.add_argument("--refresh", action="store_true",
                         help="Force rebuild of cache from source files")
-    args = parser.parse_args()
+    parser.add_argument("--debug-timing", action="store_true",
+                        help="Print execution timings and cache decisions to stderr")
+    parser.add_argument("--profile", action="store_true",
+                        help="Print a cProfile summary to stderr")
+    args = parser.parse_args(argv)
 
-    db = duckdb.connect()
-    register_macros(db)
-    load_tokens(db, args.refresh)
-
-    row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
-    if row_count == 0:
-        print("No data found.")
-        return 1
-
-    # Apply tool filter by narrowing the table
-    if args.tool != "all":
-        tool_name = SOURCES[args.tool][0]
-        db.execute(f"CREATE OR REPLACE VIEW tokens_all AS SELECT * FROM tokens")
-        db.execute(f"DELETE FROM tokens WHERE tool != '{tool_name}'")
-
-    # Apply --since filter
-    if args.since:
-        m = re.fullmatch(r'(\d+)([hdw])', args.since)
-        if m:
-            n, unit = int(m.group(1)), m.group(2)
-            interval = {'h': 'HOUR', 'd': 'DAY', 'w': 'WEEK'}[unit]
-            db.execute(f"DELETE FROM tokens WHERE date < (current_date - INTERVAL {n} {interval})::DATE::VARCHAR")
-        else:
-            db.execute(f"DELETE FROM tokens WHERE date < '{args.since}'")
-
-    if args.sql:
-        db.sql(args.sql).show(max_rows=100)
-        return 0
-
-    if args.table:
-        db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
-        return 0
-
-    # Default: chart mode
-    from clanker_analytics.share import generate, copy_and_open
-    since = args.since or "7d"
-    if not args.since:
-        # Apply default --since 7d
-        db.execute("DELETE FROM tokens WHERE date < (current_date - INTERVAL 7 DAY)::DATE::VARCHAR")
-    plans = detect_plans()
-    cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
-    path = generate(db, since, plans, cost_mode)
-    if not path:
-        pass
-    elif args.share:
-        total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        sub_cost = sum(c for _, c in plans.values())
-        copy_and_open(path, total_cost or 0, since, sub_cost, cost_mode)
-    else:
-        print(f"  Card saved to {path}")
+    timer = DebugTimer(args.debug_timing)
+    profiler = cProfile.Profile() if args.profile else None
+    try:
+        if profiler:
+            profiler.enable()
+        return _run(args, timer)
+    finally:
+        if profiler:
+            profiler.disable()
+            _print_profile(profiler)
+        timer.report()
 
 
 if __name__ == "__main__":

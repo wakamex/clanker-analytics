@@ -10,6 +10,7 @@ from unittest import mock
 import duckdb
 import pytest
 
+import clanker_analytics.main as main_mod
 from clanker_analytics.main import COST_PER_ROW, fmt, register_macros, detect_plans
 
 
@@ -26,10 +27,15 @@ def _make_db(*rows):
     db.execute("""CREATE TABLE tokens (
         tool VARCHAR, project VARCHAR, session VARCHAR, date VARCHAR, model VARCHAR,
         input_tokens INT, output_tokens INT, cache_write_tokens INT, cache_read_tokens INT,
-        total_tokens BIGINT
+        total_tokens BIGINT, source_file VARCHAR
     )""")
     for r in rows:
-        db.execute("INSERT INTO tokens VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", r)
+        db.execute("""
+            INSERT INTO tokens (
+                tool, project, session, date, model, input_tokens, output_tokens,
+                cache_write_tokens, cache_read_tokens, total_tokens
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, r)
     return db
 
 
@@ -475,7 +481,12 @@ class TestChartGeneration:
         """>3 dates -> area chart."""
         db = _make_db(*ALL_ROWS)
         for i in range(10, 15):
-            db.execute(f"INSERT INTO tokens VALUES ('Claude Code','p','s','2026-03-{i}','sonnet',100,50,10,500,660)")
+            db.execute(f"""
+                INSERT INTO tokens (
+                    tool, project, session, date, model, input_tokens, output_tokens,
+                    cache_write_tokens, cache_read_tokens, total_tokens
+                ) VALUES ('Claude Code','p','s','2026-03-{i}','sonnet',100,50,10,500,660)
+            """)
         import clanker_analytics.share as share_mod
         orig = share_mod.OUTPUT
         share_mod.OUTPUT = tmp_path / "test.png"
@@ -533,6 +544,188 @@ class TestWindowsPaths:
     def test_cache_file_posix(self):
         p = Path("C:/Users/Test/.cache/clanker-analytics/tokens.parquet")
         assert "\\" not in p.as_posix()
+
+
+# ===========================================================================
+# Debug / profiling tests
+# ===========================================================================
+
+class TestDebugHooks:
+    def test_sources_mtime_includes_gemini_json(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / "claude"
+        claude_dir.mkdir()
+        (claude_dir / "session.jsonl").write_text("{}")
+        gemini_dir = tmp_path / "gemini"
+        (gemini_dir / "chats").mkdir(parents=True)
+        (gemini_dir / "chats" / "chat.json").write_text("{}")
+
+        monkeypatch.setattr(
+            main_mod,
+            "SOURCE_TREES",
+            [
+                ("Claude Code", claude_dir, "*.jsonl"),
+                ("Gemini", gemini_dir, "chats/*.json"),
+            ],
+        )
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        newest, file_count, dir_count, scan_seconds = main_mod.sources_mtime()
+
+        assert newest > 0
+        assert file_count == 2
+        assert dir_count == 2
+        assert scan_seconds >= 0
+
+    def test_incremental_cache_updates_only_changed_files(self, tmp_path, monkeypatch):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        file_a = src_dir / "a.jsonl"
+        file_b = src_dir / "b.jsonl"
+        file_a.write_text(json.dumps({
+            "project": "alpha", "session": "s1", "date": "2026-03-15", "model": "m",
+            "input_tokens": 1, "output_tokens": 2, "cache_write_tokens": 0,
+            "cache_read_tokens": 0, "total_tokens": 3,
+        }) + "\n")
+        file_b.write_text(json.dumps({
+            "project": "beta", "session": "s2", "date": "2026-03-15", "model": "m",
+            "input_tokens": 4, "output_tokens": 5, "cache_write_tokens": 0,
+            "cache_read_tokens": 0, "total_tokens": 9,
+        }) + "\n")
+
+        def build_sql(source_expr):
+            return f"""
+                SELECT
+                    'TestTool' as tool,
+                    project,
+                    session,
+                    date,
+                    model,
+                    input_tokens::INT as input_tokens,
+                    output_tokens::INT as output_tokens,
+                    cache_write_tokens::INT as cache_write_tokens,
+                    cache_read_tokens::INT as cache_read_tokens,
+                    total_tokens::BIGINT as total_tokens,
+                    replace(filename, '\\\\', '/') as source_file
+                FROM read_json({source_expr},
+                    format='newline_delimited', filename=true, union_by_name=true)
+            """
+
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [("TestTool", src_dir, "*.jsonl")])
+        monkeypatch.setattr(main_mod, "SOURCES", {"test": ("TestTool", build_sql)})
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        db = duckdb.connect()
+        register_macros(db)
+        main_mod.load_tokens(db, refresh=False)
+        rows = db.sql("SELECT project, total_tokens FROM tokens ORDER BY project").fetchall()
+        assert rows == [("alpha", 3), ("beta", 9)]
+
+        file_b.write_text(json.dumps({
+            "project": "beta", "session": "s2", "date": "2026-03-15", "model": "m",
+            "input_tokens": 10, "output_tokens": 20, "cache_write_tokens": 0,
+            "cache_read_tokens": 0, "total_tokens": 30,
+        }) + "\n")
+        stat = file_b.stat()
+        os.utime(file_b, ns=(stat.st_atime_ns + 1_000_000, stat.st_mtime_ns + 1_000_000))
+
+        db2 = duckdb.connect()
+        register_macros(db2)
+        timer = main_mod.DebugTimer(True)
+        main_mod.load_tokens(db2, refresh=False, timing=timer)
+        rows = db2.sql("SELECT project, total_tokens FROM tokens ORDER BY project").fetchall()
+        assert rows == [("alpha", 3), ("beta", 30)]
+        assert any(sample.label == "append changed files" for sample in timer.samples)
+        assert not any(sample.label.startswith("probe ") for sample in timer.samples)
+
+    def test_incremental_cache_removes_deleted_files(self, tmp_path, monkeypatch):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        file_a = src_dir / "a.jsonl"
+        file_b = src_dir / "b.jsonl"
+        file_a.write_text(json.dumps({
+            "project": "alpha", "session": "s1", "date": "2026-03-15", "model": "m",
+            "input_tokens": 1, "output_tokens": 2, "cache_write_tokens": 0,
+            "cache_read_tokens": 0, "total_tokens": 3,
+        }) + "\n")
+        file_b.write_text(json.dumps({
+            "project": "beta", "session": "s2", "date": "2026-03-15", "model": "m",
+            "input_tokens": 4, "output_tokens": 5, "cache_write_tokens": 0,
+            "cache_read_tokens": 0, "total_tokens": 9,
+        }) + "\n")
+
+        def build_sql(source_expr):
+            return f"""
+                SELECT
+                    'TestTool' as tool,
+                    project,
+                    session,
+                    date,
+                    model,
+                    input_tokens::INT as input_tokens,
+                    output_tokens::INT as output_tokens,
+                    cache_write_tokens::INT as cache_write_tokens,
+                    cache_read_tokens::INT as cache_read_tokens,
+                    total_tokens::BIGINT as total_tokens,
+                    replace(filename, '\\\\', '/') as source_file
+                FROM read_json({source_expr},
+                    format='newline_delimited', filename=true, union_by_name=true)
+            """
+
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [("TestTool", src_dir, "*.jsonl")])
+        monkeypatch.setattr(main_mod, "SOURCES", {"test": ("TestTool", build_sql)})
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        db = duckdb.connect()
+        register_macros(db)
+        main_mod.load_tokens(db, refresh=False)
+        rows = db.sql("SELECT project, total_tokens FROM tokens ORDER BY project").fetchall()
+        assert rows == [("alpha", 3), ("beta", 9)]
+
+        file_b.unlink()
+
+        db2 = duckdb.connect()
+        register_macros(db2)
+        timer = main_mod.DebugTimer(True)
+        main_mod.load_tokens(db2, refresh=False, timing=timer)
+        rows = db2.sql("SELECT project, total_tokens FROM tokens ORDER BY project").fetchall()
+        assert rows == [("alpha", 3)]
+        assert any(sample.label == "drop changed rows" for sample in timer.samples)
+        assert not any(sample.label == "append changed files" for sample in timer.samples)
+
+    def test_debug_timing_flag_prints_summary(self, capsys):
+        def fake_run(args, timer):
+            timer.note("cache hit")
+            timer.record("load tokens", 0.01, "cached")
+            return 0
+
+        with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+            result = main_mod.main(["--debug-timing", "--sql", "select 1"])
+
+        captured = capsys.readouterr()
+        assert result == 0
+        assert "[debug] timing summary" in captured.err
+        assert "cache hit" in captured.err
+        assert "load tokens" in captured.err
+
+    def test_profile_flag_prints_summary(self, capsys):
+        def fake_run(args, timer):
+            return 0
+
+        with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+            result = main_mod.main(["--profile", "--sql", "select 1"])
+
+        captured = capsys.readouterr()
+        assert result == 0
+        assert "[profile] top functions by cumulative time" in captured.err
+        assert "ncalls" in captured.err
 
 
 # ===========================================================================

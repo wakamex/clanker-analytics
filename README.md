@@ -29,12 +29,18 @@ clanker-analytics --table                # tabular view
 clanker-analytics --table --by date      # table grouped by date (also: model, session)
 clanker-analytics --tool claude          # Claude Code only (also: codex, gemini)
 clanker-analytics --refresh              # force cache rebuild
+clanker-analytics --debug-timing         # print cache decisions and stage timings
+clanker-analytics --profile              # print a cProfile summary to stderr
 clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
 ```
 
 ## How it works
 
-DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, and `~/.gemini/tmp/` — no Python JSON parsing. Results are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) and auto-invalidated when source files change.
+DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, and `~/.gemini/tmp/` — no Python JSON parsing. Results are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest at `~/.cache/clanker-analytics/tokens-meta.json`.
+
+The cache is incremental: unchanged source files are reused, changed files are re-read, and deleted files are removed from the cached table. A full rebuild only happens when the cache is missing, you pass `--refresh`, or the cache schema changes.
+
+`--debug-timing` prints cache decisions and per-stage timings. `--profile` adds a Python `cProfile` summary; it is mainly useful for filesystem scanning and Python-side overhead, not DuckDB query execution time.
 
 ## Columns
 
