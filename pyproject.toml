@@ -1,6 +1,6 @@
 [project]
 name = "clanker-analytics"
-version = "0.2.3"
+version = "0.2.4"
 description = "AI coding tool token analytics powered by DuckDB"
 readme = "README.md"
 requires-python = ">=3.13"
