@@ -229,9 +229,9 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     # Top-right: command + token count
     since_arg = f" --since {since_label}" if since_label else ""
     fig.text(0.95, 0.95, f"uvx clanker-analytics{since_arg} --chart", color=DIM,
-             **_font(9), ha="right", va="top")
+             **_font(11), ha="right", va="top")
     token_line = f"{_fmt_tokens(total_tokens)} tokens ({_fmt_tokens(billable_tokens)} billable)"
-    fig.text(0.95, 0.91, token_line, color=DIM, **_font(9), ha="right", va="top")
+    fig.text(0.95, 0.90, token_line, color=DIM, **_font(11), ha="right", va="top")
 
     plt.tight_layout(rect=[0, 0, 1, 0.85])
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
