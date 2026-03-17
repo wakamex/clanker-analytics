@@ -404,12 +404,14 @@ class TestPlanDetection:
 
     def test_subscription_cost_sum(self):
         outputs = {
-            "ccusage json": '{"plan":"max_20x"}',
-            "codex-cli-usage json": '{"plan":"pro"}',
-            "gemini-cli-usage json": '{"account_quota":{"user_tier":"g1-pro-tier"}}',
+            "ccusage": '{"plan":"max_20x"}',
+            "codex_cli_usage": '{"plan":"pro"}',
+            "gemini_cli_usage": '{"account_quota":{"user_tier":"g1-pro-tier"}}',
         }
         def fake_run(cmd_list, **kw):
-            return mock.Mock(returncode=0, stdout=outputs.get(" ".join(cmd_list), "{}"))
+            # cmd_list is [sys.executable, "-m", "module_name", "json"]
+            module = cmd_list[2] if len(cmd_list) > 2 else ""
+            return mock.Mock(returncode=0, stdout=outputs.get(module, "{}"))
         with mock.patch("subprocess.run", side_effect=fake_run):
             plans = detect_plans()
         assert sum(c for _, c in plans.values()) == 420

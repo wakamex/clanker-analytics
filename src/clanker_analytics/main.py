@@ -407,6 +407,11 @@ def main():
                         help="Generate PNG chart")
     parser.add_argument("--share", action="store_true",
                         help="Generate PNG chart, copy to clipboard, and open X")
+    cost_group = parser.add_mutually_exclusive_group()
+    cost_group.add_argument("--monthly", action="store_true",
+                            help="Show full monthly subscription cost")
+    cost_group.add_argument("--prorated", action="store_true",
+                            help="Show pro-rated subscription cost for the period")
     parser.add_argument("--refresh", action="store_true",
                         help="Force rebuild of cache from source files")
     args = parser.parse_args()
@@ -443,13 +448,14 @@ def main():
     if args.chart or args.share:
         from clanker_analytics.share import generate, copy_and_open
         plans = detect_plans()
-        path = generate(db, args.since, plans)
+        cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
+        path = generate(db, args.since, plans, cost_mode)
         if not path:
             pass
         elif args.share:
             total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
             sub_cost = sum(c for _, c in plans.values())
-            copy_and_open(path, total_cost or 0, args.since, sub_cost)
+            copy_and_open(path, total_cost or 0, args.since, sub_cost, cost_mode)
         else:
             print(f"  Card saved to {path}")
         return 0

@@ -84,7 +84,7 @@ def _short_date(d: str) -> str:
 
 
 def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
-             plans: dict | None = None) -> Path:
+             plans: dict | None = None, cost_mode: str = "auto") -> Path:
     """Generate share card PNG. Returns path to output file."""
     plt.rcParams['text.parse_math'] = False
 
@@ -200,7 +200,26 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     period = "today" if since_label in ("24h", "1d") else (
         "this week" if since_label in ("7d", "1w") else "")
     sub_cost = sum(c for _, c in (plans or {}).values())
-    sub_label = f" for ${sub_cost}/mo" if sub_cost else ""
+
+    # If usage < subscription: show monthly (funny: overpaying)
+    # If usage >= subscription: pro-rate to period (funny: insane value)
+    if sub_cost:
+        # Parse days from since_label
+        days = 30  # default to monthly
+        if since_label:
+            import re as _re
+            m = _re.fullmatch(r'(\d+)([hdw])', since_label)
+            if m:
+                n, unit = int(m.group(1)), m.group(2)
+                days = {"h": n / 24, "d": n, "w": n * 7}[unit]
+
+        prorated = sub_cost * days / 30
+        if cost_mode == "monthly" or (cost_mode == "auto" and total_cost < sub_cost):
+            sub_label = f" for ${sub_cost}/mo"
+        else:
+            sub_label = f" for {_fmt_cost(prorated)}"
+    else:
+        sub_label = ""
     headline = f"{_fmt_cost(total_cost)} of AI compute{f' {period}' if period else ''}{sub_label}"
     fig.text(0.05, 0.95, headline, color=LIGHT, **_font(22, bold=True),
              ha="left", va="top")
@@ -248,7 +267,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
 
 
 def copy_and_open(path: Path, total_cost: float, since_label: str | None,
-                  sub_cost: int = 0):
+                  sub_cost: int = 0, cost_mode: str = "auto"):
     """Copy PNG to clipboard and open X compose window."""
     # Copy to clipboard
     copied = False
@@ -280,8 +299,22 @@ def copy_and_open(path: Path, total_cost: float, since_label: str | None,
 
     period = "today" if since_label in ("24h", "1d") else (
         "this week" if since_label in ("7d", "1w") else "")
-    sub_label = f" for ${sub_cost}/mo" if sub_cost else ""
-    text = f"{_fmt_cost(total_cost)} of AI compute {period}{sub_label}\nuvx clanker-analytics"
+    if sub_cost:
+        import re as _re
+        days = 30
+        if since_label:
+            m = _re.fullmatch(r'(\d+)([hdw])', since_label)
+            if m:
+                n, unit = int(m.group(1)), m.group(2)
+                days = {"h": n / 24, "d": n, "w": n * 7}[unit]
+        prorated = sub_cost * days / 30
+        if (total_cost or 0) < sub_cost:
+            sub_label = f" for ${sub_cost}/mo"
+        else:
+            sub_label = f" for {_fmt_cost(prorated)}"
+    else:
+        sub_label = ""
+    text = f"{_fmt_cost(total_cost or 0)} of AI compute {period}{sub_label}\nuvx clanker-analytics"
 
     url = "https://x.com/intent/tweet?" + urllib.parse.urlencode({"text": text})
     print(f"\n  Card saved to {path}")
