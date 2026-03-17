@@ -65,6 +65,29 @@ SOURCE_DIRS = [
     Path(HOME) / ".gemini" / "tmp",
 ]
 
+# On Windows, discover WSL home paths for additional data sources
+_WSL_HOMES: list[str] = []
+if sys.platform == "win32":
+    import subprocess as _sp
+    try:
+        _r = _sp.run(["wsl", "-l", "-q"], capture_output=True, timeout=5)
+        if _r.returncode == 0:
+            for distro in _r.stdout.decode("utf-16-le", errors="ignore").strip().splitlines():
+                distro = distro.strip()
+                if not distro:
+                    continue
+                try:
+                    _u = _sp.run(["wsl", "-d", distro, "ls", "/home"],
+                                 capture_output=True, text=True, timeout=5)
+                    for user in (_u.stdout.strip().splitlines() if _u.returncode == 0 else []):
+                        user = user.strip()
+                        if user:
+                            _WSL_HOMES.append(f"//wsl$/{distro}/home/{user}")
+                except (OSError, _sp.TimeoutExpired):
+                    pass
+    except (FileNotFoundError, OSError, _sp.TimeoutExpired):
+        pass
+
 CLAUDE_SQL = f"""
 SELECT
     'Claude Code' as tool,
@@ -283,13 +306,23 @@ def fmt(n: int) -> str:
 def sources_mtime() -> float:
     """Newest mtime across all source JSONL files."""
     newest = 0.0
-    for d in SOURCE_DIRS:
-        if not d.exists():
+    all_dirs = list(SOURCE_DIRS)
+    for wsl_home in _WSL_HOMES:
+        all_dirs.extend([
+            Path(wsl_home) / ".claude" / "projects",
+            Path(wsl_home) / ".codex" / "sessions",
+            Path(wsl_home) / ".gemini" / "tmp",
+        ])
+    for d in all_dirs:
+        try:
+            if not d.exists():
+                continue
+            for f in d.rglob("*.jsonl"):
+                mt = f.stat().st_mtime
+                if mt > newest:
+                    newest = mt
+        except OSError:
             continue
-        for f in d.rglob("*.jsonl"):
-            mt = f.stat().st_mtime
-            if mt > newest:
-                newest = mt
     return newest
 
 
@@ -325,7 +358,12 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool) -> None:
 
     # Rebuild from source, skipping tools with no data
     parts = []
-    for name, sql in SOURCES.values():
+    all_sources = list(SOURCES.values())
+    # On Windows, also try WSL home directories
+    for wsl_home in _WSL_HOMES:
+        for name, sql in SOURCES.values():
+            all_sources.append((name, sql.replace(HOME, wsl_home)))
+    for name, sql in all_sources:
         try:
             db.sql(f"SELECT 1 FROM ({sql}) LIMIT 0")
             parts.append(sql)
