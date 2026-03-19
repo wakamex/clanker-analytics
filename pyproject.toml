@@ -10,6 +10,7 @@ dependencies = [
     "ccusage>=0.1.5",
     "codex-cli-usage>=0.1.5",
     "gemini-cli-usage>=0.1.5",
+    "opencode-usage>=0.2.4",
 ]
 
 [project.urls]

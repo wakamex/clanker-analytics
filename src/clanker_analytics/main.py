@@ -23,16 +23,22 @@ HOME = os.path.expanduser("~").replace("\\", "/")
 # Plan detection from cached usage-limits.json files
 PLAN_COSTS = {
     # Claude
-    "pro": 20, "max_5x": 100, "max_20x": 200,
+    "pro": 20,
+    "max_5x": 100,
+    "max_20x": 200,
     # Codex / ChatGPT (handled separately — "pro" means $200 for Codex)
     "plus": 20,
     # Gemini (normalized from g1-pro-tier, g1-ultra-tier)
-    "pro": 20, "ultra": 250, "free": 0,
+    "pro": 20,
+    "ultra": 250,
+    "free": 0,
 }
+
 
 def detect_plans() -> dict[str, tuple[str, int]]:
     """Detect subscription plans by shelling out to usage tools. Returns {tool: (plan_name, monthly_cost)}."""
     import subprocess
+
     plans = {}
 
     cmds = {
@@ -47,13 +53,17 @@ def detect_plans() -> dict[str, tuple[str, int]]:
             if result.returncode != 0:
                 return tool, None
             data = json.loads(result.stdout)
-            plan = (data.get("plan")
-                    or data.get("account_quota", {}).get("user_tier")
-                    or "unknown")
+            plan = (
+                data.get("plan")
+                or data.get("account_quota", {}).get("user_tier")
+                or "unknown"
+            )
             # Normalize display names
-            plan = (plan.replace("default_claude_", "")
-                        .replace("g1-pro-tier", "pro")
-                        .replace("g1-ultra-tier", "ultra"))
+            plan = (
+                plan.replace("default_claude_", "")
+                .replace("g1-pro-tier", "pro")
+                .replace("g1-ultra-tier", "ultra")
+            )
             if tool == "Codex" and plan == "pro":
                 cost = 200
             elif tool == "Codex" and plan == "plus":
@@ -61,7 +71,12 @@ def detect_plans() -> dict[str, tuple[str, int]]:
             else:
                 cost = PLAN_COSTS.get(plan, 0)
             return tool, (plan, cost)
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
+        except (
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+            json.JSONDecodeError,
+            OSError,
+        ):
             return tool, None
 
     with ThreadPoolExecutor(max_workers=len(cmds)) as executor:
@@ -72,6 +87,8 @@ def detect_plans() -> dict[str, tuple[str, int]]:
                 plans[tool] = result
 
     return plans
+
+
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
@@ -81,6 +98,7 @@ SOURCE_TREES = [
     ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
     ("Codex", Path(HOME) / ".codex" / "sessions", "*.jsonl"),
     ("Gemini", Path(HOME) / ".gemini" / "tmp", "chats/*.json"),
+    ("OpenCode", Path(HOME) / ".local" / "share" / "opencode", "opencode.db"),
 ]
 
 TOKEN_SCHEMA = """
@@ -107,17 +125,26 @@ TOKEN_INSERT_COLUMNS = """
 _WSL_HOMES: list[str] = []
 if sys.platform == "win32":
     import subprocess as _sp
+
     try:
         _r = _sp.run(["wsl", "-l", "-q"], capture_output=True, timeout=5)
         if _r.returncode == 0:
-            for distro in _r.stdout.decode("utf-16-le", errors="ignore").strip().splitlines():
+            for distro in (
+                _r.stdout.decode("utf-16-le", errors="ignore").strip().splitlines()
+            ):
                 distro = distro.strip()
                 if not distro:
                     continue
                 try:
-                    _u = _sp.run(["wsl", "-d", distro, "ls", "/home"],
-                                 capture_output=True, text=True, timeout=5)
-                    for user in (_u.stdout.strip().splitlines() if _u.returncode == 0 else []):
+                    _u = _sp.run(
+                        ["wsl", "-d", distro, "ls", "/home"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    for user in (
+                        _u.stdout.strip().splitlines() if _u.returncode == 0 else []
+                    ):
                         user = user.strip()
                         if user:
                             _WSL_HOMES.append(f"//wsl$/{distro}/home/{user}")
@@ -125,6 +152,7 @@ if sys.platform == "win32":
                     pass
     except (FileNotFoundError, OSError, _sp.TimeoutExpired):
         pass
+
 
 def _sql_literal(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
@@ -249,10 +277,39 @@ WHERE m.tokens IS NOT NULL
 """
 
 
+def _opencode_sql(source_expr: str) -> str:
+    # Extract the database path from the source expression
+    # source_expr is either a single quoted path or a list of quoted paths
+    # For OpenCode, we expect a single database file
+    db_path = source_expr.strip("'[]")
+    return f"""
+SELECT
+    'OpenCode' as tool,
+    lower(split_part(replace(s.directory, '\\', '/'), '/', -1)) as project,
+    s.slug as session,
+    strftime(to_timestamp(m.time_created / 1000), '%Y-%m-%d') as date,
+    cast(json_extract_string(m.data, '$.modelID') as VARCHAR) as model,
+    coalesce(cast(json_extract(m.data, '$.tokens.input') as INTEGER), 0) as input_tokens,
+    coalesce(cast(json_extract(m.data, '$.tokens.output') as INTEGER), 0) as output_tokens,
+    coalesce(cast(json_extract(m.data, '$.tokens.cache.write') as INTEGER), 0) as cache_write_tokens,
+    coalesce(cast(json_extract(m.data, '$.tokens.cache.read') as INTEGER), 0) as cache_read_tokens,
+    coalesce(cast(json_extract(m.data, '$.tokens.input') as INTEGER), 0)
+      + coalesce(cast(json_extract(m.data, '$.tokens.output') as INTEGER), 0)
+      + coalesce(cast(json_extract(m.data, '$.tokens.cache.write') as INTEGER), 0)
+      + coalesce(cast(json_extract(m.data, '$.tokens.cache.read') as INTEGER), 0) as total_tokens,
+    '{db_path}' as source_file
+FROM sqlite_scan('{db_path}', 'message') m
+JOIN sqlite_scan('{db_path}', 'session') s ON m.session_id = s.id
+WHERE json_extract_string(m.data, '$.role') = 'assistant'
+  AND json_extract(m.data, '$.tokens') IS NOT NULL
+"""
+
+
 SOURCES = {
     "claude": ("Claude Code", _claude_sql),
     "codex": ("Codex", _codex_sql),
     "gemini": ("Gemini", _gemini_sql),
+    "opencode": ("OpenCode", _opencode_sql),
 }
 
 COST_PER_ROW = """
@@ -270,6 +327,37 @@ COST_PER_ROW = """
             ELSE
                 (input_tokens * 2.0 + cache_read_tokens * 0.50
                  + output_tokens * 12.0) / 1e6
+        END
+        WHEN tool = 'OpenCode' THEN CASE
+            -- OpenAI models (GPT-5, GPT-4, etc.)
+            WHEN model LIKE '%gpt-5%' OR model LIKE '%gpt-4%' THEN
+                (input_tokens * 1.25 + cache_write_tokens * 1.25
+                 + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
+            -- Anthropic models (Claude Opus, Sonnet, Haiku)
+            WHEN model LIKE '%opus%' THEN
+                (input_tokens * 5.0 + cache_write_tokens * 6.25
+                 + cache_read_tokens * 0.50 + output_tokens * 25.0) / 1e6
+            WHEN model LIKE '%haiku%' THEN
+                (input_tokens * 1.0 + cache_write_tokens * 1.25
+                 + cache_read_tokens * 0.10 + output_tokens * 5.0) / 1e6
+            WHEN model LIKE '%claude%' OR model LIKE '%sonnet%' THEN
+                (input_tokens * 3.0 + cache_write_tokens * 3.75
+                 + cache_read_tokens * 0.30 + output_tokens * 15.0) / 1e6
+            -- Google Gemini models
+            WHEN model LIKE '%gemini%flash%' THEN
+                (input_tokens * 0.15 + cache_read_tokens * 0.0375
+                 + output_tokens * 0.60) / 1e6
+            WHEN model LIKE '%gemini%pro%' THEN
+                (input_tokens * 1.25 + cache_read_tokens * 0.125
+                 + output_tokens * 10.0) / 1e6
+            -- DeepSeek models
+            WHEN model LIKE '%deepseek%' THEN
+                (input_tokens * 0.27 + cache_write_tokens * 0.27
+                 + cache_read_tokens * 0.027 + output_tokens * 1.10) / 1e6
+            -- Default for unknown models
+            ELSE
+                (input_tokens * 1.0 + cache_write_tokens * 1.0
+                 + cache_read_tokens * 0.1 + output_tokens * 5.0) / 1e6
         END
         ELSE CASE
             WHEN model LIKE '%opus%' THEN
@@ -398,7 +486,10 @@ class DebugTimer:
             print(f"[debug] note: {note}", file=sys.stderr)
         for sample in self.samples:
             detail = f" ({sample.detail})" if sample.detail else ""
-            print(f"[debug] {sample.label:<26} {sample.seconds:7.3f}s{detail}", file=sys.stderr)
+            print(
+                f"[debug] {sample.label:<26} {sample.seconds:7.3f}s{detail}",
+                file=sys.stderr,
+            )
         print(f"[debug] {'total':<26} {total:7.3f}s", file=sys.stderr)
 
 
@@ -443,11 +534,18 @@ class SourceSnapshot:
 def _iter_source_trees() -> list[tuple[str, Path, str]]:
     trees = list(SOURCE_TREES)
     for wsl_home in _WSL_HOMES:
-        trees.extend([
-            ("Claude Code", Path(wsl_home) / ".claude" / "projects", "*.jsonl"),
-            ("Codex", Path(wsl_home) / ".codex" / "sessions", "*.jsonl"),
-            ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.json"),
-        ])
+        trees.extend(
+            [
+                ("Claude Code", Path(wsl_home) / ".claude" / "projects", "*.jsonl"),
+                ("Codex", Path(wsl_home) / ".codex" / "sessions", "*.jsonl"),
+                ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.json"),
+                (
+                    "OpenCode",
+                    Path(wsl_home) / ".local" / "share" / "opencode",
+                    "opencode.db",
+                ),
+            ]
+        )
     return trees
 
 
@@ -539,39 +637,54 @@ def _build_source_sql(grouped_files: dict[str, list[str]]) -> list[str]:
     return parts
 
 
-def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
-                 timer: DebugTimer, action: str, detail: str = "") -> int:
+def _write_cache(
+    db: duckdb.DuckDBPyConnection,
+    files: dict[str, SourceSnapshot],
+    timer: DebugTimer,
+    action: str,
+    detail: str = "",
+) -> int:
     with timer.span("count token rows"):
         row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with timer.span("write parquet cache", CACHE_FILE.as_posix()):
-        db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        db.execute(
+            f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
     _write_cache_meta(files)
     detail_part = f"{detail}; " if detail else ""
     print(f"  {action}: {detail_part}{row_count} rows → {CACHE_FILE}", file=sys.stderr)
     return row_count
 
 
-def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
-                    timer: DebugTimer) -> None:
+def _rebuild_tokens(
+    db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot], timer: DebugTimer
+) -> None:
     parts = _build_source_sql(_group_files_by_tool(files))
     if parts:
         with timer.span("build tokens table", f"{len(parts)} sources"):
-            db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({part})" for part in parts))
+            db.execute(
+                "CREATE TABLE tokens AS "
+                + " UNION ALL ".join(f"({part})" for part in parts)
+            )
     else:
         _empty_tokens_table(db)
 
 
-def _delete_source_files(db: duckdb.DuckDBPyConnection, paths: list[str],
-                         timer: DebugTimer) -> None:
+def _delete_source_files(
+    db: duckdb.DuckDBPyConnection, paths: list[str], timer: DebugTimer
+) -> None:
     if not paths:
         return
     with timer.span("drop changed rows", f"{len(paths)} files"):
-        db.execute(f"DELETE FROM tokens WHERE source_file IN ({', '.join(_sql_literal(p) for p in paths)})")
+        db.execute(
+            f"DELETE FROM tokens WHERE source_file IN ({', '.join(_sql_literal(p) for p in paths)})"
+        )
 
 
-def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
-                         timer: DebugTimer) -> None:
+def _append_source_files(
+    db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot], timer: DebugTimer
+) -> None:
     if not files:
         return
     parts = _build_source_sql(_group_files_by_tool(files))
@@ -605,13 +718,15 @@ def register_macros(db: duckdb.DuckDBPyConnection) -> None:
     """)
 
 
-def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
-                timing: DebugTimer | None = None) -> None:
+def load_tokens(
+    db: duckdb.DuckDBPyConnection, refresh: bool, timing: DebugTimer | None = None
+) -> None:
     """Load tokens table from cache or rebuild from source files."""
     timer = timing or DebugTimer(False)
     files, dir_count, scan_seconds = scan_source_files()
-    timer.record("scan source mtimes", scan_seconds,
-                 f"{len(files)} files in {dir_count} dirs")
+    timer.record(
+        "scan source mtimes", scan_seconds, f"{len(files)} files in {dir_count} dirs"
+    )
 
     if refresh:
         timer.note("cache refresh forced by --refresh")
@@ -626,7 +741,8 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     if CACHE_FILE.exists() and meta and meta[0] == CACHE_SCHEMA_VERSION:
         _, cached_files = meta
         changed = sorted(
-            path for path, snapshot in files.items()
+            path
+            for path, snapshot in files.items()
             if cached_files.get(path) != snapshot
         )
         deleted = sorted(path for path in cached_files if path not in files)
@@ -666,7 +782,9 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         if meta is None:
             timer.note("cache metadata missing or invalid; rebuilding")
         else:
-            timer.note(f"cache metadata version {meta[0]} != {CACHE_SCHEMA_VERSION}; rebuilding")
+            timer.note(
+                f"cache metadata version {meta[0]} != {CACHE_SCHEMA_VERSION}; rebuilding"
+            )
         timer.note(
             f"cache stale: newest source {_fmt_debug_ts(newest_source)} > cache {_fmt_debug_ts(cache_mt)}"
         )
@@ -680,6 +798,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
 def _get_version() -> str:
     try:
         from importlib.metadata import version
+
         return version("clanker-analytics")
     except Exception:
         return "dev"
@@ -688,6 +807,10 @@ def _get_version() -> str:
 def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     timer = timing or DebugTimer(False)
     db = duckdb.connect()
+    try:
+        db.execute("INSTALL sqlite; LOAD sqlite;")
+    except Exception:
+        pass  # SQLite extension may already be installed or not available
     with timer.span("register macros"):
         register_macros(db)
     with timer.span("load tokens"):
@@ -709,11 +832,13 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     # Apply --since filter
     if args.since:
         with timer.span("filter since", args.since):
-            m = re.fullmatch(r'(\d+)([hdw])', args.since)
+            m = re.fullmatch(r"(\d+)([hdw])", args.since)
             if m:
                 n, unit = int(m.group(1)), m.group(2)
-                interval = {'h': 'HOUR', 'd': 'DAY', 'w': 'WEEK'}[unit]
-                db.execute(f"DELETE FROM tokens WHERE date < (current_date - INTERVAL {n} {interval})::DATE::VARCHAR")
+                interval = {"h": "HOUR", "d": "DAY", "w": "WEEK"}[unit]
+                db.execute(
+                    f"DELETE FROM tokens WHERE date < (current_date - INTERVAL {n} {interval})::DATE::VARCHAR"
+                )
             else:
                 db.execute(f"DELETE FROM tokens WHERE date < '{args.since}'")
 
@@ -734,7 +859,9 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     if not args.since:
         # Apply default --since 7d
         with timer.span("apply default since", since):
-            db.execute("DELETE FROM tokens WHERE date < (current_date - INTERVAL 7 DAY)::DATE::VARCHAR")
+            db.execute(
+                "DELETE FROM tokens WHERE date < (current_date - INTERVAL 7 DAY)::DATE::VARCHAR"
+            )
     with timer.span("detect plans"):
         plans = detect_plans()
     cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
@@ -754,34 +881,68 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
 
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
-    parser.add_argument("--by", choices=list(QUERIES), default="project",
-                        help="Group results by (default: project)")
-    parser.add_argument("--tool", choices=[*SOURCES, "all"], default="all",
-                        help="Which tool to analyze (default: all)")
-    parser.add_argument("--limit", type=int, default=50,
-                        help="Max rows to display (default: 50)")
-    parser.add_argument("--sql", type=str,
-                        help="Run custom SQL against the 'tokens' table")
-    parser.add_argument("--since", type=str,
-                        help="Only include data since date (e.g. 24h, 7d, 2026-03-01)")
-    parser.add_argument("--chart", action="store_true", default=True,
-                        help="Generate PNG chart (default)")
-    parser.add_argument("--table", action="store_true",
-                        help="Show table instead of chart")
-    parser.add_argument("--share", action="store_true",
-                        help="Generate PNG chart, copy to clipboard, and open X")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {_get_version()}"
+    )
+    parser.add_argument(
+        "--by",
+        choices=list(QUERIES),
+        default="project",
+        help="Group results by (default: project)",
+    )
+    parser.add_argument(
+        "--tool",
+        choices=[*SOURCES, "all"],
+        default="all",
+        help="Which tool to analyze (default: all)",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=50, help="Max rows to display (default: 50)"
+    )
+    parser.add_argument(
+        "--sql", type=str, help="Run custom SQL against the 'tokens' table"
+    )
+    parser.add_argument(
+        "--since",
+        type=str,
+        help="Only include data since date (e.g. 24h, 7d, 2026-03-01)",
+    )
+    parser.add_argument(
+        "--chart",
+        action="store_true",
+        default=True,
+        help="Generate PNG chart (default)",
+    )
+    parser.add_argument(
+        "--table", action="store_true", help="Show table instead of chart"
+    )
+    parser.add_argument(
+        "--share",
+        action="store_true",
+        help="Generate PNG chart, copy to clipboard, and open X",
+    )
     cost_group = parser.add_mutually_exclusive_group()
-    cost_group.add_argument("--monthly", action="store_true",
-                            help="Show full monthly subscription cost")
-    cost_group.add_argument("--prorated", action="store_true",
-                            help="Show pro-rated subscription cost for the period")
-    parser.add_argument("--refresh", action="store_true",
-                        help="Force rebuild of cache from source files")
-    parser.add_argument("--debug-timing", action="store_true",
-                        help="Print execution timings and cache decisions to stderr")
-    parser.add_argument("--profile", action="store_true",
-                        help="Print a cProfile summary to stderr")
+    cost_group.add_argument(
+        "--monthly", action="store_true", help="Show full monthly subscription cost"
+    )
+    cost_group.add_argument(
+        "--prorated",
+        action="store_true",
+        help="Show pro-rated subscription cost for the period",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Force rebuild of cache from source files",
+    )
+    parser.add_argument(
+        "--debug-timing",
+        action="store_true",
+        help="Print execution timings and cache decisions to stderr",
+    )
+    parser.add_argument(
+        "--profile", action="store_true", help="Print a cProfile summary to stderr"
+    )
     args = parser.parse_args(argv)
 
     timer = DebugTimer(args.debug_timing)
