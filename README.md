@@ -2,7 +2,7 @@
 
 Token usage analytics for AI coding tools. Reads local session logs and shows per-project breakdowns using DuckDB.
 
-Supports **Claude Code**, **Codex**, and **Gemini CLI**.
+Supports **Claude Code**, **Codex**, **Gemini CLI**, and **OpenCode**.
 
 ![clanker-analytics chart](share.png)
 ![clanker-analytics table](table.png)
@@ -27,7 +27,7 @@ clanker-analytics --since 24h            # last 24 hours (also: 7d, 2w, 2026-03-
 clanker-analytics --share                # chart + copy to clipboard + open X
 clanker-analytics --table                # tabular view
 clanker-analytics --table --by date      # table grouped by date (also: model, session)
-clanker-analytics --tool claude          # Claude Code only (also: codex, gemini)
+clanker-analytics --tool claude          # Claude Code only (also: codex, gemini, opencode)
 clanker-analytics --refresh              # force cache rebuild
 clanker-analytics --debug-timing         # print cache decisions and stage timings
 clanker-analytics --profile              # print a cProfile summary to stderr
@@ -36,7 +36,7 @@ clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
 
 ## How it works
 
-DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, and `~/.gemini/tmp/` — no Python JSON parsing. Results are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest at `~/.cache/clanker-analytics/tokens-meta.json`.
+DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, `~/.gemini/tmp/`, and `~/.local/share/opencode/opencode.db` — no Python JSON parsing. Results are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest at `~/.cache/clanker-analytics/tokens-meta.json`.
 
 The cache is incremental: unchanged source files are reused, changed files are re-read, and deleted files are removed from the cached table. A full rebuild only happens when the cache is missing, you pass `--refresh`, or the cache schema changes.
 
@@ -52,18 +52,19 @@ The cache is incremental: unchanged source files are reused, changed files are r
 
 ## API cost calculation
 
-The `api_cost` and `billable` columns use published API pricing. Cache reads are 0.1x the input token price for all three providers:
+The `api_cost` and `billable` columns use published API pricing. Cache reads are 0.1x the input token price for all providers:
 
 | | Input | Cache read | Cache write | Output |
 |---|---|---|---|---|
 | Claude Sonnet | $3/MTok | $0.30/MTok | $3.75/MTok | $15/MTok |
 | Claude Opus | $5/MTok | $0.50/MTok | $6.25/MTok | $25/MTok |
-| GPT-5 | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
+| GPT-5 / GPT-4 | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
 | Gemini Flash | $0.15/MTok | $0.0375/MTok | (auto) | $0.60/MTok |
 | Gemini 2.5 Pro | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
 | Gemini 3.1 Pro | $2/MTok | $0.50/MTok | (auto) | $12/MTok |
+| DeepSeek | $0.27/MTok | $0.027/MTok | $0.27/MTok | $1.10/MTok |
 
-Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [OpenAI pricing](https://openai.com/api/pricing/), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing)
+Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [OpenAI pricing](https://openai.com/api/pricing/), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing), [DeepSeek pricing](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)
 
 ## Environmental impact estimates
 
@@ -86,6 +87,7 @@ Brand colors used in `--chart` / `--share` output:
 | Claude Code | `#d97757` | [Anthropic brand guidelines](https://github.com/anthropics/skills/blob/main/skills/brand-guidelines/SKILL.md) |
 | Codex | `#10a37f` | [OpenAI brand](https://openai.com) |
 | Gemini | `#4285f4` | [Google brand](https://about.google/brand-resource-center/) |
+| OpenCode | `#9b59b6` | OpenCode brand (purple) |
 
 ## Requirements
 

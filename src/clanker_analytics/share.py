@@ -22,6 +22,7 @@ TOOL_COLORS = {
     "Claude Code": "#d97757",
     "Codex": "#10a37f",
     "Gemini": "#4285f4",
+    "OpenCode": "#9b59b6",
 }
 
 from clanker_analytics.main import COST_PER_ROW as COST_SQL
@@ -31,8 +32,11 @@ OUTPUT = Path.home() / ".cache" / "clanker-analytics" / "share.png"
 
 
 def _font(size: int, bold: bool = False) -> dict:
-    return {"fontproperties": fm.FontProperties(fname=FONT_PATH, size=size,
-                                                weight="bold" if bold else "normal")}
+    return {
+        "fontproperties": fm.FontProperties(
+            fname=FONT_PATH, size=size, weight="bold" if bold else "normal"
+        )
+    }
 
 
 def _fmt_cost(n: float) -> str:
@@ -60,16 +64,32 @@ def _fmt_tokens(n: int) -> str:
 
 def _short_date(d: str) -> str:
     """'2026-03-15' -> 'Mar 15'"""
-    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
     parts = d.split("-")
     return f"{months[int(parts[1]) - 1]} {int(parts[2])}"
 
 
-def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
-             plans: dict | None = None, cost_mode: str = "auto") -> Path:
+def generate(
+    db: duckdb.DuckDBPyConnection,
+    since_label: str | None,
+    plans: dict | None = None,
+    cost_mode: str = "auto",
+) -> Path:
     """Generate share card PNG. Returns path to output file."""
-    plt.rcParams['text.parse_math'] = False
+    plt.rcParams["text.parse_math"] = False
 
     # Get totals
     totals = db.sql(f"""
@@ -147,25 +167,32 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         for t in tools:
             vals = np.array([tool_data[t].get(d, 0) for d in dates], dtype=float)
             color = TOOL_COLORS.get(t, "#c4862c")
-            ax.fill_between(x, bottoms, bottoms + vals,
-                            color=color, alpha=0.8, linewidth=0)
+            ax.fill_between(
+                x, bottoms, bottoms + vals, color=color, alpha=0.8, linewidth=0
+            )
             ax.plot(x, bottoms + vals, color=color, alpha=0.9, linewidth=1)
             bottoms += vals
 
         if len(dates) <= 14:
             ax.set_xticks(x)
-            ax.set_xticklabels([_short_date(d) for d in dates],
-                               rotation=0, ha="center", **_font(11))
+            ax.set_xticklabels(
+                [_short_date(d) for d in dates], rotation=0, ha="center", **_font(11)
+            )
         else:
             step = max(1, len(dates) // 10)
             ticks = list(range(0, len(dates), step))
             ax.set_xticks(ticks)
-            ax.set_xticklabels([_short_date(dates[i]) for i in ticks],
-                               rotation=0, ha="center", **_font(11))
+            ax.set_xticklabels(
+                [_short_date(dates[i]) for i in ticks],
+                rotation=0,
+                ha="center",
+                **_font(11),
+            )
 
     # Y axis as dollars
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(
-        lambda v, _: _fmt_cost(v) if v > 0 else ""))
+    ax.yaxis.set_major_formatter(
+        ticker.FuncFormatter(lambda v, _: _fmt_cost(v) if v > 0 else "")
+    )
 
     ax.tick_params(colors=TEXT, which="both")
     for label in ax.get_yticklabels():
@@ -180,8 +207,11 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     # No legend — tool names in subtitle are color-coded instead
 
     # Headline: the savings angle
-    period = "today" if since_label in ("24h", "1d") else (
-        "this week" if since_label in ("7d", "1w") else "")
+    period = (
+        "today"
+        if since_label in ("24h", "1d")
+        else ("this week" if since_label in ("7d", "1w") else "")
+    )
     sub_cost = sum(c for _, c in (plans or {}).values())
 
     # If usage < subscription: show monthly (funny: overpaying)
@@ -191,7 +221,8 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         days = 30  # default to monthly
         if since_label:
             import re as _re
-            m = _re.fullmatch(r'(\d+)([hdw])', since_label)
+
+            m = _re.fullmatch(r"(\d+)([hdw])", since_label)
             if m:
                 n, unit = int(m.group(1)), m.group(2)
                 days = {"h": n / 24, "d": n, "w": n * 7}[unit]
@@ -226,15 +257,30 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     renderer = fig.canvas.get_renderer()
     fig_width = fig.get_window_extent(renderer=renderer).width
 
-    cost_txt = fig.text(0.05, 0.97, _fmt_cost(total_cost), color=LIGHT,
-                        **_font(42, bold=True), ha="left", va="top")
+    cost_txt = fig.text(
+        0.05,
+        0.97,
+        _fmt_cost(total_cost),
+        color=LIGHT,
+        **_font(42, bold=True),
+        ha="left",
+        va="top",
+    )
     fig.canvas.draw()
-    x_after_cost = 0.05 + cost_txt.get_window_extent(renderer=renderer).width / fig_width + 0.02
+    x_after_cost = (
+        0.05 + cost_txt.get_window_extent(renderer=renderer).width / fig_width + 0.02
+    )
     if env_parts:
         from matplotlib.offsetbox import OffsetImage, AnnotationBbox
         from matplotlib.image import imread as mpl_imread
+
         emoji_dir = Path(__file__).parent / "emoji"
-        emoji_map = {"kWh": "zap.png", "m\u00b3": "sweat_droplets.png", "L": "sweat_droplets.png", "kg": "factory.png"}
+        emoji_map = {
+            "kWh": "zap.png",
+            "m\u00b3": "sweat_droplets.png",
+            "L": "sweat_droplets.png",
+            "kg": "factory.png",
+        }
 
         ex = x_after_cost
         for part in env_parts:
@@ -249,13 +295,19 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
                 img = mpl_imread(str(emoji_file))
                 im = OffsetImage(img, zoom=0.45)
                 ex += 0.01  # space before emoji
-                ab = AnnotationBbox(im, (ex, 0.955), xycoords='figure fraction',
-                                    frameon=False, box_alignment=(0, 0.5))
+                ab = AnnotationBbox(
+                    im,
+                    (ex, 0.955),
+                    xycoords="figure fraction",
+                    frameon=False,
+                    box_alignment=(0, 0.5),
+                )
                 fig.add_artist(ab)
                 ex += 0.03
 
-            txt = fig.text(ex, 0.97, part, color=TEXT,
-                           **_font(42, bold=True), ha="left", va="top")
+            txt = fig.text(
+                ex, 0.97, part, color=TEXT, **_font(42, bold=True), ha="left", va="top"
+            )
             fig.canvas.draw()
             ex += txt.get_window_extent(renderer=renderer).width / fig_width + 0.015
 
@@ -266,39 +318,53 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         if ratio >= 2:
             multiplier = f" ({ratio:.0f}x)"
     context = f"of AI compute{f' {period}' if period else ''}{sub_label}{multiplier}"
-    fig.text(0.05, 0.89, context, color=TEXT, **_font(14),
-             ha="left", va="top")
+    fig.text(0.05, 0.89, context, color=TEXT, **_font(14), ha="left", va="top")
 
     # Third line: colored tool names as legend
     x_pos = 0.05
     for i, (t, c) in enumerate(tool_costs):
         if i > 0:
-            sep = fig.text(x_pos, 0.84, "  |  ", color=TEXT, **_font(12),
-                           ha="left", va="top")
+            sep = fig.text(
+                x_pos, 0.84, "  |  ", color=TEXT, **_font(12), ha="left", va="top"
+            )
             fig.canvas.draw()
             x_pos += sep.get_window_extent(renderer=renderer).width / fig_width
         color = TOOL_COLORS.get(t, "#c4862c")
         plan_info = plans.get(t) if plans else None
         label = f"{t} ({plan_info[0]})" if plan_info else t
-        name_txt = fig.text(x_pos, 0.84, label, color=color, **_font(12, bold=True),
-                            ha="left", va="top")
+        name_txt = fig.text(
+            x_pos, 0.84, label, color=color, **_font(12, bold=True), ha="left", va="top"
+        )
         fig.canvas.draw()
         x_pos += name_txt.get_window_extent(renderer=renderer).width / fig_width
-        cost_txt = fig.text(x_pos, 0.84, f" {_fmt_cost(c)}", color=TEXT, **_font(12),
-                            ha="left", va="top")
+        cost_txt = fig.text(
+            x_pos,
+            0.84,
+            f" {_fmt_cost(c)}",
+            color=TEXT,
+            **_font(12),
+            ha="left",
+            va="top",
+        )
         fig.canvas.draw()
         x_pos += cost_txt.get_window_extent(renderer=renderer).width / fig_width
 
-    fig.text(x_pos, 0.84, f"  |  {n_projects} projects", color=TEXT, **_font(12),
-             ha="left", va="top")
+    fig.text(
+        x_pos,
+        0.84,
+        f"  |  {n_projects} projects",
+        color=TEXT,
+        **_font(12),
+        ha="left",
+        va="top",
+    )
 
     # Bottom-right: command (show full command only if non-default args used)
     if since_label and since_label != "7d":
         cmd = f"uvx clanker-analytics --since {since_label}"
     else:
         cmd = "uvx clanker-analytics"
-    fig.text(0.95, 0.84, cmd, color=DIM,
-             **_font(11), ha="right", va="top")
+    fig.text(0.95, 0.84, cmd, color=DIM, **_font(11), ha="right", va="top")
 
     plt.tight_layout(rect=[0, 0, 1, 0.78])
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
@@ -308,44 +374,77 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     return OUTPUT
 
 
-def copy_and_open(path: Path, total_cost: float, since_label: str | None,
-                  sub_cost: int = 0, cost_mode: str = "auto"):
+def copy_and_open(
+    path: Path,
+    total_cost: float,
+    since_label: str | None,
+    sub_cost: int = 0,
+    cost_mode: str = "auto",
+):
     """Copy PNG to clipboard and open X compose window."""
     # Copy to clipboard
     copied = False
     if sys.platform == "darwin":
-        copied = subprocess.run(["osascript", "-e",
-                        f'set the clipboard to (read (POSIX file "{path}") as «class PNGf»)'],
-                       check=False, capture_output=True).returncode == 0
+        copied = (
+            subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f'set the clipboard to (read (POSIX file "{path}") as «class PNGf»)',
+                ],
+                check=False,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
     elif sys.platform == "win32":
         try:
             # PowerShell: Set-Clipboard with image
-            copied = subprocess.run(
-                ["powershell", "-Command",
-                 f"Add-Type -AssemblyName System.Windows.Forms; "
-                 f"[System.Windows.Forms.Clipboard]::SetImage("
-                 f"[System.Drawing.Image]::FromFile('{path}'))"],
-                check=False, capture_output=True).returncode == 0
+            copied = (
+                subprocess.run(
+                    [
+                        "powershell",
+                        "-Command",
+                        f"Add-Type -AssemblyName System.Windows.Forms; "
+                        f"[System.Windows.Forms.Clipboard]::SetImage("
+                        f"[System.Drawing.Image]::FromFile('{path}'))",
+                    ],
+                    check=False,
+                    capture_output=True,
+                ).returncode
+                == 0
+            )
         except FileNotFoundError:
             pass
     elif sys.platform == "linux":
-        for cmd in [["wl-copy", "--type", "image/png"],
-                    ["xclip", "-selection", "clipboard", "-t", "image/png"]]:
+        for cmd in [
+            ["wl-copy", "--type", "image/png"],
+            ["xclip", "-selection", "clipboard", "-t", "image/png"],
+        ]:
             try:
                 with open(path, "rb") as f:
-                    if subprocess.run(cmd, stdin=f, check=False, capture_output=True).returncode == 0:
+                    if (
+                        subprocess.run(
+                            cmd, stdin=f, check=False, capture_output=True
+                        ).returncode
+                        == 0
+                    ):
                         copied = True
                         break
             except FileNotFoundError:
                 continue
 
-    period = "today" if since_label in ("24h", "1d") else (
-        "this week" if since_label in ("7d", "1w") else "")
+    period = (
+        "today"
+        if since_label in ("24h", "1d")
+        else ("this week" if since_label in ("7d", "1w") else "")
+    )
     if sub_cost:
         import re as _re
+
         days = 30
         if since_label:
-            m = _re.fullmatch(r'(\d+)([hdw])', since_label)
+            m = _re.fullmatch(r"(\d+)([hdw])", since_label)
             if m:
                 n, unit = int(m.group(1)), m.group(2)
                 days = {"h": n / 24, "d": n, "w": n * 7}[unit]
@@ -365,11 +464,24 @@ def copy_and_open(path: Path, total_cost: float, since_label: str | None,
 
     opened = False
     if sys.platform == "darwin":
-        opened = subprocess.run(["open", url], check=False, capture_output=True).returncode == 0
+        opened = (
+            subprocess.run(["open", url], check=False, capture_output=True).returncode
+            == 0
+        )
     elif sys.platform == "win32":
-        opened = subprocess.run(["cmd", "/c", "start", url], check=False, capture_output=True).returncode == 0
+        opened = (
+            subprocess.run(
+                ["cmd", "/c", "start", url], check=False, capture_output=True
+            ).returncode
+            == 0
+        )
     elif sys.platform == "linux":
-        opened = subprocess.run(["xdg-open", url], check=False, capture_output=True).returncode == 0
+        opened = (
+            subprocess.run(
+                ["xdg-open", url], check=False, capture_output=True
+            ).returncode
+            == 0
+        )
 
     if opened:
         print(f"  Opened X compose window")
