@@ -178,9 +178,20 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None) -> P
         else:
             p_str = f"p={p_val:.2f}"
 
+        # "1-in-X chance of being random"
+        odds = int(1 / p_val) if p_val > 0 else 999_999_999
+        if odds >= 1_000_000:
+            odds_str = f"1-in-{odds / 1e6:.0f}M"
+        elif odds >= 1_000:
+            odds_str = f"1-in-{odds / 1e3:.0f}k"
+        else:
+            odds_str = f"1-in-{odds}"
+        odds_str += " chance of being random"
+
         detail = (f"{best_stats['mean_before']:.1f}% \u2192 {best_stats['mean_after']:.1f}%"
                   f"  z={z:.1f}  {p_str}"
-                  f"  ({best_stats['n_before']} days before, {best_stats['n_after']} after)")
+                  f"  ({best_stats['n_before']} days before, {best_stats['n_after']} after)"
+                  f"  {odds_str}")
         fig.text(0.05, 0.91, detail, color=TEXT, **_font(13), ha="left", va="top")
     else:
         fig.text(0.05, 0.97, "cache rate stable", color=GREEN, **_font(28, bold=True),
