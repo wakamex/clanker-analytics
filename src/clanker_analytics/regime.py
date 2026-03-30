@@ -163,14 +163,24 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None) -> P
 
     # Headline
     if best_stats:
-        sig = "***" if best_t > 3.29 else "**" if best_t > 2.58 else "*"
         headline = f"cache rate dropped {best_stats['drop']:.1f}% on {_short_date(best_stats['date'])}"
         fig.text(0.05, 0.97, headline, color=LIGHT, **_font(28, bold=True),
                  ha="left", va="top")
 
-        detail = (f"{best_stats['mean_before']:.1f}% → {best_stats['mean_after']:.1f}%"
-                  f"  (t={best_t:.1f}, p<0.001{sig})"
-                  f"  {best_stats['n_before']} days before, {best_stats['n_after']} after")
+        # p-value from z-score (two-tailed)
+        z = best_t
+        # Approximate p-value using the complementary error function
+        p_val = math.erfc(z / math.sqrt(2))
+        if p_val < 0.001:
+            p_str = f"p={p_val:.1e}"
+        elif p_val < 0.01:
+            p_str = f"p={p_val:.3f}"
+        else:
+            p_str = f"p={p_val:.2f}"
+
+        detail = (f"{best_stats['mean_before']:.1f}% \u2192 {best_stats['mean_after']:.1f}%"
+                  f"  z={z:.1f}  {p_str}"
+                  f"  ({best_stats['n_before']} days before, {best_stats['n_after']} after)")
         fig.text(0.05, 0.91, detail, color=TEXT, **_font(13), ha="left", va="top")
     else:
         fig.text(0.05, 0.97, "cache rate stable", color=GREEN, **_font(28, bold=True),
