@@ -722,6 +722,13 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             db.sql(args.sql).show(max_rows=100)
         return 0
 
+    if args.regime:
+        from clanker_analytics.regime import detect_and_plot
+        path = detect_and_plot(db, args.since)
+        if path:
+            print(f"  Card saved to {path}")
+        return 0
+
     if args.table:
         with timer.span("render table", args.by):
             db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
@@ -771,6 +778,8 @@ def main(argv: list[str] | None = None):
                         help="Show table instead of chart")
     parser.add_argument("--share", action="store_true",
                         help="Generate PNG chart, copy to clipboard, and open X")
+    parser.add_argument("--regime", action="store_true",
+                        help="Detect cache rate regime changes and plot")
     cost_group = parser.add_mutually_exclusive_group()
     cost_group.add_argument("--monthly", action="store_true",
                             help="Show full monthly subscription cost")
