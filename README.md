@@ -27,12 +27,25 @@ clanker-analytics --since 24h            # last 24 hours (also: 7d, 2w, 2026-03-
 clanker-analytics --share                # chart + copy to clipboard + open X
 clanker-analytics --table                # tabular view
 clanker-analytics --table --by date      # table grouped by date (also: model, session)
+clanker-analytics --regime               # detect cache rate regime changes
 clanker-analytics --tool claude          # Claude Code only (also: codex, gemini)
 clanker-analytics --refresh              # force cache rebuild
 clanker-analytics --debug-timing         # print cache decisions and stage timings
 clanker-analytics --profile              # print a cProfile summary to stderr
 clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
 ```
+
+## Cache rate regime detection
+
+Worried your cache hit rate dropped? `--regime` auto-detects statistically significant changes using Welch's t-test:
+
+```
+clanker-analytics --regime --since 30d --tool claude
+```
+
+![regime detection](regime.png)
+
+Finds the optimal changepoint, shows before/after means with z-score and p-value, and tells you the odds of it being random. Works across all tools or filtered to one.
 
 ## How it works
 
