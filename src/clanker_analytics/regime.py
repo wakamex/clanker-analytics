@@ -201,16 +201,16 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
         fig.text(0.05, 0.91, f"avg {mean:.1f}% over {len(dates)} days", color=TEXT,
                  **_font(13), ha="left", va="top")
 
-    # Watermark
+    # Command line below detail
     cmd_parts = ["uvx clanker-analytics --regime"]
     if since_label:
         cmd_parts.append(f"--since {since_label}")
     if tool:
         cmd_parts.append(f"--tool {tool}")
-    fig.text(0.95, 0.97, " ".join(cmd_parts), color=DIM,
-             **_font(11), ha="right", va="top")
+    fig.text(0.05, 0.86, " ".join(cmd_parts), color=DIM,
+             **_font(11), ha="left", va="top")
 
-    plt.tight_layout(rect=[0, 0, 1, 0.85])
+    plt.tight_layout(rect=[0, 0, 1, 0.80])
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
     plt.close(fig)
