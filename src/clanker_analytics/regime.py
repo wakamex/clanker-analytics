@@ -139,6 +139,8 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
                     xmin=0, xmax=cp / len(dates), color=GREEN, alpha=0.15)
         ax.axhline(y=best_stats["mean_before"], xmax=cp / len(dates),
                     color=GREEN, linestyle="-", linewidth=1.5, alpha=0.6)
+        ax.axhspan(best_stats["mean_after"] - 0.5, best_stats["mean_after"] + 0.5,
+                    xmin=cp / len(dates), xmax=1, color=RED, alpha=0.15)
         ax.axhline(y=best_stats["mean_after"], xmin=cp / len(dates),
                     color=RED, linestyle="-", linewidth=1.5, alpha=0.6)
 
