@@ -135,14 +135,17 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
         ax.axvline(x=cp, color=RED, linestyle="--", linewidth=2, alpha=0.8)
 
         # Shade before/after regions
+        drop = best_stats["drop"]
+        before_color = GREEN if drop > 0 else RED
+        after_color = RED if drop > 0 else GREEN
         ax.axhspan(best_stats["mean_before"] - 0.5, best_stats["mean_before"] + 0.5,
-                    xmin=0, xmax=cp / len(dates), color=GREEN, alpha=0.15)
+                    xmin=0, xmax=cp / len(dates), color=before_color, alpha=0.15)
         ax.axhline(y=best_stats["mean_before"], xmax=cp / len(dates),
-                    color=GREEN, linestyle="-", linewidth=1.5, alpha=0.6)
+                    color=before_color, linestyle="-", linewidth=1.5, alpha=0.6)
         ax.axhspan(best_stats["mean_after"] - 0.5, best_stats["mean_after"] + 0.5,
-                    xmin=cp / len(dates), xmax=1, color=RED, alpha=0.15)
+                    xmin=cp / len(dates), xmax=1, color=after_color, alpha=0.15)
         ax.axhline(y=best_stats["mean_after"], xmin=cp / len(dates),
-                    color=RED, linestyle="-", linewidth=1.5, alpha=0.6)
+                    color=after_color, linestyle="-", linewidth=1.5, alpha=0.6)
 
     # X axis
     if len(dates) <= 14:
@@ -170,7 +173,11 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
 
     # Headline
     if best_stats:
-        headline = f"cache rate dropped {best_stats['drop']:.1f}% on {_short_date(best_stats['date'])}"
+        drop = best_stats['drop']
+        if drop > 0:
+            headline = f"cache rate dropped {drop:.1f}% on {_short_date(best_stats['date'])}"
+        else:
+            headline = f"cache rate rose {-drop:.1f}% on {_short_date(best_stats['date'])}"
         fig.text(0.05, 0.97, headline, color=LIGHT, **_font(28, bold=True),
                  ha="left", va="top")
 
