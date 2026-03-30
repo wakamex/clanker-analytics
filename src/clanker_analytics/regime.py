@@ -33,7 +33,8 @@ def _short_date(d: str) -> str:
     return f"{months[int(parts[1]) - 1]} {int(parts[2])}"
 
 
-def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None) -> Path | None:
+def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
+                    tool: str | None = None) -> Path | None:
     """Detect cache rate regime change and generate a chart."""
     plt.rcParams['text.parse_math'] = False
 
@@ -201,7 +202,12 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None) -> P
                  **_font(13), ha="left", va="top")
 
     # Watermark
-    fig.text(0.95, 0.97, "uvx clanker-analytics --regime", color=DIM,
+    cmd_parts = ["uvx clanker-analytics --regime"]
+    if since_label:
+        cmd_parts.append(f"--since {since_label}")
+    if tool:
+        cmd_parts.append(f"--tool {tool}")
+    fig.text(0.95, 0.97, " ".join(cmd_parts), color=DIM,
              **_font(11), ha="right", va="top")
 
     plt.tight_layout(rect=[0, 0, 1, 0.85])

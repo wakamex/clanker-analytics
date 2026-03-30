@@ -724,7 +724,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
 
     if args.regime:
         from clanker_analytics.regime import detect_and_plot
-        path = detect_and_plot(db, args.since)
+        path = detect_and_plot(db, args.since, args.tool if args.tool != "all" else None)
         if path:
             print(f"  Card saved to {path}")
         return 0
