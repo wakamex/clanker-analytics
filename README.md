@@ -6,6 +6,7 @@ Supports **Claude Code**, **Codex**, and **Gemini CLI**.
 
 ![clanker-analytics chart](share.png)
 ![clanker-analytics table](table.png)
+![clanker-analytics regime](regime.png)
 
 ## Install
 
@@ -34,18 +35,6 @@ clanker-analytics --debug-timing         # print cache decisions and stage timin
 clanker-analytics --profile              # print a cProfile summary to stderr
 clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
 ```
-
-## Cache rate regime detection
-
-Worried your cache hit rate dropped? `--regime` auto-detects statistically significant changes using Welch's t-test:
-
-```
-clanker-analytics --regime --since 30d --tool claude
-```
-
-![regime detection](regime.png)
-
-Finds the optimal changepoint, shows before/after means with z-score and p-value, and tells you the odds of it being random. Works across all tools or filtered to one.
 
 ## How it works
 
