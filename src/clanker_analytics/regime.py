@@ -57,7 +57,8 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
     overall = db.sql("""
         SELECT date,
                100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens - output_tokens), 1) as cache_pct,
-               count(*) as turns
+               count(*) as turns,
+               sum(total_tokens)::BIGINT as total
         FROM tokens
         GROUP BY date
         ORDER BY date
@@ -66,6 +67,7 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
     dates = [r[0] for r in overall]
     cache_pcts = [r[1] for r in overall]
     turns = [r[2] for r in overall]
+    totals = [r[3] for r in overall]
 
     if len(dates) < 4:
         print("  Not enough data for regime detection.")
@@ -99,6 +101,8 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
                 "mean_after": mean_a,
                 "n_before": n_b,
                 "n_after": n_a,
+                "tokens_before": sum(totals[:i]),
+                "tokens_after": sum(totals[i:]),
                 "t_stat": t,
                 "drop": mean_b - mean_a,
             }
@@ -189,10 +193,12 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
             odds_str = f"1-in-{odds}"
         odds_str += " chance of being random"
 
+        from clanker_analytics.share import _fmt_tokens
+        tb = _fmt_tokens(best_stats['tokens_before'])
+        ta = _fmt_tokens(best_stats['tokens_after'])
         detail = (f"{best_stats['mean_before']:.1f}% \u2192 {best_stats['mean_after']:.1f}%"
-                  f"  z={z:.1f}  {p_str}"
-                  f"  ({best_stats['n_before']} days before, {best_stats['n_after']} after)"
-                  f"  {odds_str}")
+                  f"  z={z:.1f}  {p_str}  {odds_str}"
+                  f"  ({tb} before, {ta} after)")
         fig.text(0.05, 0.91, detail, color=TEXT, **_font(13), ha="left", va="top")
     else:
         fig.text(0.05, 0.97, "cache rate stable", color=GREEN, **_font(28, bold=True),
