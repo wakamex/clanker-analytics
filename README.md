@@ -8,6 +8,8 @@ Supports **Claude Code**, **Codex**, and **Gemini CLI**.
 ![clanker-analytics table](table.png)
 ![clanker-analytics regime](regime.png)
 
+Worried your cache hit rate dropped? `--regime` auto-detects statistically significant changes using Welch's t-test: `clanker-analytics --regime --since 30d --tool claude`
+
 ## Install
 
 ```
