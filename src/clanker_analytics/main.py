@@ -75,12 +75,14 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 6
+CACHE_SCHEMA_VERSION = 7
 
 SOURCE_TREES = [
     ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
     ("Codex", Path(HOME) / ".codex" / "sessions", "*.jsonl"),
     ("Gemini", Path(HOME) / ".gemini" / "tmp", "chats/*.json"),
+    ("Agy", Path(HOME) / ".gemini" / "antigravity-cli" / "brain",
+     "*/.system_generated/logs/transcript_full.jsonl"),
 ]
 
 TOKEN_SCHEMA = """
@@ -96,13 +98,14 @@ TOKEN_SCHEMA = """
     total_tokens BIGINT,
     execution_type VARCHAR,
     project_path VARCHAR,
+    token_count_type VARCHAR,
     source_file VARCHAR
 """
 
 TOKEN_INSERT_COLUMNS = """
     tool, project, session, date, model,
     input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-    total_tokens, execution_type, project_path, source_file
+    total_tokens, execution_type, project_path, token_count_type, source_file
 """
 
 # On Windows, discover WSL home paths for additional data sources
@@ -163,6 +166,7 @@ SELECT
         ELSE 'interactive'
     END as execution_type,
     replace(cwd, '\\', '/') as project_path,
+    'exact' as token_count_type,
     replace(filename, '\\', '/') as source_file
 FROM read_json({source_expr},
     format='newline_delimited', filename=true, union_by_name=true,
@@ -244,6 +248,7 @@ SELECT
     coalesce(p.execution_type, 'unknown') as execution_type,
     coalesce(p.project_path, p.project,
              regexp_extract(t.filename, '([^/]+)[.]jsonl', 1)) as project_path,
+    'exact' as token_count_type,
     t.filename as source_file
 FROM token_entries t
 LEFT JOIN projects p ON t.filename = p.filename
@@ -282,6 +287,7 @@ SELECT
     'interactive' as execution_type,
     CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
          THEN project_raw[:8] ELSE lower(project_raw) END as project_path,
+    'exact' as token_count_type,
     filename as source_file
 FROM raw
 WHERE m.tokens IS NOT NULL
@@ -289,10 +295,152 @@ WHERE m.tokens IS NOT NULL
 """
 
 
+def _agy_sql(source_expr: str) -> str:
+    """Load canonical Antigravity transcripts without replaying resumed history."""
+    return f"""
+WITH raw AS (
+    SELECT replace(filename, '\\', '/') as filename, json as event_json
+    FROM read_json_objects({source_expr},
+        format='newline_delimited', filename=true, ignore_errors=true)
+),
+events AS (
+    SELECT DISTINCT
+        filename,
+        event_json,
+        json_extract_string(event_json, '$.type') as type,
+        json_extract_string(event_json, '$.source') as source,
+        json_extract_string(event_json, '$.status') as status,
+        json_extract_string(event_json, '$.created_at') as created_at,
+        json_extract_string(event_json, '$.content') as content,
+        json_extract_string(event_json, '$.thinking') as thinking,
+        coalesce(
+            json_extract_string(event_json, '$.tool_calls[0].args.Cwd'),
+            json_extract_string(event_json, '$.tool_calls[0].args.cwd'),
+            json_extract_string(event_json, '$.tool_calls[0].args.WorkspaceRoot'),
+            json_extract_string(event_json, '$.cwd')
+        ) as project_path,
+        coalesce(
+            json_extract_string(event_json, '$.model'),
+            json_extract_string(event_json, '$.modelVersion'),
+            json_extract_string(event_json, '$.usageMetadata.model')
+        ) as model,
+        try_cast(coalesce(
+            json_extract_string(event_json, '$.usageMetadata.promptTokenCount'),
+            json_extract_string(event_json, '$.usage_metadata.prompt_token_count'),
+            json_extract_string(event_json, '$.usage.prompt_tokens'),
+            json_extract_string(event_json, '$.usage.input_tokens'),
+            json_extract_string(event_json, '$.usage.inputTokens')
+        ) as BIGINT) as exact_input_raw,
+        try_cast(coalesce(
+            json_extract_string(event_json, '$.usageMetadata.cachedContentTokenCount'),
+            json_extract_string(event_json, '$.usage_metadata.cached_content_token_count'),
+            json_extract_string(event_json, '$.usage.cache_read_tokens'),
+            json_extract_string(event_json, '$.usage.cached_input_tokens')
+        ) as BIGINT) as exact_cache,
+        try_cast(coalesce(
+            json_extract_string(event_json, '$.usageMetadata.candidatesTokenCount'),
+            json_extract_string(event_json, '$.usage_metadata.candidates_token_count'),
+            json_extract_string(event_json, '$.usage.completion_tokens'),
+            json_extract_string(event_json, '$.usage.output_tokens'),
+            json_extract_string(event_json, '$.usage.outputTokens')
+        ) as BIGINT) as exact_output_raw,
+        try_cast(coalesce(
+            json_extract_string(event_json, '$.usageMetadata.thoughtsTokenCount'),
+            json_extract_string(event_json, '$.usage_metadata.thoughts_token_count')
+        ) as BIGINT) as exact_thinking,
+        try_cast(coalesce(
+            json_extract_string(event_json, '$.usageMetadata.totalTokenCount'),
+            json_extract_string(event_json, '$.usage_metadata.total_token_count'),
+            json_extract_string(event_json, '$.usage.total_tokens'),
+            json_extract_string(event_json, '$.usage.totalTokens')
+        ) as BIGINT) as exact_total
+    FROM raw
+),
+session_meta AS (
+    SELECT
+        filename,
+        regexp_extract(filename, '/brain/([^/]+)/', 1) as session,
+        max(project_path) FILTER (WHERE project_path IS NOT NULL) as project_path,
+        max(model) FILTER (WHERE model IS NOT NULL) as model,
+        bool_or(exact_input_raw IS NOT NULL OR exact_cache IS NOT NULL
+                OR exact_output_raw IS NOT NULL OR exact_thinking IS NOT NULL
+                OR exact_total IS NOT NULL) as has_exact
+    FROM events
+    GROUP BY filename
+),
+daily AS (
+    SELECT
+        e.filename,
+        e.created_at[:10] as date,
+        m.has_exact,
+        CASE WHEN m.has_exact THEN
+            sum(greatest(coalesce(e.exact_input_raw, 0) - coalesce(e.exact_cache, 0), 0))
+        ELSE
+            ceil(sum(CASE WHEN e.source != 'MODEL' THEN length(coalesce(e.content, ''))
+                          ELSE 0 END) / 4.0)
+        END::BIGINT as input_tokens,
+        CASE WHEN m.has_exact THEN
+            sum(coalesce(e.exact_output_raw, 0) + coalesce(e.exact_thinking, 0))
+        ELSE
+            ceil(sum(CASE WHEN e.source = 'MODEL' THEN
+                         length(coalesce(e.content, ''))
+                         + length(coalesce(e.thinking, ''))
+                         + length(coalesce(cast(json_extract(e.event_json, '$.tool_calls') as VARCHAR), ''))
+                         ELSE 0 END) / 4.0)
+        END::BIGINT as output_tokens,
+        CASE WHEN m.has_exact THEN sum(coalesce(e.exact_cache, 0)) ELSE 0 END::BIGINT
+            as cache_read_tokens,
+        CASE WHEN m.has_exact THEN
+            sum(coalesce(
+                e.exact_total,
+                greatest(coalesce(e.exact_input_raw, 0) - coalesce(e.exact_cache, 0), 0)
+                + coalesce(e.exact_cache, 0)
+                + coalesce(e.exact_output_raw, 0)
+                + coalesce(e.exact_thinking, 0)
+            ))
+        ELSE
+            ceil(sum(CASE WHEN e.source != 'MODEL' THEN length(coalesce(e.content, ''))
+                          ELSE 0 END) / 4.0)
+            + ceil(sum(CASE WHEN e.source = 'MODEL' THEN
+                    length(coalesce(e.content, ''))
+                    + length(coalesce(e.thinking, ''))
+                    + length(coalesce(cast(json_extract(e.event_json, '$.tool_calls') as VARCHAR), ''))
+                  ELSE 0 END) / 4.0)
+        END::BIGINT as total_tokens
+    FROM events e
+    JOIN session_meta m USING (filename)
+    WHERE e.status = 'DONE'
+      AND e.created_at IS NOT NULL
+      AND e.type != 'CONVERSATION_HISTORY'
+    GROUP BY e.filename, e.created_at[:10], m.has_exact
+)
+SELECT
+    'Agy' as tool,
+    lower(coalesce(nullif(split_part(replace(m.project_path, '\\', '/'), '/', -1), ''),
+                   'antigravity')) as project,
+    m.session,
+    d.date,
+    coalesce(m.model, '') as model,
+    d.input_tokens::INT as input_tokens,
+    d.output_tokens::INT as output_tokens,
+    0 as cache_write_tokens,
+    d.cache_read_tokens::INT as cache_read_tokens,
+    d.total_tokens as total_tokens,
+    'interactive' as execution_type,
+    coalesce(replace(m.project_path, '\\', '/'), 'antigravity') as project_path,
+    CASE WHEN d.has_exact THEN 'exact' ELSE 'estimated' END as token_count_type,
+    d.filename as source_file
+FROM daily d
+JOIN session_meta m USING (filename)
+WHERE d.total_tokens > 0
+"""
+
+
 SOURCES = {
     "claude": ("Claude Code", _claude_sql),
     "codex": ("Codex", _codex_sql),
     "gemini": ("Gemini", _gemini_sql),
+    "agy": ("Agy", _agy_sql),
 }
 
 COST_PER_ROW = """
@@ -300,7 +448,7 @@ COST_PER_ROW = """
         WHEN tool = 'Codex' THEN
             (input_tokens * 1.25 + cache_write_tokens * 1.25
              + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
-        WHEN tool = 'Gemini' THEN CASE
+        WHEN tool IN ('Gemini', 'Agy') THEN CASE
             WHEN model LIKE '%flash%' THEN
                 (input_tokens * 0.15 + cache_read_tokens * 0.0375
                  + output_tokens * 0.60) / 1e6
@@ -334,6 +482,8 @@ SUMMARY_COLS = f"""
     fmt(sum(output_tokens)) as output,
     lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
     {COST_EXPR} as "api_cost",
+    CASE WHEN count(*) FILTER (WHERE token_count_type = 'estimated') > 0
+         THEN 'estimated' ELSE 'exact' END as count_basis,
     sum(total_tokens)::BIGINT as _sort
 """
 
@@ -501,6 +651,8 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
             ("Claude Code", Path(wsl_home) / ".claude" / "projects", "*.jsonl"),
             ("Codex", Path(wsl_home) / ".codex" / "sessions", "*.jsonl"),
             ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.json"),
+            ("Agy", Path(wsl_home) / ".gemini" / "antigravity-cli" / "brain",
+             "*/.system_generated/logs/transcript_full.jsonl"),
         ])
     return trees
 

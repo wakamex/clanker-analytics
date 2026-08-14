@@ -22,6 +22,7 @@ TOOL_COLORS = {
     "Claude Code": "#d97757",
     "Codex": "#10a37f",
     "Gemini": "#4285f4",
+    "Agy": "#a142f4",
 }
 
 from clanker_analytics.main import COST_PER_ROW as COST_SQL
@@ -77,10 +78,11 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
                (sum(total_tokens) - 0.9 * sum(cache_read_tokens))::BIGINT,
                count(DISTINCT tool)::INT,
                count(DISTINCT project)::INT,
-               sum({COST_SQL})
+               sum({COST_SQL}),
+               count(*) FILTER (WHERE token_count_type = 'estimated') > 0
         FROM tokens
     """).fetchone()
-    total_tokens, billable_tokens, n_tools, n_projects, total_cost = totals
+    total_tokens, billable_tokens, n_tools, n_projects, total_cost, has_estimates = totals
     total_tokens = total_tokens or 0
     billable_tokens = billable_tokens or 0
     total_cost = total_cost or 0
@@ -90,7 +92,8 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
 
     # Get api cost per tool
     tool_costs = db.sql(f"""
-        SELECT tool, sum({COST_SQL}) as cost
+        SELECT tool, sum({COST_SQL}) as cost,
+               count(*) FILTER (WHERE token_count_type = 'estimated') > 0 as estimated
         FROM tokens GROUP BY tool ORDER BY cost DESC
     """).fetchall()
 
@@ -226,7 +229,8 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     renderer = fig.canvas.get_renderer()
     fig_width = fig.get_window_extent(renderer=renderer).width
 
-    cost_txt = fig.text(0.05, 0.97, _fmt_cost(total_cost), color=LIGHT,
+    cost_label = ("~" if has_estimates else "") + _fmt_cost(total_cost)
+    cost_txt = fig.text(0.05, 0.97, cost_label, color=LIGHT,
                         **_font(42, bold=True), ha="left", va="top")
     fig.canvas.draw()
     x_after_cost = 0.05 + cost_txt.get_window_extent(renderer=renderer).width / fig_width + 0.02
@@ -265,13 +269,14 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         ratio = total_cost / (sub_cost * days / 30) if days else 0
         if ratio >= 2:
             multiplier = f" ({ratio:.0f}x)"
-    context = f"of AI compute{f' {period}' if period else ''}{sub_label}{multiplier}"
+    estimate_note = " (includes token estimates)" if has_estimates else ""
+    context = f"of AI compute{f' {period}' if period else ''}{sub_label}{multiplier}{estimate_note}"
     fig.text(0.05, 0.89, context, color=TEXT, **_font(14),
              ha="left", va="top")
 
     # Third line: colored tool names as legend
     x_pos = 0.05
-    for i, (t, c) in enumerate(tool_costs):
+    for i, (t, c, estimated) in enumerate(tool_costs):
         if i > 0:
             sep = fig.text(x_pos, 0.84, "  |  ", color=TEXT, **_font(12),
                            ha="left", va="top")
@@ -279,12 +284,18 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
             x_pos += sep.get_window_extent(renderer=renderer).width / fig_width
         color = TOOL_COLORS.get(t, "#c4862c")
         plan_info = plans.get(t) if plans else None
-        label = f"{t} ({plan_info[0]})" if plan_info else t
+        details = []
+        if plan_info:
+            details.append(plan_info[0])
+        if estimated:
+            details.append("estimated")
+        label = f"{t} ({', '.join(details)})" if details else t
         name_txt = fig.text(x_pos, 0.84, label, color=color, **_font(12, bold=True),
                             ha="left", va="top")
         fig.canvas.draw()
         x_pos += name_txt.get_window_extent(renderer=renderer).width / fig_width
-        cost_txt = fig.text(x_pos, 0.84, f" {_fmt_cost(c)}", color=TEXT, **_font(12),
+        cost_prefix = "~" if estimated else ""
+        cost_txt = fig.text(x_pos, 0.84, f" {cost_prefix}{_fmt_cost(c)}", color=TEXT, **_font(12),
                             ha="left", va="top")
         fig.canvas.draw()
         x_pos += cost_txt.get_window_extent(renderer=renderer).width / fig_width
