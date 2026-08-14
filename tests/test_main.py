@@ -28,7 +28,7 @@ def _make_db(*rows):
         tool VARCHAR, project VARCHAR, session VARCHAR, date VARCHAR, model VARCHAR,
         input_tokens INT, output_tokens INT, cache_write_tokens INT, cache_read_tokens INT,
         total_tokens BIGINT, execution_type VARCHAR DEFAULT 'interactive',
-        project_path VARCHAR, source_file VARCHAR
+        project_path VARCHAR, token_count_type VARCHAR DEFAULT 'exact', source_file VARCHAR
     )""")
     for r in rows:
         db.execute("""
@@ -186,6 +186,78 @@ class TestSourceLoaders:
         rows = duckdb.sql(main_mod._claude_sql(source)).fetchall()
 
         assert sorted(row[10] for row in rows) == ["interactive", "subagent"]
+
+    def test_agy_uses_exact_retained_usage_and_attributes_project(self, tmp_path):
+        session = "11111111-2222-3333-4444-555555555555"
+        path = tmp_path / "brain" / session / ".system_generated" / "logs"
+        path.mkdir(parents=True)
+        transcript = path / "transcript_full.jsonl"
+        transcript.write_text(json.dumps({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": "2026-08-14T12:00:00Z",
+            "content": "retained response text",
+            "model": "gemini-3.5-flash",
+            "tool_calls": [{"name": "run_command", "args": {"Cwd": "/code/project"}}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "cachedContentTokenCount": 20,
+                "candidatesTokenCount": 30,
+                "thoughtsTokenCount": 10,
+                "totalTokenCount": 140,
+            },
+        }) + "\n")
+
+        row = duckdb.sql(
+            main_mod._agy_sql(main_mod._sql_literal(transcript.as_posix()))
+        ).fetchone()
+
+        assert row[1:5] == ("project", session, "2026-08-14", "gemini-3.5-flash")
+        assert row[5:10] == (80, 40, 0, 20, 140)
+        assert row[11:13] == ("/code/project", "exact")
+
+    def test_agy_estimate_excludes_resume_history_and_duplicate_events(self, tmp_path):
+        session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        transcript = tmp_path / "brain" / session / ".system_generated" / "logs" / "transcript_full.jsonl"
+        transcript.parent.mkdir(parents=True)
+        user_event = {
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "created_at": "2026-08-14T12:00:00Z",
+            "content": "12345678",
+        }
+        rows = [
+            {
+                "step_index": 0,
+                "source": "SYSTEM",
+                "type": "CONVERSATION_HISTORY",
+                "status": "DONE",
+                "created_at": "2026-08-14T12:00:00Z",
+                "content": "x" * 400,
+            },
+            user_event,
+            user_event,
+            {
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "FINISH",
+                "status": "DONE",
+                "created_at": "2026-08-14T12:00:01Z",
+                "content": "abcdefgh",
+            },
+        ]
+        transcript.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        result = duckdb.sql(
+            main_mod._agy_sql(main_mod._sql_literal(transcript.as_posix()))
+        ).fetchone()
+
+        assert result[5:10] == (2, 2, 0, 0, 4)
+        assert result[12] == "estimated"
 
 
 # ===========================================================================
@@ -481,6 +553,22 @@ class TestQueries:
         assert result[0][:2] == ("*", "*")
         assert ("subagent", "Codex") in [row[:2] for row in result]
 
+    def test_aggregation_labels_mixed_counts_as_estimated(self):
+        agy_row = ("Agy", "project", "agy-session", "2026-03-15", "",
+                   100, 20, 0, 0, 120)
+        db = _make_db(SONNET_ROW, agy_row)
+        db.execute("UPDATE tokens SET token_count_type = 'estimated' WHERE tool = 'Agy'")
+
+        relation = db.sql(main_mod.QUERIES["project"].format(limit=50))
+        rows = [dict(zip(relation.columns, row)) for row in relation.fetchall()]
+
+        overall = next(row for row in rows if row["project"] == "*" and row["tool"] == "*")
+        agy = next(row for row in rows if row["project"] == "*" and row["tool"] == "Agy")
+        claude = next(row for row in rows if row["project"] == "*" and row["tool"] == "Claude Code")
+        assert overall["count_basis"] == "estimated"
+        assert agy["count_basis"] == "estimated"
+        assert claude["count_basis"] == "exact"
+
 
 # ===========================================================================
 # Plan detection tests
@@ -696,6 +784,30 @@ class TestWindowsPaths:
 # ===========================================================================
 
 class TestDebugHooks:
+    def test_source_scan_discovers_only_canonical_agy_transcript(self, tmp_path, monkeypatch):
+        brain = tmp_path / "antigravity-cli" / "brain"
+        logs = brain / "session" / ".system_generated" / "logs"
+        chunks = logs / "chunks" / "transcript_full"
+        chunks.mkdir(parents=True)
+        canonical = logs / "transcript_full.jsonl"
+        canonical.write_text("{}\n")
+        (logs / "transcript.jsonl").write_text("{}\n")
+        (chunks / "00000000.jsonl").write_text("{}\n")
+        presence = tmp_path / "antigravity-cli" / "presence"
+        presence.mkdir()
+        (presence / "session.lock").write_text("")
+
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            ("Agy", brain, "*/.system_generated/logs/transcript_full.jsonl"),
+        ])
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        files, dir_count, _ = main_mod.scan_source_files()
+
+        assert list(files) == [canonical.as_posix()]
+        assert files[canonical.as_posix()].tool == "Agy"
+        assert dir_count == 1
+
     def test_sources_mtime_includes_gemini_json(self, tmp_path, monkeypatch):
         claude_dir = tmp_path / "claude"
         claude_dir.mkdir()
@@ -752,6 +864,7 @@ class TestDebugHooks:
                     total_tokens::BIGINT as total_tokens,
                     'interactive' as execution_type,
                     project as project_path,
+                    'exact' as token_count_type,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
@@ -819,6 +932,7 @@ class TestDebugHooks:
                     total_tokens::BIGINT as total_tokens,
                     'interactive' as execution_type,
                     project as project_path,
+                    'exact' as token_count_type,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
@@ -848,6 +962,61 @@ class TestDebugHooks:
         assert rows == [("alpha", 3)]
         assert any(sample.label == "drop changed rows" for sample in timer.samples)
         assert not any(sample.label == "append changed files" for sample in timer.samples)
+
+    def test_agy_resume_replaces_cached_session_without_double_counting(
+            self, tmp_path, monkeypatch):
+        brain = tmp_path / "brain"
+        transcript = brain / "session" / ".system_generated" / "logs" / "transcript_full.jsonl"
+        transcript.parent.mkdir(parents=True)
+
+        def event(step, source, event_type, content):
+            return {
+                "step_index": step,
+                "source": source,
+                "type": event_type,
+                "status": "DONE",
+                "created_at": f"2026-08-14T12:00:0{step}Z",
+                "content": content,
+            }
+
+        original = [
+            event(0, "USER_EXPLICIT", "USER_INPUT", "12345678"),
+            event(1, "MODEL", "FINISH", "abcdefgh"),
+        ]
+        transcript.write_text("".join(json.dumps(row) + "\n" for row in original))
+
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            ("Agy", brain, "*/.system_generated/logs/transcript_full.jsonl"),
+        ])
+        monkeypatch.setattr(main_mod, "SOURCES", {"agy": ("Agy", main_mod._agy_sql)})
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        db = duckdb.connect()
+        register_macros(db)
+        main_mod.load_tokens(db, refresh=False)
+        assert db.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 4
+
+        resumed = original + [
+            event(2, "SYSTEM", "CONVERSATION_HISTORY", "x" * 400),
+            event(3, "USER_EXPLICIT", "USER_INPUT", "87654321"),
+            event(4, "MODEL", "FINISH", "hgfedcba"),
+        ]
+        transcript.write_text("".join(json.dumps(row) + "\n" for row in resumed))
+        stat = transcript.stat()
+        os.utime(transcript, ns=(stat.st_atime_ns + 1_000_000, stat.st_mtime_ns + 1_000_000))
+
+        db2 = duckdb.connect()
+        register_macros(db2)
+        timer = main_mod.DebugTimer(True)
+        main_mod.load_tokens(db2, refresh=False, timing=timer)
+
+        assert db2.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 8
+        assert any(sample.label == "drop changed rows" for sample in timer.samples)
+        assert any(sample.label == "append changed files" for sample in timer.samples)
 
     def test_debug_timing_flag_prints_summary(self, capsys):
         def fake_run(args, timer):
