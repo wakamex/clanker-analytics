@@ -75,7 +75,7 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 6
 
 SOURCE_TREES = [
     ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
@@ -94,13 +94,15 @@ TOKEN_SCHEMA = """
     cache_write_tokens INT,
     cache_read_tokens INT,
     total_tokens BIGINT,
+    execution_type VARCHAR,
+    project_path VARCHAR,
     source_file VARCHAR
 """
 
 TOKEN_INSERT_COLUMNS = """
     tool, project, session, date, model,
     input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-    total_tokens, source_file
+    total_tokens, execution_type, project_path, source_file
 """
 
 # On Windows, discover WSL home paths for additional data sources
@@ -153,31 +155,63 @@ SELECT
       + coalesce(cast(message.usage.output_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.cache_creation_input_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.cache_read_input_tokens as INTEGER), 0) as total_tokens,
+    CASE
+        WHEN coalesce(isSidechain, false)
+          OR contains(replace(filename, '\\', '/'), '/subagents/')
+          OR contains(replace(cwd, '\\', '/'), '/.aop/worktrees/')
+        THEN 'subagent'
+        ELSE 'interactive'
+    END as execution_type,
+    replace(cwd, '\\', '/') as project_path,
     replace(filename, '\\', '/') as source_file
 FROM read_json({source_expr},
     format='newline_delimited', filename=true, union_by_name=true,
     ignore_errors=true, maximum_depth=3, maximum_object_size=67108864)
 WHERE type = 'assistant'
-  AND (isSidechain IS NULL OR isSidechain = false)
   AND message.model != '<synthetic>'
   AND message.usage IS NOT NULL
   AND timestamp IS NOT NULL
-  AND NOT contains(replace(filename, '\\', '/'), '/subagents/')
+  AND NOT contains(replace(filename, '\\', '/'), '/subagents/agent-acompact-')
 """
 
 
 def _codex_sql(source_expr: str) -> str:
     return f"""
 WITH raw AS (
-    SELECT replace(filename, '\\', '/') as filename, type, timestamp, payload
+    SELECT replace(filename, '\\', '/') as filename, type, timestamp, payload,
+           to_json(payload) as payload_json
     FROM read_json({source_expr},
         format='newline_delimited', filename=true, union_by_name=true,
         ignore_errors=true, maximum_depth=4, maximum_object_size=67108864)
     WHERE type IN ('session_meta', 'event_msg')
 ),
 projects AS (
-    SELECT filename, split_part(trim(cast(payload.cwd as VARCHAR), '"'), '/', -1) as project
+    SELECT
+        filename,
+        json_extract_string(payload_json, '$.cwd') as project_path,
+        split_part(json_extract_string(payload_json, '$.cwd'), '/', -1) as project,
+        CASE
+            WHEN contains(json_extract_string(payload_json, '$.cwd'), '/.aop/worktrees/')
+              OR json_extract(payload_json, '$.source.subagent') IS NOT NULL
+              OR json_extract_string(payload_json, '$.thread_source') = 'subagent'
+              OR json_extract_string(payload_json, '$.parent_thread_id') IS NOT NULL
+              OR json_extract_string(payload_json, '$.agent_path') IS NOT NULL
+            THEN 'subagent'
+            WHEN json_extract_string(payload_json, '$.originator') = 'codex_exec'
+              OR json_extract_string(payload_json, '$.source') = 'exec'
+            THEN 'exec'
+            WHEN json_extract_string(payload_json, '$.thread_source') = 'user'
+              OR json_extract_string(payload_json, '$.originator') IN ('codex-tui', 'codex_cli_rs')
+              OR json_extract_string(payload_json, '$.source') = 'cli'
+            THEN 'interactive'
+            ELSE 'unknown'
+        END as execution_type
     FROM raw WHERE type = 'session_meta'
+    QUALIFY row_number() OVER (
+        PARTITION BY filename
+        ORDER BY contains(filename, trim(cast(payload.id as VARCHAR), '"')) DESC,
+                 timestamp ASC
+    ) = 1
 ),
 token_entries AS (
     SELECT
@@ -207,6 +241,9 @@ SELECT
         WHEN t.cum_total IS NOT NULL AND t.prev_cum IS NOT NULL THEN t.cum_total - t.prev_cum
         ELSE 0
     END as total_tokens,
+    coalesce(p.execution_type, 'unknown') as execution_type,
+    coalesce(p.project_path, p.project,
+             regexp_extract(t.filename, '([^/]+)[.]jsonl', 1)) as project_path,
     t.filename as source_file
 FROM token_entries t
 LEFT JOIN projects p ON t.filename = p.filename
@@ -242,6 +279,9 @@ SELECT
     0 as cache_write_tokens,
     coalesce(m.tokens.cached::INT, 0) as cache_read_tokens,
     coalesce(m.tokens.total::INT, 0) as total_tokens,
+    'interactive' as execution_type,
+    CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
+         THEN project_raw[:8] ELSE lower(project_raw) END as project_path,
     filename as source_file
 FROM raw
 WHERE m.tokens IS NOT NULL
@@ -353,6 +393,20 @@ QUERIES = {
                    min(date) as date
             FROM tokens GROUP BY tool, project, session
         ) ORDER BY (tool = '*' AND project = '*') DESC, (project = '*') DESC, _sort DESC
+        LIMIT {{limit}}
+    """,
+    "execution": f"""
+        SELECT * EXCLUDE (_sort) FROM (
+            SELECT '*' as execution_type, '*' as tool, {SUMMARY_COLS}
+            FROM tokens
+            UNION ALL
+            SELECT '*' as execution_type, tool, {SUMMARY_COLS}
+            FROM tokens GROUP BY tool
+            UNION ALL
+            SELECT execution_type, tool, {SUMMARY_COLS}
+            FROM tokens GROUP BY execution_type, tool
+        ) ORDER BY (execution_type = '*' AND tool = '*') DESC,
+                   (execution_type = '*') DESC, _sort DESC
         LIMIT {{limit}}
     """,
 }

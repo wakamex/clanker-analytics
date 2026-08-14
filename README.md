@@ -30,6 +30,7 @@ clanker-analytics --since 24h            # last 24 hours (also: 7d, 2w, 2026-03-
 clanker-analytics --share                # chart + copy to clipboard + open X
 clanker-analytics --table                # tabular view
 clanker-analytics --table --by date      # table grouped by date (also: model, session)
+clanker-analytics --table --by execution # interactive, exec, and subagent usage
 clanker-analytics --regime               # detect cache rate regime changes
 clanker-analytics --tool claude          # Claude Code only (also: codex, gemini)
 clanker-analytics --refresh              # force cache rebuild
@@ -53,6 +54,10 @@ The cache is incremental: unchanged source files are reused, changed files are r
 - **output** — output tokens only
 - **cache** — cache read hits as % of input tokens
 - **api_cost** — estimated cost at API rates
+- `execution_type` - `interactive`, `exec`, `subagent`, or `unknown`; available through
+  `--by execution` and custom SQL. Sessions under `/.aop/worktrees/` count as subagents even when
+  launched through a headless execution.
+- `project_path` - exact working directory when the source log provides it
 
 ## API cost calculation
 
@@ -96,3 +101,23 @@ Brand colors used in `--chart` / `--share` output:
 Python 3.13+, DuckDB 1.5+, matplotlib 3.9+.
 
 Tested on Linux, macOS, and Windows (including WSL data auto-discovery).
+
+## Release
+
+PyPI publishing uses trusted publishing and only runs for a version tag that matches
+`pyproject.toml`. Roll a patch release with:
+
+```sh
+uv --no-config version --bump patch
+uv --no-config lock
+uv --no-config run --locked pytest
+uv --no-config build --no-sources
+git add pyproject.toml uv.lock
+git commit -m "Release v$(uv --no-config version --short)"
+git tag -a "v$(uv --no-config version --short)" -m "Release v$(uv --no-config version --short)"
+git push origin HEAD --follow-tags
+```
+
+Use `minor` or `major` instead of `patch` when appropriate. The tag workflow repeats the locked
+test and build gates before publishing, so a mismatched tag, stale lockfile, failing test, or build
+failure cannot reach PyPI.

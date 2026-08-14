@@ -27,7 +27,8 @@ def _make_db(*rows):
     db.execute("""CREATE TABLE tokens (
         tool VARCHAR, project VARCHAR, session VARCHAR, date VARCHAR, model VARCHAR,
         input_tokens INT, output_tokens INT, cache_write_tokens INT, cache_read_tokens INT,
-        total_tokens BIGINT, source_file VARCHAR
+        total_tokens BIGINT, execution_type VARCHAR DEFAULT 'interactive',
+        project_path VARCHAR, source_file VARCHAR
     )""")
     for r in rows:
         db.execute("""
@@ -51,6 +52,140 @@ HAIKU_ROW = ("Claude Code", "other", "s4", "2026-03-14", "claude-haiku-4-2025051
              300, 50, 100, 2000, 2450)
 
 ALL_ROWS = [SONNET_ROW, OPUS_ROW, CODEX_ROW, GEMINI_ROW, HAIKU_ROW]
+
+
+# ===========================================================================
+# Source loader tests
+# ===========================================================================
+
+class TestSourceLoaders:
+    def test_codex_uses_own_session_metadata_once(self, tmp_path):
+        session_id = "019fceda-3070-71e2-b533-349e787d37ac"
+        path = tmp_path / f"rollout-2026-08-04T18-17-13-{session_id}.jsonl"
+        rows = [
+            {
+                "timestamp": "2026-08-04T22:17:13.971Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "019fc954-2955-73c0-9a5c-ed20691f7bd7",
+                    "cwd": "/code/parent",
+                },
+            },
+            {
+                "timestamp": "2026-08-04T22:17:13.972Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": "/code/child"},
+            },
+            {
+                "timestamp": "2026-08-04T22:17:14.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {"total_tokens": 100},
+                        "last_token_usage": {
+                            "total_tokens": 100,
+                            "input_tokens": 70,
+                            "output_tokens": 10,
+                            "cached_input_tokens": 20,
+                        },
+                    },
+                },
+            },
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        db = duckdb.connect()
+        result = db.sql(main_mod._codex_sql(main_mod._sql_literal(path.as_posix()))).fetchall()
+
+        assert len(result) == 1
+        assert result[0][1] == "child"
+        assert result[0][9] == 100
+        assert result[0][10] == "unknown"
+        assert result[0][11] == "/code/child"
+
+    @pytest.mark.parametrize(
+        ("metadata", "expected"),
+        [
+            ({"thread_source": "user", "originator": "codex-tui", "source": "cli"},
+             "interactive"),
+            ({"originator": "codex_exec", "source": "exec"}, "exec"),
+            ({"thread_source": "subagent", "source": {"subagent": {}}}, "subagent"),
+            ({
+                "cwd": "/code/project/.aop/worktrees/research-a",
+                "originator": "codex_exec",
+                "source": "exec",
+            }, "subagent"),
+        ],
+    )
+    def test_codex_execution_type(self, tmp_path, metadata, expected):
+        path = tmp_path / f"{expected}.jsonl"
+        rows = [
+            {
+                "timestamp": "2026-08-04T22:17:13.971Z",
+                "type": "session_meta",
+                "payload": {"id": expected, "cwd": "/code/project", **metadata},
+            },
+            {
+                "timestamp": "2026-08-04T22:17:14.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {"total_tokens": 100},
+                        "last_token_usage": {
+                            "total_tokens": 100,
+                            "input_tokens": 70,
+                            "output_tokens": 10,
+                            "cached_input_tokens": 20,
+                        },
+                    },
+                },
+            },
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        result = duckdb.sql(
+            main_mod._codex_sql(main_mod._sql_literal(path.as_posix()))
+        ).fetchone()
+
+        assert result[10] == expected
+        assert result[11] == metadata.get("cwd", "/code/project")
+
+    def test_claude_includes_subagents_but_not_compaction_duplicates(self, tmp_path):
+        root = tmp_path / "session.jsonl"
+        subagents = tmp_path / "subagents"
+        subagents.mkdir()
+        subagent = subagents / "agent-worker.jsonl"
+        compact = subagents / "agent-acompact-state.jsonl"
+
+        def assistant(uuid, sidechain):
+            return {
+                "type": "assistant",
+                "uuid": uuid,
+                "sessionId": "session",
+                "cwd": "/code/project",
+                "timestamp": "2026-08-04T22:17:14.000Z",
+                "isSidechain": sidechain,
+                "message": {
+                    "model": "claude-opus-4-6",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                },
+            }
+
+        root.write_text(json.dumps(assistant("root", False)) + "\n")
+        subagent.write_text(json.dumps(assistant("worker", True)) + "\n")
+        compact.write_text(json.dumps(assistant("compact", True)) + "\n")
+
+        source = main_mod._sql_file_list([p.as_posix() for p in (root, subagent, compact)])
+        rows = duckdb.sql(main_mod._claude_sql(source)).fetchall()
+
+        assert sorted(row[10] for row in rows) == ["interactive", "subagent"]
 
 
 # ===========================================================================
@@ -336,6 +471,16 @@ class TestQueries:
         result = db.sql(QUERIES["session"].format(limit=50)).fetchall()
         assert result[0][1] == "*"  # project=*
 
+    def test_execution_query(self):
+        from clanker_analytics.main import QUERIES
+        db = _make_db(*ALL_ROWS)
+        db.execute("UPDATE tokens SET execution_type = 'subagent' WHERE session = 's2'")
+
+        result = db.sql(QUERIES["execution"].format(limit=50)).fetchall()
+
+        assert result[0][:2] == ("*", "*")
+        assert ("subagent", "Codex") in [row[:2] for row in result]
+
 
 # ===========================================================================
 # Plan detection tests
@@ -605,6 +750,8 @@ class TestDebugHooks:
                     cache_write_tokens::INT as cache_write_tokens,
                     cache_read_tokens::INT as cache_read_tokens,
                     total_tokens::BIGINT as total_tokens,
+                    'interactive' as execution_type,
+                    project as project_path,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
@@ -670,6 +817,8 @@ class TestDebugHooks:
                     cache_write_tokens::INT as cache_write_tokens,
                     cache_read_tokens::INT as cache_read_tokens,
                     total_tokens::BIGINT as total_tokens,
+                    'interactive' as execution_type,
+                    project as project_path,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
