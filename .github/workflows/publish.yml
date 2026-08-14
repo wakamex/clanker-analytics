@@ -26,4 +26,4 @@ jobs:
       - name: Build
         run: uv --no-config build --no-sources
       - name: Publish
-        run: uv --no-config publish --trusted-publishing always
+        run: uv publish --trusted-publishing always
