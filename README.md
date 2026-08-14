@@ -2,7 +2,7 @@
 
 Token usage analytics for AI coding tools. Reads local session logs and shows per-project breakdowns using DuckDB.
 
-Supports **Claude Code**, **Codex**, and **Gemini CLI**.
+Supports Claude Code, Codex, Gemini CLI, and Agy / Antigravity.
 
 ![clanker-analytics chart](share.png)
 ![clanker-analytics table](table.png)
@@ -32,7 +32,7 @@ clanker-analytics --table                # tabular view
 clanker-analytics --table --by date      # table grouped by date (also: model, session)
 clanker-analytics --table --by execution # interactive, exec, and subagent usage
 clanker-analytics --regime               # detect cache rate regime changes
-clanker-analytics --tool claude          # Claude Code only (also: codex, gemini)
+clanker-analytics --tool claude          # Claude Code only (also: codex, gemini, agy)
 clanker-analytics --refresh              # force cache rebuild
 clanker-analytics --debug-timing         # print cache decisions and stage timings
 clanker-analytics --profile              # print a cProfile summary to stderr
@@ -58,6 +58,14 @@ The cache is incremental: unchanged source files are reused, changed files are r
   `--by execution` and custom SQL. Sessions under `/.aop/worktrees/` count as subagents even when
   launched through a headless execution.
 - `project_path` - exact working directory when the source log provides it
+- `token_count_type` - `exact` when the source retained API token metadata, otherwise `estimated`
+
+For Agy, discovery reads only canonical session logs at
+`~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl`. Compact transcript
+copies, chunk mirrors, duplicate events, and resumed `CONVERSATION_HISTORY` replay entries are not
+counted. When a session retains API usage metadata, those counters are reported exactly. Otherwise,
+input and output are estimated at four retained characters per token and every affected table total
+is labeled `estimated`. Share cards mark estimated costs with `~` and an `estimated` tool label.
 
 ## API cost calculation
 
@@ -95,6 +103,7 @@ Brand colors used in `--chart` / `--share` output:
 | Claude Code | `#d97757` | [Anthropic brand guidelines](https://github.com/anthropics/skills/blob/main/skills/brand-guidelines/SKILL.md) |
 | Codex | `#10a37f` | [OpenAI brand](https://openai.com) |
 | Gemini | `#4285f4` | [Google brand](https://about.google/brand-resource-center/) |
+| Agy | `#a142f4` | Distinct Antigravity session color |
 
 ## Requirements
 
