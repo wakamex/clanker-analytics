@@ -75,9 +75,10 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 8
+CACHE_SCHEMA_VERSION = 9
 
 AGY_METADATA_TOOL = "Agy metadata"
+AOP_RESULT_TOOL = "AOP result"
 
 SOURCE_TREES = [
     ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
@@ -87,6 +88,7 @@ SOURCE_TREES = [
      "*/.system_generated/logs/transcript_full.jsonl"),
     (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
      "conversation_metadata.json"),
+    (AOP_RESULT_TOOL, Path.cwd(), ""),
 ]
 
 TOKEN_SCHEMA = """
@@ -105,6 +107,8 @@ TOKEN_SCHEMA = """
     token_count_type VARCHAR,
     turn_count INTEGER,
     retained_tokens BIGINT,
+    source_kind VARCHAR,
+    cost_usd DOUBLE,
     source_file VARCHAR
 """
 
@@ -112,7 +116,7 @@ TOKEN_INSERT_COLUMNS = """
     tool, project, session, date, model,
     input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
     total_tokens, execution_type, project_path, token_count_type, turn_count, retained_tokens,
-    source_file
+    source_kind, cost_usd, source_file
 """
 
 # On Windows, discover WSL home paths for additional data sources
@@ -176,6 +180,8 @@ SELECT
     'exact' as token_count_type,
     1 as turn_count,
     NULL::BIGINT as retained_tokens,
+    'native' as source_kind,
+    NULL::DOUBLE as cost_usd,
     replace(filename, '\\', '/') as source_file
 FROM read_json({source_expr},
     format='newline_delimited', filename=true, union_by_name=true,
@@ -260,6 +266,8 @@ SELECT
     'exact' as token_count_type,
     1 as turn_count,
     NULL::BIGINT as retained_tokens,
+    'native' as source_kind,
+    NULL::DOUBLE as cost_usd,
     t.filename as source_file
 FROM token_entries t
 LEFT JOIN projects p ON t.filename = p.filename
@@ -301,6 +309,8 @@ SELECT
     'exact' as token_count_type,
     1 as turn_count,
     NULL::BIGINT as retained_tokens,
+    'native' as source_kind,
+    NULL::DOUBLE as cost_usd,
     filename as source_file
 FROM raw
 WHERE m.tokens IS NOT NULL
@@ -520,10 +530,112 @@ SELECT
     CASE WHEN d.is_exact THEN 'exact' ELSE 'estimated_processed' END as token_count_type,
     d.turn_count,
     d.retained_tokens,
+    'native' as source_kind,
+    NULL::DOUBLE as cost_usd,
     d.filename as source_file
 FROM daily d
 JOIN sessions m USING (filename)
 WHERE d.total_tokens > 0
+"""
+
+
+def _aop_sql(source_expr: str) -> str:
+    """Load exact per-run usage normalized by Agent Orchestration Process."""
+    return f"""
+WITH raw AS (
+    SELECT replace(filename, '\\', '/') as filename, json as result_json
+    FROM read_json_objects({source_expr}, format='auto', filename=true,
+                           ignore_errors=true)
+),
+usage AS (
+    SELECT
+        filename,
+        lower(json_extract_string(result_json, '$.provider')) as provider,
+        json_extract_string(result_json, '$.inference_provider') as inference_provider,
+        json_extract_string(result_json, '$.run_id') as run_id,
+        json_extract_string(result_json, '$.session_id') as session_id,
+        json_extract_string(result_json, '$.task') as task,
+        json_extract_string(result_json, '$.model') as model,
+        coalesce(
+            json_extract_string(result_json, '$.started_at'),
+            json_extract_string(result_json, '$.finished_at')
+        ) as timestamp,
+        greatest(coalesce(try_cast(json_extract_string(
+            result_json, '$.usage.input_tokens') as BIGINT), 0), 0) as raw_input,
+        greatest(coalesce(try_cast(json_extract_string(
+            result_json, '$.usage.cached_input_tokens') as BIGINT), 0), 0) as cached_input,
+        greatest(coalesce(try_cast(json_extract_string(
+            result_json, '$.usage.output_tokens') as BIGINT), 0), 0) as raw_output,
+        greatest(coalesce(try_cast(json_extract_string(
+            result_json, '$.usage.reasoning_output_tokens') as BIGINT), 0), 0)
+            as reasoning_output,
+        coalesce(
+            try_cast(json_extract_string(
+                result_json, '$.calculated_cost.amount_usd') as DOUBLE),
+            try_cast(json_extract_string(
+                result_json, '$.api_equivalent_cost.amount_usd') as DOUBLE)
+        ) as cost_usd,
+        regexp_extract(replace(filename, '\\', '/'),
+                       '^(.*)/[.]aop/runs/', 1) as owner_path
+    FROM raw
+),
+normalized AS (
+    SELECT
+        *,
+        provider IN ('agy', 'cursor')
+          OR (provider = 'dsh'
+              AND coalesce(inference_provider, 'deepseek-official') = 'deepseek-official')
+            as additive_cached_input,
+        provider IN ('agy', 'grok', 'opencode', 'dsh')
+            as additive_reasoning_output
+    FROM usage
+),
+tokens AS (
+    SELECT
+        *,
+        CASE WHEN additive_cached_input THEN raw_input
+             ELSE greatest(raw_input - cached_input, 0)
+        END as uncached_input,
+        raw_output
+          + CASE WHEN additive_reasoning_output THEN reasoning_output ELSE 0 END
+            as processed_output
+    FROM normalized
+)
+SELECT
+    CASE provider
+        WHEN 'agy' THEN 'Agy'
+        WHEN 'claude' THEN 'Claude Code'
+        WHEN 'codex' THEN 'Codex'
+        WHEN 'cursor' THEN 'Cursor'
+        WHEN 'devin' THEN 'Devin'
+        WHEN 'dsh' THEN 'DeepSeek Harness'
+        WHEN 'grok' THEN 'Grok'
+        WHEN 'hermes' THEN 'Hermes'
+        WHEN 'opencode' THEN 'OpenCode'
+        ELSE coalesce(nullif(provider, ''), 'AOP')
+    END as tool,
+    lower(regexp_extract(owner_path, '([^/]+)$', 1)) as project,
+    coalesce(nullif(session_id, ''), run_id) as session,
+    left(timestamp, 10) as date,
+    coalesce(model, '') as model,
+    uncached_input::INT as input_tokens,
+    processed_output::INT as output_tokens,
+    0 as cache_write_tokens,
+    cached_input::INT as cache_read_tokens,
+    (uncached_input + cached_input + processed_output)::BIGINT as total_tokens,
+    'subagent' as execution_type,
+    owner_path || '/.aop/worktrees/' || coalesce(nullif(task, ''), run_id)
+        as project_path,
+    'exact' as token_count_type,
+    1 as turn_count,
+    NULL::BIGINT as retained_tokens,
+    'aop' as source_kind,
+    cost_usd,
+    filename as source_file
+FROM tokens
+WHERE timestamp IS NOT NULL
+  AND run_id IS NOT NULL
+  AND uncached_input + cached_input + processed_output > 0
 """
 
 
@@ -532,10 +644,12 @@ SOURCES = {
     "codex": ("Codex", _codex_sql),
     "gemini": ("Gemini", _gemini_sql),
     "agy": ("Agy", _agy_sql),
+    "aop": (AOP_RESULT_TOOL, _aop_sql),
 }
 
 COST_PER_ROW = """
     CASE
+        WHEN coalesce(source_kind, 'native') = 'aop' THEN cost_usd
         WHEN tool = 'Codex' THEN
             (input_tokens * 1.25 + cache_write_tokens * 1.25
              + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
@@ -752,12 +866,81 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
     return trees
 
 
+def _repository_root(start: Path) -> Path | None:
+    """Return the nearest Git worktree root without invoking Git."""
+    try:
+        current = start.resolve()
+    except OSError:
+        current = start.absolute()
+    if current.is_file():
+        current = current.parent
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _aop_result_paths(start: Path) -> list[Path]:
+    """Discover retained AOP results in this repository and nearby workspaces."""
+    owners: set[Path] = set()
+    explicit = os.environ.get("AOP_STATE_ROOT")
+    if explicit:
+        state_root = Path(explicit).expanduser()
+        owners.add(state_root.parent if state_root.name == ".aop" else state_root)
+
+    try:
+        resolved = start.resolve()
+    except OSError:
+        resolved = start.absolute()
+    normalized = resolved.as_posix()
+    marker = "/.aop/worktrees/"
+    if marker in normalized:
+        owners.add(Path(normalized.split(marker, 1)[0]))
+
+    repository = _repository_root(resolved)
+    if repository is not None:
+        owners.add(repository)
+        search_base = repository.parent
+    elif (resolved / ".aop").is_dir():
+        owners.add(resolved)
+        search_base = resolved.parent
+    else:
+        search_base = resolved
+
+    paths: set[Path] = set()
+    for owner in owners:
+        try:
+            paths.update((owner / ".aop" / "runs").glob("*/result.json"))
+        except OSError:
+            pass
+    for pattern in (
+        "*/.aop/runs/*/result.json",
+        "*/*/.aop/runs/*/result.json",
+    ):
+        try:
+            paths.update(search_base.glob(pattern))
+        except OSError:
+            pass
+    return sorted(path for path in paths if path.is_file())
+
+
 def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
     files: dict[str, SourceSnapshot] = {}
     dir_count = 0
     started = time.perf_counter()
     for tool, root, pattern in _iter_source_trees():
         try:
+            if tool == AOP_RESULT_TOOL:
+                paths = _aop_result_paths(root)
+                dir_count += len({path.parents[1] for path in paths})
+                for path in paths:
+                    stat = path.stat()
+                    files[path.as_posix()] = SourceSnapshot(
+                        tool=tool,
+                        mtime_ns=stat.st_mtime_ns,
+                        size=stat.st_size,
+                    )
+                continue
             if not root.exists():
                 continue
             dir_count += 1
@@ -879,6 +1062,34 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
             db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({part})" for part in parts))
     else:
         _empty_tokens_table(db)
+    _deduplicate_aop(db, timer)
+
+
+def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
+    """Prefer normalized AOP usage over overlapping provider-native sessions."""
+    columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
+    if "source_kind" not in columns:
+        return
+    with timer.span("deduplicate AOP sessions"):
+        db.execute("""
+            DELETE FROM tokens
+            WHERE coalesce(source_kind, 'native') != 'aop'
+              AND session IS NOT NULL
+              AND (tool, session) IN (
+                  SELECT tool, session FROM tokens WHERE source_kind = 'aop'
+              )
+        """)
+
+
+def _aop_change_requires_rebuild(
+    cached_files: dict[str, SourceSnapshot], changed: list[str], deleted: list[str]
+) -> bool:
+    """A changed retained result may release a previously shadowed native session."""
+    return any(
+        cached_files.get(path)
+        and cached_files[path].tool == AOP_RESULT_TOOL
+        for path in [*changed, *deleted]
+    )
 
 
 def _delete_source_files(db: duckdb.DuckDBPyConnection, paths: list[str],
@@ -959,6 +1170,12 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             )
             return
 
+        if _aop_change_requires_rebuild(cached_files, changed, deleted):
+            timer.note("retained AOP result changed or disappeared; rebuilding for precedence")
+            _rebuild_tokens(db, files, timer)
+            _write_cache(db, files, timer, "rebuilt cache", "AOP result changed")
+            return
+
         with timer.span("load parquet cache", CACHE_FILE.as_posix()):
             db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
         if not _table_has_source_file(db):
@@ -973,6 +1190,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         )
         _delete_source_files(db, changed + deleted, timer)
         _append_source_files(db, {path: files[path] for path in changed}, timer)
+        _deduplicate_aop(db, timer)
         _write_cache(
             db,
             files,
@@ -1024,7 +1242,10 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         tool_name = SOURCES[args.tool][0]
         with timer.span("filter tool", tool_name):
             db.execute(f"CREATE OR REPLACE VIEW tokens_all AS SELECT * FROM tokens")
-            db.execute(f"DELETE FROM tokens WHERE tool != '{tool_name}'")
+            if args.tool == "aop":
+                db.execute("DELETE FROM tokens WHERE source_kind != 'aop'")
+            else:
+                db.execute(f"DELETE FROM tokens WHERE tool != {_sql_literal(tool_name)}")
 
     # Apply --since filter
     if args.since:

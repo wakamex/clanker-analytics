@@ -29,7 +29,8 @@ def _make_db(*rows):
         input_tokens INT, output_tokens INT, cache_write_tokens INT, cache_read_tokens INT,
         total_tokens BIGINT, execution_type VARCHAR DEFAULT 'interactive',
         project_path VARCHAR, token_count_type VARCHAR DEFAULT 'exact',
-        turn_count INT DEFAULT 1, retained_tokens BIGINT, source_file VARCHAR
+        turn_count INT DEFAULT 1, retained_tokens BIGINT,
+        source_kind VARCHAR DEFAULT 'native', cost_usd DOUBLE, source_file VARCHAR
     )""")
     for r in rows:
         db.execute("""
@@ -53,6 +54,46 @@ HAIKU_ROW = ("Claude Code", "other", "s4", "2026-03-14", "claude-haiku-4-2025051
              300, 50, 100, 2000, 2450)
 
 ALL_ROWS = [SONNET_ROW, OPUS_ROW, CODEX_ROW, GEMINI_ROW, HAIKU_ROW]
+
+
+def _write_aop_result(
+    path: Path,
+    *,
+    provider: str = "codex",
+    run_id: str = "run-1",
+    session_id: str = "session-1",
+    task: str = "task-1",
+    model: str = "model-1",
+    input_tokens: int = 100,
+    cached_input_tokens: int = 30,
+    output_tokens: int = 10,
+    reasoning_output_tokens: int = 5,
+    inference_provider: str | None = None,
+    cost_usd: float | None = 0.25,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    calculated_cost = (
+        {"amount_usd": cost_usd, "currency": "USD"}
+        if cost_usd is not None else None
+    )
+    path.write_text(json.dumps({
+        "run_id": run_id,
+        "provider": provider,
+        "mode": "agent",
+        "task": task,
+        "model": model,
+        "inference_provider": inference_provider,
+        "session_id": session_id,
+        "started_at": "2026-08-14T12:00:00+00:00",
+        "finished_at": "2026-08-14T12:01:00+00:00",
+        "usage": {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_output_tokens,
+        },
+        "calculated_cost": calculated_cost,
+    }))
 
 
 # ===========================================================================
@@ -326,6 +367,110 @@ class TestSourceLoaders:
         row = duckdb.sql(main_mod._gemini_sql(main_mod._sql_literal(chat.as_posix()))).fetchone()
 
         assert row[2:4] == ("session", "2026-08-14")
+
+
+class TestAOPSourceLoader:
+    def test_discovers_neighboring_and_nested_repositories(self, tmp_path, monkeypatch):
+        current = tmp_path / "workspace" / "current"
+        (current / ".git").mkdir(parents=True)
+        nearby = tmp_path / "workspace" / "nearby" / ".aop" / "runs" / "one" / "result.json"
+        nested = (
+            tmp_path / "workspace" / "group" / "nested" / ".aop"
+            / "runs" / "two" / "result.json"
+        )
+        _write_aop_result(nearby)
+        _write_aop_result(nested, run_id="run-2")
+        monkeypatch.delenv("AOP_STATE_ROOT", raising=False)
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            (main_mod.AOP_RESULT_TOOL, current, ""),
+        ])
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        files, dir_count, _ = main_mod.scan_source_files()
+
+        assert set(files) == {nearby.as_posix(), nested.as_posix()}
+        assert all(item.tool == main_mod.AOP_RESULT_TOOL for item in files.values())
+        assert dir_count == 2
+
+    @pytest.mark.parametrize(
+        ("provider", "inference_provider", "tool", "expected"),
+        [
+            ("agy", None, "Agy", (100, 15, 30, 145)),
+            ("codex", None, "Codex", (70, 10, 30, 110)),
+            ("cursor", None, "Cursor", (100, 10, 30, 140)),
+            ("opencode", None, "OpenCode", (70, 15, 30, 115)),
+            ("dsh", None, "DeepSeek Harness", (100, 15, 30, 145)),
+            ("hermes", None, "Hermes", (70, 10, 30, 110)),
+            ("dsh", "anthropic", "DeepSeek Harness", (70, 15, 30, 115)),
+        ],
+    )
+    def test_normalizes_provider_token_semantics(
+        self, tmp_path, provider, inference_provider, tool, expected
+    ):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(
+            result_path,
+            provider=provider,
+            inference_provider=inference_provider,
+        )
+
+        relation = duckdb.sql(main_mod._aop_sql(
+            main_mod._sql_literal(result_path.as_posix())
+        ))
+        columns = [item[0] for item in relation.description]
+        row = dict(zip(columns, relation.fetchone()))
+
+        assert row["tool"] == tool
+        assert (
+            row["input_tokens"], row["output_tokens"],
+            row["cache_read_tokens"], row["total_tokens"],
+        ) == expected
+        assert row["project"] == "project"
+        assert row["project_path"] == result_path.parents[3].as_posix() + "/.aop/worktrees/task-1"
+        assert row["execution_type"] == "subagent"
+        assert row["token_count_type"] == "exact"
+        assert row["source_kind"] == "aop"
+        assert row["cost_usd"] == 0.25
+
+    def test_resume_runs_aggregate_without_native_double_counting(self, tmp_path):
+        first = tmp_path / "project" / ".aop" / "runs" / "one" / "result.json"
+        second = tmp_path / "project" / ".aop" / "runs" / "two" / "result.json"
+        _write_aop_result(first, run_id="run-1", session_id="resumed", cost_usd=0.25)
+        _write_aop_result(
+            second,
+            run_id="run-2",
+            session_id="resumed",
+            input_tokens=200,
+            cached_input_tokens=50,
+            output_tokens=20,
+            reasoning_output_tokens=0,
+            cost_usd=0.50,
+        )
+        source_expr = main_mod._sql_file_list([first.as_posix(), second.as_posix()])
+        db = duckdb.connect()
+        register_macros(db)
+        db.execute("CREATE TABLE tokens AS " + main_mod._aop_sql(source_expr))
+        db.execute("""
+            INSERT INTO tokens (
+                tool, project, session, date, model, input_tokens, output_tokens,
+                cache_write_tokens, cache_read_tokens, total_tokens, execution_type,
+                project_path, token_count_type, turn_count, retained_tokens,
+                source_kind, cost_usd, source_file
+            ) VALUES
+                ('Codex', 'project', 'resumed', '2026-08-14', '', 999, 1,
+                 0, 0, 1000, 'subagent', '/native', 'exact', 1, NULL,
+                 'native', NULL, '/native/one.jsonl'),
+                ('Codex', 'project', 'resumed', '2026-08-14', '', 999, 1,
+                 0, 0, 1000, 'subagent', '/native', 'exact', 1, NULL,
+                 'native', NULL, '/native/two.jsonl')
+        """)
+
+        main_mod._deduplicate_aop(db, main_mod.DebugTimer(False))
+
+        assert db.sql("SELECT count(*) FROM tokens").fetchone()[0] == 2
+        assert db.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 330
+        assert db.sql("SELECT sum(turn_count) FROM tokens").fetchone()[0] == 2
+        assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0] == 0.75
 
 
 # ===========================================================================
@@ -938,6 +1083,8 @@ class TestDebugHooks:
                     'exact' as token_count_type,
                     1 as turn_count,
                     NULL::BIGINT as retained_tokens,
+                    'native' as source_kind,
+                    NULL::DOUBLE as cost_usd,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
@@ -1008,6 +1155,8 @@ class TestDebugHooks:
                     'exact' as token_count_type,
                     1 as turn_count,
                     NULL::BIGINT as retained_tokens,
+                    'native' as source_kind,
+                    NULL::DOUBLE as cost_usd,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
@@ -1147,6 +1296,52 @@ class TestDebugHooks:
 
         assert db2.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/two"
         assert any(sample.label == "append changed files" for sample in timer.samples)
+
+    def test_aop_cache_appends_new_resume_result(self, tmp_path, monkeypatch):
+        project = tmp_path / "project"
+        (project / ".git").mkdir(parents=True)
+        first = project / ".aop" / "runs" / "one" / "result.json"
+        _write_aop_result(first, run_id="run-1", session_id="resumed")
+
+        cache_dir = tmp_path / "cache"
+        monkeypatch.delenv("AOP_STATE_ROOT", raising=False)
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            (main_mod.AOP_RESULT_TOOL, project, ""),
+        ])
+        monkeypatch.setattr(main_mod, "SOURCES", {
+            "aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql),
+        })
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        db = duckdb.connect()
+        register_macros(db)
+        main_mod.load_tokens(db, refresh=False)
+        assert db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (1, 110)
+
+        second = project / ".aop" / "runs" / "two" / "result.json"
+        _write_aop_result(
+            second,
+            run_id="run-2",
+            session_id="resumed",
+            input_tokens=200,
+            cached_input_tokens=50,
+            output_tokens=20,
+            reasoning_output_tokens=0,
+        )
+
+        db2 = duckdb.connect()
+        register_macros(db2)
+        timer = main_mod.DebugTimer(True)
+        main_mod.load_tokens(db2, refresh=False, timing=timer)
+
+        assert db2.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (2, 330)
+        assert db2.sql("SELECT count(DISTINCT session) FROM tokens").fetchone()[0] == 1
+        assert any(sample.label == "append changed files" for sample in timer.samples)
+        metadata = json.loads((cache_dir / "tokens-meta.json").read_text())
+        assert set(metadata["files"]) == {first.as_posix(), second.as_posix()}
 
     def test_debug_timing_flag_prints_summary(self, capsys):
         def fake_run(args, timer):
