@@ -1,9 +1,8 @@
 # clanker-analytics
 
-Token usage analytics for AI coding tools. Reads local session logs and shows per-project breakdowns using DuckDB.
+Token usage analytics for AI coding tools. It reads local session logs and normalized runs from [Agent Orchestration Process (AOP)](https://github.com/wakamex/agent-orchestration-process), a tool for running bounded jobs across multiple agent CLI harnesses, then shows per-project breakdowns using DuckDB.
 
-Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, and every harness recorded by
-Agent Orchestration Process (AOP).
+Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, and every harness recorded by AOP.
 
 ![clanker-analytics chart](share.png)
 ![clanker-analytics table](table.png)
@@ -89,14 +88,7 @@ distinguishable from repeated processed context. Hidden system prompts, media to
 unrecorded context truncation cannot be reconstructed. Share cards mark processed estimates with `~`
 and a `processed estimate` tool label.
 
-For AOP, each `aop-token-usage-v1` result contributes the exact normalized usage delta for that
-provider invocation. Input and output are totals, while cached input and reasoning output are
-subsets that are not added again. Unversioned AOP usage is rejected instead of guessed. Resumed runs
-remain separate deltas under one session and are summed. Overlapping Claude Code, Codex, and Agy
-native session rows are suppressed so the same work is not counted twice. AOP rows are attributed to
-the repository that owns `.aop`, use a synthetic path under that repository's `.aop/worktrees/`
-directory, and have `execution_type = 'subagent'`. `turn_count` is the number of retained AOP
-invocations because the normalized result does not retain a portable count of internal model turns.
+For AOP records using the token contract introduced in [AOP v0.1.4](https://github.com/wakamex/agent-orchestration-process/releases/tag/v0.1.4), each `aop-token-usage-v1` result contributes the exact normalized usage delta for that provider invocation. Input and output are totals, while cached input and reasoning output are subsets that are not added again. Unversioned AOP usage is rejected instead of guessed. Resumed runs remain separate deltas under one session and are summed. Overlapping Claude Code, Codex, and Agy native session rows are suppressed so the same work is not counted twice. AOP rows are attributed to the repository that owns `.aop`, use a synthetic path under that repository's `.aop/worktrees/` directory, and have `execution_type = 'subagent'`. `turn_count` is the number of retained AOP invocations because the normalized result does not retain a portable count of internal model turns.
 
 ## API cost calculation
 
