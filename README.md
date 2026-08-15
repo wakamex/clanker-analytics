@@ -89,14 +89,14 @@ distinguishable from repeated processed context. Hidden system prompts, media to
 unrecorded context truncation cannot be reconstructed. Share cards mark processed estimates with `~`
 and a `processed estimate` tool label.
 
-For AOP, each retained result contributes the exact usage delta reported for that provider
-invocation. Provider-specific cache and reasoning conventions are normalized into the common token
-columns. Resumed runs remain separate deltas under one session and are summed. Overlapping Claude
-Code, Codex, and Agy native session rows are suppressed so the same work is not counted twice. AOP
-rows are attributed to the repository that owns `.aop`, use a synthetic path under that repository's
-`.aop/worktrees/` directory, and have `execution_type = 'subagent'`. `turn_count` is the number of
-retained AOP invocations because the normalized result does not retain a portable count of internal
-model turns.
+For AOP, each `aop-token-usage-v1` result contributes the exact normalized usage delta for that
+provider invocation. Input and output are totals, while cached input and reasoning output are
+subsets that are not added again. Unversioned AOP usage is rejected instead of guessed. Resumed runs
+remain separate deltas under one session and are summed. Overlapping Claude Code, Codex, and Agy
+native session rows are suppressed so the same work is not counted twice. AOP rows are attributed to
+the repository that owns `.aop`, use a synthetic path under that repository's `.aop/worktrees/`
+directory, and have `execution_type = 'subagent'`. `turn_count` is the number of retained AOP
+invocations because the normalized result does not retain a portable count of internal model turns.
 
 ## API cost calculation
 

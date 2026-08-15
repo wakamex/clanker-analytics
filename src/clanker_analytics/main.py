@@ -550,6 +550,7 @@ WITH raw AS (
 usage AS (
     SELECT
         filename,
+        json_extract_string(result_json, '$.usage_schema') as usage_schema,
         lower(json_extract_string(result_json, '$.provider')) as provider,
         json_extract_string(result_json, '$.inference_provider') as inference_provider,
         json_extract_string(result_json, '$.run_id') as run_id,
@@ -579,27 +580,15 @@ usage AS (
                        '^(.*)/[.]aop/runs/', 1) as owner_path
     FROM raw
 ),
-normalized AS (
-    SELECT
-        *,
-        provider IN ('agy', 'cursor')
-          OR (provider = 'dsh'
-              AND coalesce(inference_provider, 'deepseek-official') = 'deepseek-official')
-            as additive_cached_input,
-        provider IN ('agy', 'grok', 'opencode', 'dsh')
-            as additive_reasoning_output
-    FROM usage
-),
 tokens AS (
     SELECT
         *,
-        CASE WHEN additive_cached_input THEN raw_input
-             ELSE greatest(raw_input - cached_input, 0)
+        CASE WHEN usage_schema = 'aop-token-usage-v1'
+             THEN greatest(raw_input - cached_input, 0)
+             ELSE error('unsupported AOP token usage schema')
         END as uncached_input,
-        raw_output
-          + CASE WHEN additive_reasoning_output THEN reasoning_output ELSE 0 END
-            as processed_output
-    FROM normalized
+        raw_output as processed_output
+    FROM usage
 )
 SELECT
     CASE provider

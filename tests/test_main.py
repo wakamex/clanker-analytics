@@ -86,6 +86,7 @@ def _write_aop_result(
         "session_id": session_id,
         "started_at": "2026-08-14T12:00:00+00:00",
         "finished_at": "2026-08-14T12:01:00+00:00",
+        "usage_schema": "aop-token-usage-v1",
         "usage": {
             "input_tokens": input_tokens,
             "cached_input_tokens": cached_input_tokens,
@@ -395,16 +396,19 @@ class TestAOPSourceLoader:
     @pytest.mark.parametrize(
         ("provider", "inference_provider", "tool", "expected"),
         [
-            ("agy", None, "Agy", (100, 15, 30, 145)),
+            ("agy", None, "Agy", (70, 10, 30, 110)),
+            ("claude", None, "Claude Code", (70, 10, 30, 110)),
             ("codex", None, "Codex", (70, 10, 30, 110)),
-            ("cursor", None, "Cursor", (100, 10, 30, 140)),
-            ("opencode", None, "OpenCode", (70, 15, 30, 115)),
-            ("dsh", None, "DeepSeek Harness", (100, 15, 30, 145)),
+            ("cursor", None, "Cursor", (70, 10, 30, 110)),
+            ("devin", None, "Devin", (70, 10, 30, 110)),
+            ("opencode", None, "OpenCode", (70, 10, 30, 110)),
+            ("dsh", None, "DeepSeek Harness", (70, 10, 30, 110)),
+            ("grok", None, "Grok", (70, 10, 30, 110)),
             ("hermes", None, "Hermes", (70, 10, 30, 110)),
-            ("dsh", "anthropic", "DeepSeek Harness", (70, 15, 30, 115)),
+            ("dsh", "anthropic", "DeepSeek Harness", (70, 10, 30, 110)),
         ],
     )
-    def test_normalizes_provider_token_semantics(
+    def test_uses_provider_independent_token_semantics(
         self, tmp_path, provider, inference_provider, tool, expected
     ):
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
@@ -431,6 +435,18 @@ class TestAOPSourceLoader:
         assert row["token_count_type"] == "exact"
         assert row["source_kind"] == "aop"
         assert row["cost_usd"] == 0.25
+
+    def test_rejects_unversioned_aop_usage(self, tmp_path):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path)
+        value = json.loads(result_path.read_text())
+        value.pop("usage_schema")
+        result_path.write_text(json.dumps(value))
+
+        with pytest.raises(duckdb.Error, match="unsupported AOP token usage schema"):
+            duckdb.sql(main_mod._aop_sql(
+                main_mod._sql_literal(result_path.as_posix())
+            )).fetchall()
 
     def test_resume_runs_aggregate_without_native_double_counting(self, tmp_path):
         first = tmp_path / "project" / ".aop" / "runs" / "one" / "result.json"
