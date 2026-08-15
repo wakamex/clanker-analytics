@@ -23,6 +23,12 @@ TOOL_COLORS = {
     "Codex": "#10a37f",
     "Gemini": "#4285f4",
     "Agy": "#a142f4",
+    "Cursor": "#7c5cff",
+    "Devin": "#7cae5f",
+    "DeepSeek Harness": "#4d6bfe",
+    "Grok": "#c0c0c0",
+    "Hermes": "#ff6b35",
+    "OpenCode": "#f0b429",
 }
 
 from clanker_analytics.main import COST_PER_ROW as COST_SQL

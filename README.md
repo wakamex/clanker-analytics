@@ -2,7 +2,8 @@
 
 Token usage analytics for AI coding tools. Reads local session logs and shows per-project breakdowns using DuckDB.
 
-Supports Claude Code, Codex, Gemini CLI, and Agy / Antigravity.
+Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, and every harness recorded by
+Agent Orchestration Process (AOP).
 
 ![clanker-analytics chart](share.png)
 ![clanker-analytics table](table.png)
@@ -32,7 +33,7 @@ clanker-analytics --table                # tabular view
 clanker-analytics --table --by date      # table grouped by date (also: model, session)
 clanker-analytics --table --by execution # interactive, exec, and subagent usage
 clanker-analytics --regime               # detect cache rate regime changes
-clanker-analytics --tool claude          # Claude Code only (also: codex, gemini, agy)
+clanker-analytics --tool claude          # Claude Code only (also: codex, gemini, agy, aop)
 clanker-analytics --refresh              # force cache rebuild
 clanker-analytics --debug-timing         # print cache decisions and stage timings
 clanker-analytics --profile              # print a cProfile summary to stderr
@@ -41,7 +42,11 @@ clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
 
 ## How it works
 
-DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, and `~/.gemini/tmp/` — no Python JSON parsing. Results are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest at `~/.cache/clanker-analytics/tokens-meta.json`.
+DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, and
+`~/.gemini/tmp/`. It also discovers retained `.aop/runs/*/result.json` records in the current Git
+repository, neighboring repositories, and repositories nested one workspace level deeper. Results
+are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest
+at `~/.cache/clanker-analytics/tokens-meta.json`.
 
 The cache is incremental: unchanged source files are reused, changed files are re-read, and deleted files are removed from the cached table. A full rebuild only happens when the cache is missing, you pass `--refresh`, or the cache schema changes.
 
@@ -66,6 +71,8 @@ The cache is incremental: unchanged source files are reused, changed files are r
 - `turn_count` - model or API turns represented by the row
 - `retained_tokens` - the unique retained transcript text estimate before repeated model context is
   counted; available through custom SQL
+- `source_kind` - `native` for provider session logs or `aop` for normalized AOP run results
+- `cost_usd` - the AOP-recorded API-equivalent cost when AOP retained one; native rows remain null
 
 For Agy, discovery reads canonical logs at
 `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` and uses
@@ -82,9 +89,21 @@ distinguishable from repeated processed context. Hidden system prompts, media to
 unrecorded context truncation cannot be reconstructed. Share cards mark processed estimates with `~`
 and a `processed estimate` tool label.
 
+For AOP, each retained result contributes the exact usage delta reported for that provider
+invocation. Provider-specific cache and reasoning conventions are normalized into the common token
+columns. Resumed runs remain separate deltas under one session and are summed. Overlapping Claude
+Code, Codex, and Agy native session rows are suppressed so the same work is not counted twice. AOP
+rows are attributed to the repository that owns `.aop`, use a synthetic path under that repository's
+`.aop/worktrees/` directory, and have `execution_type = 'subagent'`. `turn_count` is the number of
+retained AOP invocations because the normalized result does not retain a portable count of internal
+model turns.
+
 ## API cost calculation
 
-The `api_cost` and `billable` columns use published API pricing. Cache reads are 0.1x the input token price for all three providers:
+For native session rows, the `api_cost` column uses published API pricing. AOP rows use the
+API-equivalent cost retained in the normalized result. AOP rows without a retained cost are omitted
+from the cost sum rather than priced as the wrong provider. The `billable` token column applies the
+same cache discount across sources. Cache reads use these rates for the native providers:
 
 | | Input | Cache read | Cache write | Output |
 |---|---|---|---|---|
