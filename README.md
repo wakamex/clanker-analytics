@@ -49,23 +49,38 @@ The cache is incremental: unchanged source files are reused, changed files are r
 
 ## Columns
 
-- **total** — all tokens processed (input + output + cache write + cache read)
-- **billable** — total minus the 90% cache read discount
-- **output** — output tokens only
-- **cache** — cache read hits as % of input tokens
-- **api_cost** — estimated cost at API rates
+- `total` - all tokens processed (input + output + cache write + cache read)
+- `billable` - total minus the 90% cache read discount
+- `output` - output tokens only
+- `cache` - cache read hits as a percentage of input tokens
+- `api_cost` - estimated cost at API rates
+- `count_basis` - `exact` or `processed estimate`
+- `retained_text` - unique retained transcript text estimated at four characters per token when the
+  source supports it
 - `execution_type` - `interactive`, `exec`, `subagent`, or `unknown`; available through
   `--by execution` and custom SQL. Sessions under `/.aop/worktrees/` count as subagents even when
   launched through a headless execution.
 - `project_path` - exact working directory when the source log provides it
-- `token_count_type` - `exact` when the source retained API token metadata, otherwise `estimated`
+- `token_count_type` - `exact` when the source retained complete API token metadata, otherwise
+  `estimated_processed`
+- `turn_count` - model or API turns represented by the row
+- `retained_tokens` - the unique retained transcript text estimate before repeated model context is
+  counted; available through custom SQL
 
-For Agy, discovery reads only canonical session logs at
-`~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl`. Compact transcript
-copies, chunk mirrors, duplicate events, and resumed `CONVERSATION_HISTORY` replay entries are not
-counted. When a session retains API usage metadata, those counters are reported exactly. Otherwise,
-input and output are estimated at four retained characters per token and every affected table total
-is labeled `estimated`. Share cards mark estimated costs with `~` and an `estimated` tool label.
+For Agy, discovery reads canonical logs at
+`~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` and uses
+`cache/conversation_metadata.json` to select top-level conversations and obtain their workspace
+roots. Compact copies, chunk mirrors, internal trajectories, duplicate events, and resumed
+`CONVERSATION_HISTORY` entries are not counted.
+
+When complete API usage metadata is retained for a model turn, those counters are reported exactly.
+Otherwise, Agy reports a processed-token estimate. Each completed `PLANNER_RESPONSE` is a model turn,
+its output is estimated from that response, and its input is estimated from the cumulative retained
+context preceding it. Tool results such as `RUN_COMMAND` and `VIEW_FILE` are input to a later model
+turn, not model output. `retained_tokens` counts the same retained text once so it is directly
+distinguishable from repeated processed context. Hidden system prompts, media tokenization, and
+unrecorded context truncation cannot be reconstructed. Share cards mark processed estimates with `~`
+and a `processed estimate` tool label.
 
 ## API cost calculation
 

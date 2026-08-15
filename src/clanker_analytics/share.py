@@ -79,7 +79,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
                count(DISTINCT tool)::INT,
                count(DISTINCT project)::INT,
                sum({COST_SQL}),
-               count(*) FILTER (WHERE token_count_type = 'estimated') > 0
+               count(*) FILTER (WHERE token_count_type != 'exact') > 0
         FROM tokens
     """).fetchone()
     total_tokens, billable_tokens, n_tools, n_projects, total_cost, has_estimates = totals
@@ -93,7 +93,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     # Get api cost per tool
     tool_costs = db.sql(f"""
         SELECT tool, sum({COST_SQL}) as cost,
-               count(*) FILTER (WHERE token_count_type = 'estimated') > 0 as estimated
+               count(*) FILTER (WHERE token_count_type != 'exact') > 0 as estimated
         FROM tokens GROUP BY tool ORDER BY cost DESC
     """).fetchall()
 
@@ -269,7 +269,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         ratio = total_cost / (sub_cost * days / 30) if days else 0
         if ratio >= 2:
             multiplier = f" ({ratio:.0f}x)"
-    estimate_note = " (includes token estimates)" if has_estimates else ""
+    estimate_note = " (includes processed-token estimates)" if has_estimates else ""
     context = f"of AI compute{f' {period}' if period else ''}{sub_label}{multiplier}{estimate_note}"
     fig.text(0.05, 0.89, context, color=TEXT, **_font(14),
              ha="left", va="top")
@@ -288,7 +288,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         if plan_info:
             details.append(plan_info[0])
         if estimated:
-            details.append("estimated")
+            details.append("processed estimate")
         label = f"{t} ({', '.join(details)})" if details else t
         name_txt = fig.text(x_pos, 0.84, label, color=color, **_font(12, bold=True),
                             ha="left", va="top")

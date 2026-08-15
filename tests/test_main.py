@@ -28,7 +28,8 @@ def _make_db(*rows):
         tool VARCHAR, project VARCHAR, session VARCHAR, date VARCHAR, model VARCHAR,
         input_tokens INT, output_tokens INT, cache_write_tokens INT, cache_read_tokens INT,
         total_tokens BIGINT, execution_type VARCHAR DEFAULT 'interactive',
-        project_path VARCHAR, token_count_type VARCHAR DEFAULT 'exact', source_file VARCHAR
+        project_path VARCHAR, token_count_type VARCHAR DEFAULT 'exact',
+        turn_count INT DEFAULT 1, retained_tokens BIGINT, source_file VARCHAR
     )""")
     for r in rows:
         db.execute("""
@@ -200,7 +201,7 @@ class TestSourceLoaders:
             "created_at": "2026-08-14T12:00:00Z",
             "content": "retained response text",
             "model": "gemini-3.5-flash",
-            "tool_calls": [{"name": "run_command", "args": {"Cwd": "/code/project"}}],
+            "tool_calls": [{"name": "run_command", "args": {"Cwd": "/code/project/subdir"}}],
             "usageMetadata": {
                 "promptTokenCount": 100,
                 "cachedContentTokenCount": 20,
@@ -210,26 +211,25 @@ class TestSourceLoaders:
             },
         }) + "\n")
 
-        row = duckdb.sql(
-            main_mod._agy_sql(main_mod._sql_literal(transcript.as_posix()))
-        ).fetchone()
+        metadata = tmp_path / "conversation_metadata.json"
+        metadata.write_text(json.dumps({"conversations": {"display-id": {"summary": {
+            "ID": session,
+            "WorkspaceURIs": ["file:///code/project"],
+        }}}}))
+
+        row = duckdb.sql(main_mod._agy_sql(
+            main_mod._sql_literal(transcript.as_posix()),
+            main_mod._sql_literal(metadata.as_posix()),
+        )).fetchone()
 
         assert row[1:5] == ("project", session, "2026-08-14", "gemini-3.5-flash")
         assert row[5:10] == (80, 40, 0, 20, 140)
         assert row[11:13] == ("/code/project", "exact")
 
-    def test_agy_estimate_excludes_resume_history_and_duplicate_events(self, tmp_path):
+    def test_agy_estimates_cumulative_turns_and_classifies_tool_results(self, tmp_path):
         session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         transcript = tmp_path / "brain" / session / ".system_generated" / "logs" / "transcript_full.jsonl"
         transcript.parent.mkdir(parents=True)
-        user_event = {
-            "step_index": 0,
-            "source": "USER_EXPLICIT",
-            "type": "USER_INPUT",
-            "status": "DONE",
-            "created_at": "2026-08-14T12:00:00Z",
-            "content": "12345678",
-        }
         rows = [
             {
                 "step_index": 0,
@@ -239,25 +239,93 @@ class TestSourceLoaders:
                 "created_at": "2026-08-14T12:00:00Z",
                 "content": "x" * 400,
             },
-            user_event,
-            user_event,
             {
                 "step_index": 1,
-                "source": "MODEL",
-                "type": "FINISH",
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
                 "status": "DONE",
                 "created_at": "2026-08-14T12:00:01Z",
+                "content": "12345678",
+            },
+            {
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-14T12:00:02Z",
                 "content": "abcdefgh",
+            },
+            {
+                "step_index": 3,
+                "source": "MODEL",
+                "type": "RUN_COMMAND",
+                "status": "DONE",
+                "created_at": "2026-08-14T12:00:03Z",
+                "content": "tooltool",
+            },
+            {
+                "step_index": 4,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-14T12:00:04Z",
+                "content": "ijklmnop",
             },
         ]
         transcript.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
         result = duckdb.sql(
-            main_mod._agy_sql(main_mod._sql_literal(transcript.as_posix()))
+            main_mod._agy_sql(main_mod._sql_literal(transcript.as_posix()), "")
         ).fetchone()
 
-        assert result[5:10] == (2, 2, 0, 0, 4)
-        assert result[12] == "estimated"
+        assert result[5:10] == (8, 4, 0, 0, 12)
+        assert result[12] == "estimated_processed"
+        assert result[13:15] == (2, 8)
+
+    def test_agy_metadata_filters_internal_trajectories(self, tmp_path):
+        brain = tmp_path / "brain"
+        kept = "11111111-1111-1111-1111-111111111111"
+        internal = "22222222-2222-2222-2222-222222222222"
+        for session in (kept, internal):
+            transcript = brain / session / ".system_generated" / "logs" / "transcript_full.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(json.dumps({
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-14T12:00:00Z",
+                "content": "abcdefgh",
+            }) + "\n")
+
+        metadata = tmp_path / "conversation_metadata.json"
+        metadata.write_text(json.dumps({"conversations": {"display-id": {"summary": {
+            "ID": kept,
+            "WorkspaceURIs": ["file:///code/project"],
+        }}}}))
+
+        rows = duckdb.sql(main_mod._agy_sql(
+            main_mod._sql_literal((brain / "*" / ".system_generated" / "logs" / "transcript_full.jsonl").as_posix()),
+            main_mod._sql_literal(metadata.as_posix()),
+        )).fetchall()
+
+        assert [row[2] for row in rows] == [kept]
+
+    def test_gemini_timestamp_schema_shape_is_cast_before_slicing(self, tmp_path):
+        chat = tmp_path / "tmp" / ("a" * 64) / "chats" / "session.json"
+        chat.parent.mkdir(parents=True)
+        chat.write_text(json.dumps({
+            "sessionId": "session",
+            "messages": [{
+                "timestamp": "2026-08-14T12:00:00Z",
+                "model": "gemini-flash",
+                "tokens": {"input": 10, "output": 2, "cached": 3, "total": 15},
+            }],
+        }))
+
+        row = duckdb.sql(main_mod._gemini_sql(main_mod._sql_literal(chat.as_posix()))).fetchone()
+
+        assert row[2:4] == ("session", "2026-08-14")
 
 
 # ===========================================================================
@@ -557,7 +625,9 @@ class TestQueries:
         agy_row = ("Agy", "project", "agy-session", "2026-03-15", "",
                    100, 20, 0, 0, 120)
         db = _make_db(SONNET_ROW, agy_row)
-        db.execute("UPDATE tokens SET token_count_type = 'estimated' WHERE tool = 'Agy'")
+        db.execute("""UPDATE tokens
+                      SET token_count_type = 'estimated_processed', retained_tokens = 30
+                      WHERE tool = 'Agy'""")
 
         relation = db.sql(main_mod.QUERIES["project"].format(limit=50))
         rows = [dict(zip(relation.columns, row)) for row in relation.fetchall()]
@@ -565,9 +635,10 @@ class TestQueries:
         overall = next(row for row in rows if row["project"] == "*" and row["tool"] == "*")
         agy = next(row for row in rows if row["project"] == "*" and row["tool"] == "Agy")
         claude = next(row for row in rows if row["project"] == "*" and row["tool"] == "Claude Code")
-        assert overall["count_basis"] == "estimated"
-        assert agy["count_basis"] == "estimated"
+        assert overall["count_basis"] == "processed estimate"
+        assert agy["count_basis"] == "processed estimate"
         assert claude["count_basis"] == "exact"
+        assert agy["retained_text"].strip() == "30"
 
 
 # ===========================================================================
@@ -865,6 +936,8 @@ class TestDebugHooks:
                     'interactive' as execution_type,
                     project as project_path,
                     'exact' as token_count_type,
+                    1 as turn_count,
+                    NULL::BIGINT as retained_tokens,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
@@ -933,6 +1006,8 @@ class TestDebugHooks:
                     'interactive' as execution_type,
                     project as project_path,
                     'exact' as token_count_type,
+                    1 as turn_count,
+                    NULL::BIGINT as retained_tokens,
                     replace(filename, '\\\\', '/') as source_file
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
@@ -981,7 +1056,7 @@ class TestDebugHooks:
 
         original = [
             event(0, "USER_EXPLICIT", "USER_INPUT", "12345678"),
-            event(1, "MODEL", "FINISH", "abcdefgh"),
+            event(1, "MODEL", "PLANNER_RESPONSE", "abcdefgh"),
         ]
         transcript.write_text("".join(json.dumps(row) + "\n" for row in original))
 
@@ -993,6 +1068,7 @@ class TestDebugHooks:
             ("Agy", brain, "*/.system_generated/logs/transcript_full.jsonl"),
         ])
         monkeypatch.setattr(main_mod, "SOURCES", {"agy": ("Agy", main_mod._agy_sql)})
+        monkeypatch.setattr(main_mod, "_agy_metadata_paths", lambda: [])
         monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
 
         db = duckdb.connect()
@@ -1003,7 +1079,7 @@ class TestDebugHooks:
         resumed = original + [
             event(2, "SYSTEM", "CONVERSATION_HISTORY", "x" * 400),
             event(3, "USER_EXPLICIT", "USER_INPUT", "87654321"),
-            event(4, "MODEL", "FINISH", "hgfedcba"),
+            event(4, "MODEL", "PLANNER_RESPONSE", "hgfedcba"),
         ]
         transcript.write_text("".join(json.dumps(row) + "\n" for row in resumed))
         stat = transcript.stat()
@@ -1014,8 +1090,62 @@ class TestDebugHooks:
         timer = main_mod.DebugTimer(True)
         main_mod.load_tokens(db2, refresh=False, timing=timer)
 
-        assert db2.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 8
+        assert db2.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 12
         assert any(sample.label == "drop changed rows" for sample in timer.samples)
+        assert any(sample.label == "append changed files" for sample in timer.samples)
+
+    def test_agy_metadata_change_reattributes_cached_session(self, tmp_path, monkeypatch):
+        session = "11111111-2222-3333-4444-555555555555"
+        brain = tmp_path / "brain"
+        transcript = brain / session / ".system_generated" / "logs" / "transcript_full.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": "2026-08-14T12:00:00Z",
+            "content": "abcdefgh",
+        }) + "\n")
+
+        metadata_root = tmp_path / "agy-cache"
+        metadata_root.mkdir()
+        metadata = metadata_root / "conversation_metadata.json"
+
+        def write_metadata(workspace):
+            metadata.write_text(json.dumps({"conversations": {"display-id": {"summary": {
+                "ID": session,
+                "WorkspaceURIs": [f"file://{workspace}"],
+            }}}}))
+
+        write_metadata("/code/one")
+        cache_dir = tmp_path / "clanker-cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            ("Agy", brain, "*/.system_generated/logs/transcript_full.jsonl"),
+            (main_mod.AGY_METADATA_TOOL, metadata_root, "conversation_metadata.json"),
+        ])
+        monkeypatch.setattr(main_mod, "SOURCES", {"agy": ("Agy", main_mod._agy_sql)})
+        monkeypatch.setattr(main_mod, "_agy_metadata_paths", lambda: [metadata.as_posix()])
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        db = duckdb.connect()
+        register_macros(db)
+        main_mod.load_tokens(db, refresh=False)
+        assert db.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/one"
+
+        write_metadata("/code/two")
+        stat = metadata.stat()
+        os.utime(metadata, ns=(stat.st_atime_ns + 1_000_000, stat.st_mtime_ns + 1_000_000))
+
+        db2 = duckdb.connect()
+        register_macros(db2)
+        timer = main_mod.DebugTimer(True)
+        main_mod.load_tokens(db2, refresh=False, timing=timer)
+
+        assert db2.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/two"
         assert any(sample.label == "append changed files" for sample in timer.samples)
 
     def test_debug_timing_flag_prints_summary(self, capsys):

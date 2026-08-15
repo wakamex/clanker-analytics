@@ -75,7 +75,9 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 7
+CACHE_SCHEMA_VERSION = 8
+
+AGY_METADATA_TOOL = "Agy metadata"
 
 SOURCE_TREES = [
     ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
@@ -83,6 +85,8 @@ SOURCE_TREES = [
     ("Gemini", Path(HOME) / ".gemini" / "tmp", "chats/*.json"),
     ("Agy", Path(HOME) / ".gemini" / "antigravity-cli" / "brain",
      "*/.system_generated/logs/transcript_full.jsonl"),
+    (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
+     "conversation_metadata.json"),
 ]
 
 TOKEN_SCHEMA = """
@@ -99,13 +103,16 @@ TOKEN_SCHEMA = """
     execution_type VARCHAR,
     project_path VARCHAR,
     token_count_type VARCHAR,
+    turn_count INTEGER,
+    retained_tokens BIGINT,
     source_file VARCHAR
 """
 
 TOKEN_INSERT_COLUMNS = """
     tool, project, session, date, model,
     input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-    total_tokens, execution_type, project_path, token_count_type, source_file
+    total_tokens, execution_type, project_path, token_count_type, turn_count, retained_tokens,
+    source_file
 """
 
 # On Windows, discover WSL home paths for additional data sources
@@ -148,7 +155,7 @@ SELECT
     lower(coalesce(nullif(split_part(replace(cwd, '\\', '/'), '/', -1), ''),
              regexp_extract(replace(filename, '\\', '/'), 'projects/([^/]+)/', 1))) as project,
     cast(sessionId as VARCHAR) as session,
-    timestamp[:10] as date,
+    left(cast(timestamp as VARCHAR), 10) as date,
     cast(message.model as VARCHAR) as model,
     coalesce(cast(message.usage.input_tokens as INTEGER), 0) as input_tokens,
     coalesce(cast(message.usage.output_tokens as INTEGER), 0) as output_tokens,
@@ -167,6 +174,8 @@ SELECT
     END as execution_type,
     replace(cwd, '\\', '/') as project_path,
     'exact' as token_count_type,
+    1 as turn_count,
+    NULL::BIGINT as retained_tokens,
     replace(filename, '\\', '/') as source_file
 FROM read_json({source_expr},
     format='newline_delimited', filename=true, union_by_name=true,
@@ -237,7 +246,7 @@ SELECT
     'Codex' as tool,
     lower(coalesce(p.project, regexp_extract(t.filename, '([^/]+)[.]jsonl', 1))) as project,
     regexp_extract(t.filename, '([^/]+)[.]jsonl', 1) as session,
-    t.timestamp[:10] as date,
+    left(cast(t.timestamp as VARCHAR), 10) as date,
     '' as model,
     t.input_tokens, t.output_tokens, 0 as cache_write_tokens, t.cache_read_tokens,
     CASE
@@ -249,6 +258,8 @@ SELECT
     coalesce(p.project_path, p.project,
              regexp_extract(t.filename, '([^/]+)[.]jsonl', 1)) as project_path,
     'exact' as token_count_type,
+    1 as turn_count,
+    NULL::BIGINT as retained_tokens,
     t.filename as source_file
 FROM token_entries t
 LEFT JOIN projects p ON t.filename = p.filename
@@ -275,9 +286,9 @@ WITH raw AS (
 SELECT
     'Gemini' as tool,
     CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
-         THEN project_raw[:8] ELSE lower(project_raw) END as project,
+         THEN left(cast(project_raw as VARCHAR), 8) ELSE lower(cast(project_raw as VARCHAR)) END as project,
     session,
-    m.timestamp[:10] as date,
+    left(cast(m.timestamp as VARCHAR), 10) as date,
     cast(m.model as VARCHAR) as model,
     coalesce(m.tokens.input::INT, 0) as input_tokens,
     coalesce(m.tokens.output::INT, 0) as output_tokens,
@@ -286,8 +297,10 @@ SELECT
     coalesce(m.tokens.total::INT, 0) as total_tokens,
     'interactive' as execution_type,
     CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
-         THEN project_raw[:8] ELSE lower(project_raw) END as project_path,
+         THEN left(cast(project_raw as VARCHAR), 8) ELSE lower(cast(project_raw as VARCHAR)) END as project_path,
     'exact' as token_count_type,
+    1 as turn_count,
+    NULL::BIGINT as retained_tokens,
     filename as source_file
 FROM raw
 WHERE m.tokens IS NOT NULL
@@ -295,8 +308,51 @@ WHERE m.tokens IS NOT NULL
 """
 
 
-def _agy_sql(source_expr: str) -> str:
-    """Load canonical Antigravity transcripts without replaying resumed history."""
+def _agy_metadata_paths() -> list[str]:
+    homes = [HOME, *_WSL_HOMES]
+    paths = [
+        Path(home) / ".gemini" / "antigravity-cli" / "cache" / "conversation_metadata.json"
+        for home in homes
+    ]
+    return [path.as_posix() for path in paths if path.exists()]
+
+
+def _agy_sql(source_expr: str, metadata_expr: str | None = None) -> str:
+    """Load top-level Antigravity sessions and estimate processed model tokens."""
+    if metadata_expr is None:
+        metadata_paths = _agy_metadata_paths()
+        metadata_expr = _sql_file_list(metadata_paths) if metadata_paths else None
+
+    session_filter = "m.session IS NOT NULL" if metadata_expr else "true"
+    if metadata_expr:
+        metadata_cte = f"""
+metadata_raw AS (
+    SELECT entry.value as conversation
+    FROM read_json_objects({metadata_expr}, format='auto', ignore_errors=true) source,
+         json_each(source.json, '$.conversations') entry
+),
+metadata AS (
+    SELECT
+        json_extract_string(conversation, '$.summary.ID') as session,
+        regexp_replace(
+            json_extract_string(conversation, '$.summary.WorkspaceURIs[0]'),
+            '^file://', ''
+        ) as workspace_path
+    FROM metadata_raw
+    WHERE json_extract_string(conversation, '$.summary.ID') IS NOT NULL
+    QUALIFY row_number() OVER (
+        PARTITION BY json_extract_string(conversation, '$.summary.ID')
+        ORDER BY json_extract_string(conversation, '$.summary.WorkspaceURIs[0]') IS NOT NULL DESC
+    ) = 1
+),
+"""
+    else:
+        metadata_cte = """
+metadata AS (
+    SELECT NULL::VARCHAR as session, NULL::VARCHAR as workspace_path WHERE false
+),
+"""
+
     return f"""
 WITH raw AS (
     SELECT replace(filename, '\\', '/') as filename, json as event_json
@@ -307,18 +363,16 @@ events AS (
     SELECT DISTINCT
         filename,
         event_json,
+        try_cast(json_extract_string(event_json, '$.step_index') as BIGINT) as step_index,
         json_extract_string(event_json, '$.type') as type,
-        json_extract_string(event_json, '$.source') as source,
         json_extract_string(event_json, '$.status') as status,
         json_extract_string(event_json, '$.created_at') as created_at,
-        json_extract_string(event_json, '$.content') as content,
-        json_extract_string(event_json, '$.thinking') as thinking,
         coalesce(
             json_extract_string(event_json, '$.tool_calls[0].args.Cwd'),
             json_extract_string(event_json, '$.tool_calls[0].args.cwd'),
             json_extract_string(event_json, '$.tool_calls[0].args.WorkspaceRoot'),
             json_extract_string(event_json, '$.cwd')
-        ) as project_path,
+        ) as observed_path,
         coalesce(
             json_extract_string(event_json, '$.model'),
             json_extract_string(event_json, '$.modelVersion'),
@@ -353,70 +407,104 @@ events AS (
             json_extract_string(event_json, '$.usage_metadata.total_token_count'),
             json_extract_string(event_json, '$.usage.total_tokens'),
             json_extract_string(event_json, '$.usage.totalTokens')
-        ) as BIGINT) as exact_total
+        ) as BIGINT) as exact_total,
+        length(coalesce(json_extract_string(event_json, '$.content'), ''))
+        + length(coalesce(json_extract_string(event_json, '$.thinking'), ''))
+        + length(coalesce(cast(json_extract(event_json, '$.tool_calls') as VARCHAR), ''))
+            as retained_chars
     FROM raw
 ),
+{metadata_cte}
 session_meta AS (
     SELECT
         filename,
         regexp_extract(filename, '/brain/([^/]+)/', 1) as session,
-        max(project_path) FILTER (WHERE project_path IS NOT NULL) as project_path,
-        max(model) FILTER (WHERE model IS NOT NULL) as model,
-        bool_or(exact_input_raw IS NOT NULL OR exact_cache IS NOT NULL
-                OR exact_output_raw IS NOT NULL OR exact_thinking IS NOT NULL
-                OR exact_total IS NOT NULL) as has_exact
+        arg_min(observed_path, coalesce(step_index, 9223372036854775807))
+            FILTER (WHERE observed_path IS NOT NULL) as observed_path,
+        arg_min(model, coalesce(step_index, 9223372036854775807))
+            FILTER (WHERE model IS NOT NULL) as model
     FROM events
     GROUP BY filename
 ),
-daily AS (
+sessions AS (
     SELECT
-        e.filename,
-        e.created_at[:10] as date,
-        m.has_exact,
-        CASE WHEN m.has_exact THEN
-            sum(greatest(coalesce(e.exact_input_raw, 0) - coalesce(e.exact_cache, 0), 0))
-        ELSE
-            ceil(sum(CASE WHEN e.source != 'MODEL' THEN length(coalesce(e.content, ''))
-                          ELSE 0 END) / 4.0)
-        END::BIGINT as input_tokens,
-        CASE WHEN m.has_exact THEN
-            sum(coalesce(e.exact_output_raw, 0) + coalesce(e.exact_thinking, 0))
-        ELSE
-            ceil(sum(CASE WHEN e.source = 'MODEL' THEN
-                         length(coalesce(e.content, ''))
-                         + length(coalesce(e.thinking, ''))
-                         + length(coalesce(cast(json_extract(e.event_json, '$.tool_calls') as VARCHAR), ''))
-                         ELSE 0 END) / 4.0)
-        END::BIGINT as output_tokens,
-        CASE WHEN m.has_exact THEN sum(coalesce(e.exact_cache, 0)) ELSE 0 END::BIGINT
-            as cache_read_tokens,
-        CASE WHEN m.has_exact THEN
-            sum(coalesce(
-                e.exact_total,
-                greatest(coalesce(e.exact_input_raw, 0) - coalesce(e.exact_cache, 0), 0)
-                + coalesce(e.exact_cache, 0)
-                + coalesce(e.exact_output_raw, 0)
-                + coalesce(e.exact_thinking, 0)
-            ))
-        ELSE
-            ceil(sum(CASE WHEN e.source != 'MODEL' THEN length(coalesce(e.content, ''))
-                          ELSE 0 END) / 4.0)
-            + ceil(sum(CASE WHEN e.source = 'MODEL' THEN
-                    length(coalesce(e.content, ''))
-                    + length(coalesce(e.thinking, ''))
-                    + length(coalesce(cast(json_extract(e.event_json, '$.tool_calls') as VARCHAR), ''))
-                  ELSE 0 END) / 4.0)
-        END::BIGINT as total_tokens
+        s.filename,
+        s.session,
+        coalesce(nullif(m.workspace_path, ''), s.observed_path) as project_path,
+        s.model
+    FROM session_meta s
+    LEFT JOIN metadata m USING (session)
+    WHERE {session_filter}
+),
+ordered AS (
+    SELECT
+        e.*,
+        coalesce(sum(e.retained_chars) OVER (
+            PARTITION BY e.filename
+            ORDER BY e.step_index NULLS LAST, e.created_at, e.event_json
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ), 0)::BIGINT as context_chars
     FROM events e
-    JOIN session_meta m USING (filename)
+    JOIN sessions s USING (filename)
     WHERE e.status = 'DONE'
       AND e.created_at IS NOT NULL
       AND e.type != 'CONVERSATION_HISTORY'
-    GROUP BY e.filename, e.created_at[:10], m.has_exact
+),
+turns AS (
+    SELECT
+        filename,
+        left(cast(created_at as VARCHAR), 10) as date,
+        exact_input_raw IS NOT NULL AND exact_output_raw IS NOT NULL as is_exact,
+        CASE WHEN is_exact THEN
+            greatest(exact_input_raw - coalesce(exact_cache, 0), 0)
+        ELSE ceil(context_chars / 4.0) END::BIGINT as input_tokens,
+        CASE WHEN is_exact THEN
+            exact_output_raw + coalesce(exact_thinking, 0)
+        ELSE ceil(retained_chars / 4.0) END::BIGINT as output_tokens,
+        CASE WHEN is_exact THEN coalesce(exact_cache, 0) ELSE 0 END::BIGINT
+            as cache_read_tokens,
+        CASE WHEN is_exact THEN
+            coalesce(exact_total, exact_input_raw + exact_output_raw
+                     + coalesce(exact_thinking, 0))
+        ELSE ceil(context_chars / 4.0) + ceil(retained_chars / 4.0)
+        END::BIGINT as total_tokens
+    FROM ordered
+    WHERE type = 'PLANNER_RESPONSE'
+),
+retained_daily AS (
+    SELECT
+        e.filename,
+        left(cast(e.created_at as VARCHAR), 10) as date,
+        ceil(sum(e.retained_chars) / 4.0)::BIGINT as retained_tokens
+    FROM events e
+    JOIN sessions s USING (filename)
+    WHERE e.status = 'DONE'
+      AND e.created_at IS NOT NULL
+      AND e.type != 'CONVERSATION_HISTORY'
+    GROUP BY e.filename, left(cast(e.created_at as VARCHAR), 10)
+),
+daily AS (
+    SELECT
+        t.filename,
+        t.date,
+        bool_and(t.is_exact) as is_exact,
+        sum(t.input_tokens)::BIGINT as input_tokens,
+        sum(t.output_tokens)::BIGINT as output_tokens,
+        sum(t.cache_read_tokens)::BIGINT as cache_read_tokens,
+        sum(t.total_tokens)::BIGINT as total_tokens,
+        count(*)::INT as turn_count,
+        r.retained_tokens
+    FROM turns t
+    LEFT JOIN retained_daily r USING (filename, date)
+    GROUP BY t.filename, t.date, r.retained_tokens
 )
 SELECT
     'Agy' as tool,
-    lower(coalesce(nullif(split_part(replace(m.project_path, '\\', '/'), '/', -1), ''),
+    lower(coalesce(
+        nullif(CASE WHEN contains(replace(m.project_path, '\\', '/'), '/.aop/worktrees/')
+                    THEN split_part(split_part(replace(m.project_path, '\\', '/'), '/.aop/', 1), '/', -1)
+                    ELSE split_part(replace(m.project_path, '\\', '/'), '/', -1)
+               END, ''),
                    'antigravity')) as project,
     m.session,
     d.date,
@@ -426,12 +514,15 @@ SELECT
     0 as cache_write_tokens,
     d.cache_read_tokens::INT as cache_read_tokens,
     d.total_tokens as total_tokens,
-    'interactive' as execution_type,
+    CASE WHEN contains(replace(m.project_path, '\\', '/'), '/.aop/worktrees/')
+         THEN 'subagent' ELSE 'interactive' END as execution_type,
     coalesce(replace(m.project_path, '\\', '/'), 'antigravity') as project_path,
-    CASE WHEN d.has_exact THEN 'exact' ELSE 'estimated' END as token_count_type,
+    CASE WHEN d.is_exact THEN 'exact' ELSE 'estimated_processed' END as token_count_type,
+    d.turn_count,
+    d.retained_tokens,
     d.filename as source_file
 FROM daily d
-JOIN session_meta m USING (filename)
+JOIN sessions m USING (filename)
 WHERE d.total_tokens > 0
 """
 
@@ -476,14 +567,15 @@ COST_PER_ROW = """
 COST_EXPR = f"fmtcost(sum({COST_PER_ROW}))"
 
 SUMMARY_COLS = f"""
-    count(*)::INT as turns,
+    sum(turn_count)::INT as turns,
     fmt(sum(total_tokens)) as total,
     fmt(sum(total_tokens) - 0.9 * sum(cache_read_tokens)) as billable,
     fmt(sum(output_tokens)) as output,
     lpad(printf('%.0f%%', 100.0 * sum(cache_read_tokens) / greatest(sum(total_tokens) - sum(output_tokens), 1)), 4, ' ') as "cache",
     {COST_EXPR} as "api_cost",
-    CASE WHEN count(*) FILTER (WHERE token_count_type = 'estimated') > 0
-         THEN 'estimated' ELSE 'exact' END as count_basis,
+    CASE WHEN count(*) FILTER (WHERE token_count_type != 'exact') > 0
+         THEN 'processed estimate' ELSE 'exact' END as count_basis,
+    CASE WHEN count(retained_tokens) > 0 THEN fmt(sum(retained_tokens)) ELSE '' END as retained_text,
     sum(total_tokens)::BIGINT as _sort
 """
 
@@ -653,6 +745,9 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
             ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.json"),
             ("Agy", Path(wsl_home) / ".gemini" / "antigravity-cli" / "brain",
              "*/.system_generated/logs/transcript_full.jsonl"),
+            (AGY_METADATA_TOOL,
+             Path(wsl_home) / ".gemini" / "antigravity-cli" / "cache",
+             "conversation_metadata.json"),
         ])
     return trees
 
@@ -743,6 +838,24 @@ def _build_source_sql(grouped_files: dict[str, list[str]]) -> list[str]:
         if paths:
             parts.append(builder(_sql_file_list(paths)))
     return parts
+
+
+def _expand_dependency_changes(
+        files: dict[str, SourceSnapshot],
+        cached_files: dict[str, SourceSnapshot],
+        changed: list[str],
+        deleted: list[str],
+) -> list[str]:
+    dependencies = [
+        files.get(path) or cached_files.get(path)
+        for path in [*changed, *deleted]
+    ]
+    if any(snapshot and snapshot.tool == AGY_METADATA_TOOL for snapshot in dependencies):
+        changed = [
+            *changed,
+            *(path for path, snapshot in files.items() if snapshot.tool == "Agy"),
+        ]
+    return sorted(set(changed))
 
 
 def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
@@ -836,6 +949,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             if cached_files.get(path) != snapshot
         )
         deleted = sorted(path for path in cached_files if path not in files)
+        changed = _expand_dependency_changes(files, cached_files, changed, deleted)
         if not changed and not deleted:
             with timer.span("load parquet cache", CACHE_FILE.as_posix()):
                 db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
