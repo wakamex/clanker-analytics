@@ -523,11 +523,38 @@ class TestAOPSourceLoader:
         assert row["source_kind"] == "aop"
         assert row["cost_usd"] == 0.25
 
-    def test_rejects_unversioned_aop_usage(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("provider", "expected"),
+        [
+            ("agy", (100, 10, 30, 140)),
+            ("claude", (70, 10, 30, 110)),
+            ("codex", (70, 10, 30, 110)),
+            ("cursor", (100, 10, 30, 140)),
+            ("devin", (70, 10, 30, 110)),
+            ("dsh", (100, 10, 30, 140)),
+            ("grok", (70, 10, 30, 110)),
+            ("hermes", (70, 10, 30, 110)),
+            ("opencode", (70, 15, 30, 115)),
+        ],
+    )
+    def test_normalizes_unversioned_aop_usage(self, tmp_path, provider, expected):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path, provider=provider)
+        value = json.loads(result_path.read_text())
+        value.pop("usage_schema")
+        result_path.write_text(json.dumps(value))
+
+        row = duckdb.sql(main_mod._aop_sql(
+            main_mod._sql_literal(result_path.as_posix())
+        )).fetchone()
+
+        assert (row[5], row[6], row[8], row[9]) == expected
+
+    def test_rejects_unknown_aop_usage_schema(self, tmp_path):
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(result_path)
         value = json.loads(result_path.read_text())
-        value.pop("usage_schema")
+        value["usage_schema"] = "aop-token-usage-v2"
         result_path.write_text(json.dumps(value))
 
         with pytest.raises(duckdb.Error, match="unsupported AOP token usage schema"):

@@ -75,7 +75,7 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 13
+CACHE_SCHEMA_VERSION = 14
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -712,15 +712,27 @@ usage AS (
                        '^(.*)/[.]aop/runs/', 1) as owner_path
     FROM raw
 ),
+normalized AS (
+    SELECT
+        *,
+        raw_input
+          + CASE WHEN usage_schema IS NULL
+                       AND provider IN ('agy', 'cursor', 'dsh')
+                 THEN cached_input ELSE 0 END as normalized_input,
+        raw_output
+          + CASE WHEN usage_schema IS NULL AND provider = 'opencode'
+                 THEN reasoning_output ELSE 0 END as processed_output
+    FROM usage
+    WHERE CASE
+        WHEN usage_schema IS NULL OR usage_schema = 'aop-token-usage-v1' THEN true
+        ELSE error('unsupported AOP token usage schema')
+    END
+),
 tokens AS (
     SELECT
         *,
-        CASE WHEN usage_schema = 'aop-token-usage-v1'
-             THEN greatest(raw_input - cached_input, 0)
-             ELSE error('unsupported AOP token usage schema')
-        END as uncached_input,
-        raw_output as processed_output
-    FROM usage
+        greatest(normalized_input - cached_input, 0) as uncached_input
+    FROM normalized
 )
 SELECT
     CASE provider
