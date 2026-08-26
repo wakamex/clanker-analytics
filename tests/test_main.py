@@ -1550,6 +1550,25 @@ class TestDebugHooks:
 # ===========================================================================
 
 class TestCLI:
+    def test_console_entrypoint(self):
+        executable = Path(sys.executable).with_name("clanker-analytics")
+        if sys.platform == "win32":
+            executable = executable.with_suffix(".exe")
+        result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "0." in result.stdout
+
+    def test_package_module_entrypoint(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "clanker_analytics", "--version"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "0." in result.stdout
+
     def test_version_flag(self):
         result = subprocess.run(
             [sys.executable, "-m", "clanker_analytics.main", "--version"],
