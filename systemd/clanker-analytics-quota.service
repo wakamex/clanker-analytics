@@ -1,0 +1,6 @@
+[Unit]
+Description=Record AI provider quota percentages
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/clanker-analytics --record-quota

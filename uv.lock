@@ -2,13 +2,37 @@ version = 1
 revision = 3
 requires-python = ">=3.13"
 
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P7D"
+
+[options.exclude-newer-package]
+clanker-analytics = false
+search-claude-history = false
+agent-orchestration-process = false
+ccusage = false
+codex-cli-usage = false
+ghp = false
+deepseek-harness-usage = false
+agy-usage = false
+gemini-cli-usage = false
+
+[[package]]
+name = "agy-usage"
+version = "0.1.9"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/38/08d05999a400c27fe18d44dbd1822e4af86c1f41f7a0b7c9925ada63439d/agy_usage-0.1.9.tar.gz", hash = "sha256:f879c50919fe4805252d941bf1708e0ad0bf9e62194cdaa1d636e1d777cce856", size = 11675, upload-time = "2026-08-15T04:17:35.125Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2d/26/0ec4fdd96610ab55541cbc8ea1983926be9c42a6d7e61b63785816629155/agy_usage-0.1.9-py3-none-any.whl", hash = "sha256:c34928a61dc9e29f2197b4dd967a2183925a8526d61bcdf3c6403e223e3078c0", size = 9283, upload-time = "2026-08-15T04:17:34.365Z" },
+]
+
 [[package]]
 name = "ccusage"
-version = "0.1.5"
+version = "0.1.12"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/84/47/43581792bde8d349b6f30776b1df901c9e1fa226f9b2cfa87f7986d61531/ccusage-0.1.5.tar.gz", hash = "sha256:dd3135586185d259eec6395be887236e440808473a01d53a1e84b64b3fd9caab", size = 6684, upload-time = "2026-03-17T05:20:28.964Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/ee/ab8c30298f897005f0443bd3f65c71ca15257fd7af7cef7a02cfdb0cf685/ccusage-0.1.12.tar.gz", hash = "sha256:575017d95f1a3673109e8de8d8d0290232f6a4de529e7d7df47577d1844aa2f8", size = 14505, upload-time = "2026-08-15T04:18:41.095Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/9f/e86fc4f17ff360b8b70d5e9cf398bcf842b3a489df858064ceaac36a670a/ccusage-0.1.5-py3-none-any.whl", hash = "sha256:a8c3a8bf649611b317f9d4dba1def3779af68cc6ea330ecd68ba0317441b96c9", size = 7461, upload-time = "2026-03-17T05:20:27.686Z" },
+    { url = "https://files.pythonhosted.org/packages/02/2d/508f2ebc9cbeef24c2d6cd4fc17f9a6298276d313ebd3187d7daa50cdcf2/ccusage-0.1.12-py3-none-any.whl", hash = "sha256:b0b321e7f07e9959ccd873f5d4f61c358bd955ca89390f02bdebdbb3c98bafc3", size = 11882, upload-time = "2026-08-15T04:18:40.177Z" },
 ]
 
 [[package]]
@@ -16,6 +40,7 @@ name = "clanker-analytics"
 version = "0.4.0"
 source = { editable = "." }
 dependencies = [
+    { name = "agy-usage" },
     { name = "ccusage" },
     { name = "codex-cli-usage" },
     { name = "duckdb" },
@@ -30,8 +55,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ccusage", specifier = ">=0.1.5" },
-    { name = "codex-cli-usage", specifier = ">=0.1.5" },
+    { name = "agy-usage", specifier = ">=0.1.6" },
+    { name = "ccusage", specifier = ">=0.1.10" },
+    { name = "codex-cli-usage", specifier = ">=0.1.8" },
     { name = "duckdb", specifier = ">=1.5.0" },
     { name = "gemini-cli-usage", specifier = ">=0.1.5" },
     { name = "matplotlib", specifier = ">=3.9" },
@@ -42,11 +68,11 @@ dev = [{ name = "pytest" }]
 
 [[package]]
 name = "codex-cli-usage"
-version = "0.1.5"
+version = "0.1.10"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f1/15/633f079d84e01a1a2fdd1dec76f5b96b54835c1226d67da138d4f6bb0169/codex_cli_usage-0.1.5.tar.gz", hash = "sha256:55273bc102de92722ece9f8380a45fe6e69b35eb813010fcec8d2eebc9f558be", size = 5930, upload-time = "2026-03-17T05:43:07.175Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7f/3e/f0f925ee47c7249c66cb210439fe0e40e75c9259d6eb19b972312b697f6c/codex_cli_usage-0.1.10.tar.gz", hash = "sha256:2183f345cee8bccba3a864332420d78c0c9a8e2f9b7667041d4b40029c4a6885", size = 13593, upload-time = "2026-08-15T04:19:45.351Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/3b/9ba7d4279bbc0e5f8450fb907bbaabfb037e36b8347af7a6caf80d483177/codex_cli_usage-0.1.5-py3-none-any.whl", hash = "sha256:5a01055590ea86c471d6f6f5c8f36fd120a7a47ecb3105d51768c01f18a37eed", size = 6840, upload-time = "2026-03-17T05:43:05.785Z" },
+    { url = "https://files.pythonhosted.org/packages/31/0b/18595a502e20d5cf34ee302d47201a110d5468c893a6a9ce0a22af4d780d/codex_cli_usage-0.1.10-py3-none-any.whl", hash = "sha256:c8749c1ed8d8a7f54b9892df0df0d361648093045d1a4f8b1fa8e4fa9dd55ffa", size = 9833, upload-time = "2026-08-15T04:19:44.628Z" },
 ]
 
 [[package]]

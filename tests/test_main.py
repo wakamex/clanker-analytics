@@ -120,6 +120,22 @@ class TestSourceLoaders:
                 "payload": {"id": session_id, "cwd": "/code/child"},
             },
             {
+                "timestamp": "2026-08-04T22:17:13.980Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+            {
+                "timestamp": "2026-08-04T22:17:13.990Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "thread_settings_applied",
+                    "thread_settings": {
+                        "model": "gpt-5.6-sol",
+                        "service_tier": "default",
+                    },
+                },
+            },
+            {
                 "timestamp": "2026-08-04T22:17:14.000Z",
                 "type": "event_msg",
                 "payload": {
@@ -143,9 +159,14 @@ class TestSourceLoaders:
 
         assert len(result) == 1
         assert result[0][1] == "child"
+        assert result[0][4] == "gpt-5.6-sol"
+        assert result[0][5] == 50
+        assert result[0][8] == 20
         assert result[0][9] == 100
         assert result[0][10] == "unknown"
         assert result[0][11] == "/code/child"
+        assert result[0][18] == "2026-08-04T22:17:14.000Z"
+        assert result[0][19] == "default"
 
     @pytest.mark.parametrize(
         ("metadata", "expected"),
@@ -194,6 +215,64 @@ class TestSourceLoaders:
 
         assert result[10] == expected
         assert result[11] == metadata.get("cwd", "/code/project")
+
+    def test_codex_excludes_fork_replay_and_keeps_weekly_quota(self, tmp_path):
+        session_id = "019ffa59-948d-72f0-bc73-2e1b6b4880cd"
+        path = tmp_path / f"rollout-{session_id}.jsonl"
+        rows = [{
+            "timestamp": "2026-08-13T05:00:02.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "cwd": "/code/fork",
+                "parent_thread_id": "parent",
+            },
+        }, {
+            "timestamp": "2026-08-13T05:00:02.001Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.6-sol"},
+        }]
+
+        def token_event(timestamp, cumulative, used_pct):
+            return {
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {"total_tokens": cumulative},
+                        "last_token_usage": {
+                            "total_tokens": 100,
+                            "input_tokens": 80,
+                            "output_tokens": 10,
+                            "cached_input_tokens": 20,
+                        },
+                    },
+                    "rate_limits": {
+                        "limit_id": "codex",
+                        "primary": {
+                            "used_percent": used_pct,
+                            "window_minutes": 10080,
+                            "resets_at": 1787200000,
+                        },
+                    },
+                },
+            }
+
+        rows.extend(
+            token_event(f"2026-08-13T05:00:02.{100 + index:03d}Z", 100 * (index + 1), 40)
+            for index in range(10)
+        )
+        rows.append(token_event("2026-08-13T05:00:12.000Z", 1100, 41))
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        result = duckdb.sql(
+            main_mod._codex_sql(main_mod._sql_literal(path.as_posix()))
+        ).fetchall()
+
+        assert len(result) == 1
+        assert result[0][18] == "2026-08-13T05:00:12.000Z"
+        assert result[0][20:] == (41.0, 1787200000, 10080, "codex")
 
     def test_claude_includes_subagents_but_not_compaction_duplicates(self, tmp_path):
         root = tmp_path / "session.jsonl"
@@ -316,13 +395,21 @@ class TestSourceLoaders:
         ]
         transcript.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-        result = duckdb.sql(
+        results = duckdb.sql(
             main_mod._agy_sql(main_mod._sql_literal(transcript.as_posix()), "")
-        ).fetchone()
+        ).fetchall()
 
-        assert result[5:10] == (8, 4, 0, 0, 12)
-        assert result[12] == "estimated_processed"
-        assert result[13:15] == (2, 8)
+        assert len(results) == 2
+        assert tuple(sum(row[index] for row in results) for index in range(5, 10)) == (
+            8, 4, 0, 0, 12,
+        )
+        assert {row[12] for row in results} == {"estimated_processed"}
+        assert sum(row[13] for row in results) == 2
+        assert sum(row[14] or 0 for row in results) == 8
+        assert sorted(row[18] for row in results) == [
+            "2026-08-14T12:00:02Z",
+            "2026-08-14T12:00:04Z",
+        ]
 
     def test_agy_metadata_filters_internal_trajectories(self, tmp_path):
         brain = tmp_path / "brain"
@@ -686,6 +773,22 @@ class TestCostCalculation:
         db = _make_db(CODEX_ROW)
         cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
         expected = (500 * 1.25 + 0 * 1.25 + 4000 * 0.125 + 100 * 10.0) / 1e6
+        assert abs(cost - expected) < 0.0001
+
+    def test_codex_56_sol_cost_includes_cache_discount(self):
+        row = ("Codex", "codexproj", "s2", "2026-08-20", "gpt-5.6-sol",
+               500, 100, 50, 4000, 4650)
+        db = _make_db(row)
+        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        expected = (500 * 5.0 + 50 * 6.25 + 4000 * 0.50 + 100 * 30.0) / 1e6
+        assert abs(cost - expected) < 0.0001
+
+    def test_codex_56_long_context_multipliers(self):
+        row = ("Codex", "codexproj", "s2", "2026-08-20", "gpt-5.6-terra",
+               280000, 1000, 0, 0, 281000)
+        db = _make_db(row)
+        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        expected = (280000 * 2.0 * 2.0 + 1000 * 12.0 * 1.5) / 1e6
         assert abs(cost - expected) < 0.0001
 
     def test_gemini_cost(self):
@@ -1385,6 +1488,34 @@ class TestDebugHooks:
         assert result == 0
         assert "[profile] top functions by cumulative time" in captured.err
         assert "ncalls" in captured.err
+
+    def test_pace_command_accepts_positional_periods(self):
+        captured = {}
+
+        def fake_run(args, timer):
+            captured["args"] = args
+            return 0
+
+        with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+            result = main_mod.main(["pace", "5m", "10m", "15m"])
+
+        assert result == 0
+        assert captured["args"].pace is True
+        assert captured["args"].lookback == [300, 600, 900]
+
+    def test_pace_command_accepts_model_mix(self):
+        captured = {}
+
+        def fake_run(args, timer):
+            captured["args"] = args
+            return 0
+
+        with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+            result = main_mod.main(["pace", "--model-mix"])
+
+        assert result == 0
+        assert captured["args"].pace is True
+        assert captured["args"].model_mix is True
 
 
 # ===========================================================================

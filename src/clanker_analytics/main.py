@@ -75,7 +75,7 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 9
+CACHE_SCHEMA_VERSION = 13
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -109,14 +109,13 @@ TOKEN_SCHEMA = """
     retained_tokens BIGINT,
     source_kind VARCHAR,
     cost_usd DOUBLE,
-    source_file VARCHAR
-"""
-
-TOKEN_INSERT_COLUMNS = """
-    tool, project, session, date, model,
-    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-    total_tokens, execution_type, project_path, token_count_type, turn_count, retained_tokens,
-    source_kind, cost_usd, source_file
+    source_file VARCHAR,
+    timestamp VARCHAR,
+    rate_mode VARCHAR,
+    quota_used_pct DOUBLE,
+    quota_resets_at BIGINT,
+    quota_window_minutes INTEGER,
+    quota_limit_id VARCHAR
 """
 
 # On Windows, discover WSL home paths for additional data sources
@@ -182,7 +181,13 @@ SELECT
     NULL::BIGINT as retained_tokens,
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
-    replace(filename, '\\', '/') as source_file
+    replace(filename, '\\', '/') as source_file,
+    cast(timestamp as VARCHAR) as timestamp,
+    '' as rate_mode,
+    NULL::DOUBLE as quota_used_pct,
+    NULL::BIGINT as quota_resets_at,
+    NULL::INTEGER as quota_window_minutes,
+    NULL::VARCHAR as quota_limit_id
 FROM read_json({source_expr},
     format='newline_delimited', filename=true, union_by_name=true,
     ignore_errors=true, maximum_depth=3, maximum_object_size=67108864)
@@ -197,16 +202,23 @@ WHERE type = 'assistant'
 def _codex_sql(source_expr: str) -> str:
     return f"""
 WITH raw AS (
-    SELECT replace(filename, '\\', '/') as filename, type, timestamp, payload,
-           to_json(payload) as payload_json
-    FROM read_json({source_expr},
-        format='newline_delimited', filename=true, union_by_name=true,
-        ignore_errors=true, maximum_depth=4, maximum_object_size=67108864)
-    WHERE type IN ('session_meta', 'event_msg')
+    SELECT
+        replace(filename, '\\', '/') as filename,
+        json_extract_string(json, '$.type') as type,
+        json_extract_string(json, '$.timestamp') as timestamp,
+        json_extract(json, '$.payload') as payload_json
+    FROM read_json_objects({source_expr},
+        format='newline_delimited', filename=true, ignore_errors=true,
+        maximum_object_size=67108864)
+    WHERE json_extract_string(json, '$.type')
+          IN ('session_meta', 'event_msg', 'turn_context')
 ),
 projects AS (
     SELECT
         filename,
+        try_cast(timestamp AS TIMESTAMPTZ) as session_started_at,
+        json_extract_string(payload_json, '$.forked_from_id') IS NOT NULL
+          OR json_extract_string(payload_json, '$.parent_thread_id') IS NOT NULL as is_fork,
         json_extract_string(payload_json, '$.cwd') as project_path,
         split_part(json_extract_string(payload_json, '$.cwd'), '/', -1) as project,
         CASE
@@ -228,33 +240,140 @@ projects AS (
     FROM raw WHERE type = 'session_meta'
     QUALIFY row_number() OVER (
         PARTITION BY filename
-        ORDER BY contains(filename, trim(cast(payload.id as VARCHAR), '"')) DESC,
+        ORDER BY contains(filename, coalesce(
+                     json_extract_string(payload_json, '$.id'), '')) DESC,
                  timestamp ASC
     ) = 1
 ),
+timeline AS (
+    SELECT
+        *,
+        CASE
+            WHEN type = 'turn_context'
+            THEN json_extract_string(payload_json, '$.model')
+            WHEN type = 'event_msg'
+              AND json_extract_string(payload_json, '$.type') = 'thread_settings_applied'
+            THEN json_extract_string(payload_json, '$.thread_settings.model')
+        END as model_event,
+        CASE
+            WHEN type = 'event_msg'
+              AND json_extract_string(payload_json, '$.type') = 'thread_settings_applied'
+            THEN json_extract_string(payload_json, '$.thread_settings.service_tier')
+        END as rate_mode_event
+    FROM raw
+),
+enriched AS (
+    SELECT
+        *,
+        last_value(model_event IGNORE NULLS) OVER (
+            PARTITION BY filename ORDER BY timestamp
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) as model,
+        last_value(rate_mode_event IGNORE NULLS) OVER (
+            PARTITION BY filename ORDER BY timestamp
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) as rate_mode
+    FROM timeline
+),
+replay_seconds AS (
+    SELECT
+        r.filename,
+        date_trunc('second', try_cast(r.timestamp AS TIMESTAMPTZ)) as replay_second,
+        count(*) as event_count,
+        max(try_cast(r.timestamp AS TIMESTAMPTZ)) as cutoff
+    FROM enriched r
+    JOIN projects p ON r.filename = p.filename
+    WHERE p.is_fork
+      AND r.type = 'event_msg'
+      AND json_extract_string(r.payload_json, '$.type') = 'token_count'
+      AND try_cast(r.timestamp AS TIMESTAMPTZ)
+          BETWEEN p.session_started_at AND p.session_started_at + INTERVAL '5 seconds'
+    GROUP BY r.filename, replay_second
+    HAVING count(*) >= 10
+),
+replay_cutoffs AS (
+    SELECT filename, max(cutoff) as cutoff
+    FROM replay_seconds
+    GROUP BY filename
+),
 token_entries AS (
     SELECT
-        r.filename, r.timestamp,
-        cast(r.payload.info.total_token_usage.total_tokens as BIGINT) as cum_total,
-        cast(r.payload.info.last_token_usage.total_tokens as BIGINT) as last_total,
-        coalesce(cast(r.payload.info.last_token_usage.input_tokens as INTEGER), 0) as input_tokens,
-        coalesce(cast(r.payload.info.last_token_usage.output_tokens as INTEGER), 0) as output_tokens,
-        coalesce(cast(r.payload.info.last_token_usage.cached_input_tokens as INTEGER), 0) as cache_read_tokens,
-        LAG(cast(r.payload.info.total_token_usage.total_tokens as BIGINT))
+        r.filename, r.timestamp, r.model, r.rate_mode,
+        try_cast(json_extract_string(
+            r.payload_json, '$.info.total_token_usage.total_tokens') as BIGINT) as cum_total,
+        try_cast(json_extract_string(
+            r.payload_json, '$.info.last_token_usage.total_tokens') as BIGINT) as last_total,
+        greatest(
+            coalesce(try_cast(json_extract_string(
+                r.payload_json, '$.info.last_token_usage.input_tokens') as INTEGER), 0)
+            - coalesce(try_cast(json_extract_string(
+                r.payload_json, '$.info.last_token_usage.cached_input_tokens') as INTEGER), 0)
+            - coalesce(try_cast(json_extract_string(
+                r.payload_json, '$.info.last_token_usage.cache_write_input_tokens') as INTEGER), 0),
+            0
+        ) as input_tokens,
+        coalesce(try_cast(json_extract_string(
+            r.payload_json, '$.info.last_token_usage.output_tokens') as INTEGER), 0)
+            as output_tokens,
+        coalesce(try_cast(json_extract_string(
+            r.payload_json, '$.info.last_token_usage.cache_write_input_tokens') as INTEGER), 0)
+            as cache_write_tokens,
+        coalesce(try_cast(json_extract_string(
+            r.payload_json, '$.info.last_token_usage.cached_input_tokens') as INTEGER), 0)
+            as cache_read_tokens,
+        CASE
+            WHEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.primary.window_minutes') as INTEGER) = 10080
+            THEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.primary.used_percent') as DOUBLE)
+            WHEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.secondary.window_minutes') as INTEGER) = 10080
+            THEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.secondary.used_percent') as DOUBLE)
+        END as quota_used_pct,
+        CASE
+            WHEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.primary.window_minutes') as INTEGER) = 10080
+            THEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.primary.resets_at') as BIGINT)
+            WHEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.secondary.window_minutes') as INTEGER) = 10080
+            THEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.secondary.resets_at') as BIGINT)
+        END as quota_resets_at,
+        CASE
+            WHEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.primary.window_minutes') as INTEGER) = 10080
+              OR try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.secondary.window_minutes') as INTEGER) = 10080
+            THEN 10080
+        END as quota_window_minutes,
+        CASE
+            WHEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.primary.window_minutes') as INTEGER) = 10080
+              OR try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.secondary.window_minutes') as INTEGER) = 10080
+            THEN json_extract_string(r.payload_json, '$.rate_limits.limit_id')
+        END as quota_limit_id,
+        LAG(try_cast(json_extract_string(
+            r.payload_json, '$.info.total_token_usage.total_tokens') as BIGINT))
             OVER (PARTITION BY r.filename ORDER BY r.timestamp) as prev_cum
-    FROM raw r
+    FROM enriched r
+    LEFT JOIN replay_cutoffs replay ON r.filename = replay.filename
     WHERE r.type = 'event_msg'
-      AND trim(cast(r.payload.type as VARCHAR), '"') = 'token_count'
-      AND r.payload.info IS NOT NULL
+      AND json_extract_string(r.payload_json, '$.type') = 'token_count'
+      AND json_extract(r.payload_json, '$.info') IS NOT NULL
       AND r.timestamp IS NOT NULL
+      AND (replay.cutoff IS NULL
+           OR try_cast(r.timestamp AS TIMESTAMPTZ) > replay.cutoff)
 )
 SELECT
     'Codex' as tool,
     lower(coalesce(p.project, regexp_extract(t.filename, '([^/]+)[.]jsonl', 1))) as project,
     regexp_extract(t.filename, '([^/]+)[.]jsonl', 1) as session,
     left(cast(t.timestamp as VARCHAR), 10) as date,
-    '' as model,
-    t.input_tokens, t.output_tokens, 0 as cache_write_tokens, t.cache_read_tokens,
+    coalesce(t.model, '') as model,
+    t.input_tokens, t.output_tokens, t.cache_write_tokens, t.cache_read_tokens,
     CASE
         WHEN t.last_total > 0 THEN t.last_total
         WHEN t.cum_total IS NOT NULL AND t.prev_cum IS NOT NULL THEN t.cum_total - t.prev_cum
@@ -268,7 +387,13 @@ SELECT
     NULL::BIGINT as retained_tokens,
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
-    t.filename as source_file
+    t.filename as source_file,
+    cast(t.timestamp as VARCHAR) as timestamp,
+    coalesce(t.rate_mode, 'default') as rate_mode,
+    t.quota_used_pct,
+    t.quota_resets_at,
+    t.quota_window_minutes,
+    t.quota_limit_id
 FROM token_entries t
 LEFT JOIN projects p ON t.filename = p.filename
 WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
@@ -311,7 +436,13 @@ SELECT
     NULL::BIGINT as retained_tokens,
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
-    filename as source_file
+    filename as source_file,
+    cast(m.timestamp as VARCHAR) as timestamp,
+    '' as rate_mode,
+    NULL::DOUBLE as quota_used_pct,
+    NULL::BIGINT as quota_resets_at,
+    NULL::INTEGER as quota_window_minutes,
+    NULL::VARCHAR as quota_limit_id
 FROM raw
 WHERE m.tokens IS NOT NULL
   AND m.tokens.total > 0
@@ -464,6 +595,7 @@ turns AS (
     SELECT
         filename,
         left(cast(created_at as VARCHAR), 10) as date,
+        cast(created_at as VARCHAR) as timestamp,
         exact_input_raw IS NOT NULL AND exact_output_raw IS NOT NULL as is_exact,
         CASE WHEN is_exact THEN
             greatest(exact_input_raw - coalesce(exact_cache, 0), 0)
@@ -493,20 +625,14 @@ retained_daily AS (
       AND e.type != 'CONVERSATION_HISTORY'
     GROUP BY e.filename, left(cast(e.created_at as VARCHAR), 10)
 ),
-daily AS (
+turn_rows AS (
     SELECT
-        t.filename,
-        t.date,
-        bool_and(t.is_exact) as is_exact,
-        sum(t.input_tokens)::BIGINT as input_tokens,
-        sum(t.output_tokens)::BIGINT as output_tokens,
-        sum(t.cache_read_tokens)::BIGINT as cache_read_tokens,
-        sum(t.total_tokens)::BIGINT as total_tokens,
-        count(*)::INT as turn_count,
-        r.retained_tokens
+        t.*,
+        CASE WHEN row_number() OVER (
+            PARTITION BY t.filename, t.date ORDER BY t.timestamp
+        ) = 1 THEN r.retained_tokens END as retained_tokens
     FROM turns t
     LEFT JOIN retained_daily r USING (filename, date)
-    GROUP BY t.filename, t.date, r.retained_tokens
 )
 SELECT
     'Agy' as tool,
@@ -517,25 +643,31 @@ SELECT
                END, ''),
                    'antigravity')) as project,
     m.session,
-    d.date,
+    t.date,
     coalesce(m.model, '') as model,
-    d.input_tokens::INT as input_tokens,
-    d.output_tokens::INT as output_tokens,
+    t.input_tokens::INT as input_tokens,
+    t.output_tokens::INT as output_tokens,
     0 as cache_write_tokens,
-    d.cache_read_tokens::INT as cache_read_tokens,
-    d.total_tokens as total_tokens,
+    t.cache_read_tokens::INT as cache_read_tokens,
+    t.total_tokens as total_tokens,
     CASE WHEN contains(replace(m.project_path, '\\', '/'), '/.aop/worktrees/')
          THEN 'subagent' ELSE 'interactive' END as execution_type,
     coalesce(replace(m.project_path, '\\', '/'), 'antigravity') as project_path,
-    CASE WHEN d.is_exact THEN 'exact' ELSE 'estimated_processed' END as token_count_type,
-    d.turn_count,
-    d.retained_tokens,
+    CASE WHEN t.is_exact THEN 'exact' ELSE 'estimated_processed' END as token_count_type,
+    1 as turn_count,
+    t.retained_tokens,
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
-    d.filename as source_file
-FROM daily d
+    t.filename as source_file,
+    t.timestamp,
+    '' as rate_mode,
+    NULL::DOUBLE as quota_used_pct,
+    NULL::BIGINT as quota_resets_at,
+    NULL::INTEGER as quota_window_minutes,
+    NULL::VARCHAR as quota_limit_id
+FROM turn_rows t
 JOIN sessions m USING (filename)
-WHERE d.total_tokens > 0
+WHERE t.total_tokens > 0
 """
 
 
@@ -620,7 +752,13 @@ SELECT
     NULL::BIGINT as retained_tokens,
     'aop' as source_kind,
     cost_usd,
-    filename as source_file
+    filename as source_file,
+    timestamp,
+    '' as rate_mode,
+    NULL::DOUBLE as quota_used_pct,
+    NULL::BIGINT as quota_resets_at,
+    NULL::INTEGER as quota_window_minutes,
+    NULL::VARCHAR as quota_limit_id
 FROM tokens
 WHERE timestamp IS NOT NULL
   AND run_id IS NOT NULL
@@ -639,9 +777,35 @@ SOURCES = {
 COST_PER_ROW = """
     CASE
         WHEN coalesce(source_kind, 'native') = 'aop' THEN cost_usd
-        WHEN tool = 'Codex' THEN
-            (input_tokens * 1.25 + cache_write_tokens * 1.25
-             + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
+        WHEN tool = 'Codex' THEN CASE
+            WHEN lower(model) LIKE '%gpt-5.6-sol%' THEN
+                ((input_tokens * 5.0 + cache_write_tokens * 6.25
+                  + cache_read_tokens * 0.50)
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 2.0 ELSE 1.0 END
+                 + output_tokens * 30.0
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 1.5 ELSE 1.0 END) / 1e6
+            WHEN lower(model) LIKE '%gpt-5.6-terra%' THEN
+                ((input_tokens * 2.0 + cache_write_tokens * 2.50
+                  + cache_read_tokens * 0.20)
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 2.0 ELSE 1.0 END
+                 + output_tokens * 12.0
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 1.5 ELSE 1.0 END) / 1e6
+            WHEN lower(model) LIKE '%gpt-5.6-luna%' THEN
+                ((input_tokens * 0.20 + cache_write_tokens * 0.25
+                  + cache_read_tokens * 0.02)
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 2.0 ELSE 1.0 END
+                 + output_tokens * 1.20
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 1.5 ELSE 1.0 END) / 1e6
+            ELSE
+                (input_tokens * 1.25 + cache_write_tokens * 1.25
+                 + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
+        END
         WHEN tool IN ('Gemini', 'Agy') THEN CASE
             WHEN model LIKE '%flash%' THEN
                 (input_tokens * 0.15 + cache_read_tokens * 0.0375
@@ -666,6 +830,8 @@ COST_PER_ROW = """
         END
     END
 """
+
+API_PRICING_BASIS = "clanker-analytics-api-rates-2026-08-20"
 
 COST_EXPR = f"fmtcost(sum({COST_PER_ROW}))"
 
@@ -1097,8 +1263,9 @@ def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceS
     if not parts:
         return
     with timer.span("append changed files", f"{len(files)} files"):
+        columns = ", ".join(row[0] for row in db.sql("DESCRIBE tokens").fetchall())
         db.execute(
-            f"INSERT INTO tokens ({TOKEN_INSERT_COLUMNS}) "
+            f"INSERT INTO tokens ({columns}) "
             + " UNION ALL ".join(f"SELECT * FROM ({part})" for part in parts)
         )
 
@@ -1214,11 +1381,56 @@ def _get_version() -> str:
 
 def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     timer = timing or DebugTimer(False)
+
+    if args.record_quota:
+        from clanker_analytics.quota import record_quota
+        inserted, errors = record_quota(Path(args.quota_db))
+        print(f"Recorded {inserted} new quota samples in {Path(args.quota_db).expanduser()}")
+        for error in errors:
+            print(f"  warning: {error}", file=sys.stderr)
+        return 1 if len(errors) == 3 else 0
+
     db = duckdb.connect()
     with timer.span("register macros"):
         register_macros(db)
     with timer.span("load tokens"):
         load_tokens(db, args.refresh, timer)
+
+    if args.pace:
+        from clanker_analytics.quota import build_report, connect, print_report
+        from clanker_analytics.quota import DEFAULT_LOOKBACKS
+        lookbacks = args.lookback or list(DEFAULT_LOOKBACKS)
+        with connect(Path(args.quota_db)) as quota_db:
+            report = build_report(
+                quota_db, db, lookbacks, COST_PER_ROW,
+                include_inactive=args.all_buckets,
+            )
+        if args.quota_json:
+            print(json.dumps(report, indent=2))
+        elif report["buckets"]:
+            print_report(report, show_model_mix=args.model_mix)
+        elif report["sample_bucket_count"]:
+            print(
+                "No active complete pace lookbacks yet. "
+                "Keep the quota recorder running or use --all-buckets."
+            )
+            return 1
+        else:
+            print("No quota samples found. Run clanker-analytics --record-quota first.")
+            return 1
+        return 0
+
+    if args.quota_history:
+        from clanker_analytics.quota import build_quota_history, print_quota_history
+        report = build_quota_history(db, COST_PER_ROW, API_PRICING_BASIS)
+        if args.quota_json:
+            print(json.dumps(report, indent=2))
+        elif report["periods"]:
+            print_quota_history(report)
+        else:
+            print("No weekly Codex quota observations found in local session files.")
+            return 1
+        return 0
 
     with timer.span("count rows"):
         row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
@@ -1290,7 +1502,23 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
 
 
 def main(argv: list[str] | None = None):
+    from clanker_analytics.quota import DEFAULT_DB_PATH, parse_duration
+
+    def duration(value: str) -> int:
+        try:
+            return parse_duration(value)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
+    parser.add_argument(
+        "command", nargs="?", choices=["pace"],
+        help="Run a report command; pace accepts optional duration arguments",
+    )
+    parser.add_argument(
+        "periods", nargs="*", type=duration, metavar="PERIOD",
+        help="Pace periods such as 5m 10m 15m",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
     parser.add_argument("--by", choices=list(QUERIES), default="project",
                         help="Group results by (default: project)")
@@ -1321,7 +1549,42 @@ def main(argv: list[str] | None = None):
                         help="Print execution timings and cache decisions to stderr")
     parser.add_argument("--profile", action="store_true",
                         help="Print a cProfile summary to stderr")
+    quota_group = parser.add_mutually_exclusive_group()
+    quota_group.add_argument("--record-quota", action="store_true",
+                             help="Fetch and retain current provider quota percentages")
+    quota_group.add_argument("--pace", action="store_true",
+                             help="Compare quota-delta and local token-derived pace")
+    quota_group.add_argument(
+        "--quota-history", action="store_true",
+        help="Audit Codex API-equivalent usage across every observed weekly reset",
+    )
+    parser.add_argument("--lookback", action="append", type=duration,
+                        help="Pace period such as 3h or 7h; repeat for several periods")
+    parser.add_argument("--quota-db", default=str(DEFAULT_DB_PATH),
+                        help=f"Quota history database (default: {DEFAULT_DB_PATH})")
+    parser.add_argument("--quota-json", action="store_true",
+                        help="Emit the quota report as versioned JSON")
+    parser.add_argument("--all-buckets", action="store_true",
+                        help="Include quota buckets with no activity in requested periods")
+    parser.add_argument("--model-mix", action="store_true",
+                        help="Include model mix in the pace table")
     args = parser.parse_args(argv)
+    if args.command == "pace":
+        if args.pace:
+            parser.error("use either 'pace' or --pace, not both")
+        if args.lookback and args.periods:
+            parser.error("use positional pace periods or --lookback, not both")
+        args.pace = True
+        if args.periods:
+            args.lookback = args.periods
+    if args.lookback and not args.pace:
+        parser.error("--lookback requires --pace")
+    if args.quota_json and not (args.pace or args.quota_history):
+        parser.error("--quota-json requires --pace or --quota-history")
+    if args.all_buckets and not args.pace:
+        parser.error("--all-buckets requires --pace")
+    if args.model_mix and not args.pace:
+        parser.error("--model-mix requires --pace")
 
     timer = DebugTimer(args.debug_timing)
     profiler = cProfile.Profile() if args.profile else None
