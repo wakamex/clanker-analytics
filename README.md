@@ -242,23 +242,3 @@ Brand colors used in `--chart` / `--share` output:
 Python 3.13+, DuckDB 1.5+, matplotlib 3.9+.
 
 Tested on Linux, macOS, and Windows (including WSL data auto-discovery).
-
-## Release
-
-PyPI publishing uses trusted publishing and only runs for a version tag that matches
-`pyproject.toml`. Roll a patch release with:
-
-```sh
-uv --no-config version --bump patch
-uv --no-config lock
-uv --no-config run --locked pytest
-uv --no-config build --no-sources
-git add pyproject.toml uv.lock
-git commit -m "Release v$(uv --no-config version --short)"
-git tag -a "v$(uv --no-config version --short)" -m "Release v$(uv --no-config version --short)"
-git push origin HEAD --follow-tags
-```
-
-Use `minor` or `major` instead of `patch` when appropriate. The tag workflow repeats the locked
-test and build gates before publishing, so a mismatched tag, stale lockfile, failing test, or build
-failure cannot reach PyPI.
