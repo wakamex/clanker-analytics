@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "clanker-analytics"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "agy-usage" },
