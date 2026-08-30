@@ -683,6 +683,8 @@ usage AS (
     SELECT
         filename,
         json_extract_string(result_json, '$.usage_schema') as usage_schema,
+        json_extract_string(result_json, '$.accounting_status') as accounting_status,
+        json_extract(result_json, '$.usage') IS NOT NULL as has_usage,
         lower(json_extract_string(result_json, '$.provider')) as provider,
         json_extract_string(result_json, '$.inference_provider') as inference_provider,
         json_extract_string(result_json, '$.run_id') as run_id,
@@ -725,6 +727,14 @@ normalized AS (
     FROM usage
     WHERE CASE
         WHEN usage_schema IS NULL OR usage_schema = 'aop-token-usage-v1' THEN true
+        WHEN usage_schema = 'aop-token-usage-v2'
+             AND accounting_status IN ('complete', 'partial')
+             AND has_usage THEN true
+        WHEN usage_schema = 'aop-token-usage-v2'
+             AND accounting_status IN ('complete', 'partial', 'unavailable')
+             THEN false
+        WHEN usage_schema = 'aop-token-usage-v2'
+             THEN error('unsupported AOP accounting status')
         ELSE error('unsupported AOP token usage schema')
     END
 ),

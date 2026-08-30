@@ -70,13 +70,35 @@ def _write_aop_result(
     reasoning_output_tokens: int = 5,
     inference_provider: str | None = None,
     cost_usd: float | None = 0.25,
+    usage_schema: str = "aop-token-usage-v2",
+    accounting_status: str | None = "complete",
 ) -> None:
+    counts = (
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+    )
+    if min(counts) < 0:
+        raise ValueError("AOP fixture token counts cannot be negative")
+    if cached_input_tokens > input_tokens:
+        raise ValueError("AOP fixture cached input cannot exceed input")
+    if reasoning_output_tokens > output_tokens:
+        raise ValueError("AOP fixture reasoning output cannot exceed output")
+    if usage_schema == "aop-token-usage-v2":
+        if accounting_status not in {"complete", "partial"}:
+            raise ValueError("usage-bearing v2 fixture requires complete or partial accounting")
+    elif usage_schema == "aop-token-usage-v1":
+        if accounting_status is not None:
+            raise ValueError("v1 fixture cannot have v2 accounting status")
+    else:
+        raise ValueError("unsupported AOP fixture usage schema")
     path.parent.mkdir(parents=True, exist_ok=True)
     calculated_cost = (
         {"amount_usd": cost_usd, "currency": "USD"}
         if cost_usd is not None else None
     )
-    path.write_text(json.dumps({
+    result = {
         "run_id": run_id,
         "provider": provider,
         "mode": "agent",
@@ -86,7 +108,7 @@ def _write_aop_result(
         "session_id": session_id,
         "started_at": "2026-08-14T12:00:00+00:00",
         "finished_at": "2026-08-14T12:01:00+00:00",
-        "usage_schema": "aop-token-usage-v1",
+        "usage_schema": usage_schema,
         "usage": {
             "input_tokens": input_tokens,
             "cached_input_tokens": cached_input_tokens,
@@ -94,7 +116,10 @@ def _write_aop_result(
             "reasoning_output_tokens": reasoning_output_tokens,
         },
         "calculated_cost": calculated_cost,
-    }))
+    }
+    if accounting_status is not None:
+        result["accounting_status"] = accounting_status
+    path.write_text(json.dumps(result))
 
 
 # ===========================================================================
@@ -542,6 +567,7 @@ class TestAOPSourceLoader:
         _write_aop_result(result_path, provider=provider)
         value = json.loads(result_path.read_text())
         value.pop("usage_schema")
+        value.pop("accounting_status")
         result_path.write_text(json.dumps(value))
 
         row = duckdb.sql(main_mod._aop_sql(
@@ -554,13 +580,94 @@ class TestAOPSourceLoader:
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(result_path)
         value = json.loads(result_path.read_text())
-        value["usage_schema"] = "aop-token-usage-v2"
+        value["usage_schema"] = "aop-token-usage-v3"
         result_path.write_text(json.dumps(value))
 
         with pytest.raises(duckdb.Error, match="unsupported AOP token usage schema"):
             duckdb.sql(main_mod._aop_sql(
                 main_mod._sql_literal(result_path.as_posix())
             )).fetchall()
+
+    def test_accepts_legacy_v1_aop_usage(self, tmp_path):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(
+            result_path,
+            usage_schema="aop-token-usage-v1",
+            accounting_status=None,
+        )
+
+        row = duckdb.sql(main_mod._aop_sql(
+            main_mod._sql_literal(result_path.as_posix())
+        )).fetchone()
+
+        assert (row[5], row[6], row[8], row[9]) == (70, 10, 30, 110)
+
+    def test_accepts_usage_bearing_partial_v2_accounting(self, tmp_path):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path, accounting_status="partial")
+
+        row = duckdb.sql(main_mod._aop_sql(
+            main_mod._sql_literal(result_path.as_posix())
+        )).fetchone()
+
+        assert (row[5], row[6], row[8], row[9]) == (70, 10, 30, 110)
+
+    @pytest.mark.parametrize("accounting_status", ["partial", "unavailable"])
+    def test_ignores_v2_accounting_without_usage(
+        self, tmp_path, accounting_status
+    ):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path)
+        value = json.loads(result_path.read_text())
+        value["accounting_status"] = accounting_status
+        value["usage"] = None
+        value["calculated_cost"] = None
+        if accounting_status == "partial":
+            value["provider_reported_cost"] = {
+                "amount_usd": 0.25,
+                "currency": "USD",
+                "source": "provider",
+            }
+        result_path.write_text(json.dumps(value))
+
+        rows = duckdb.sql(main_mod._aop_sql(
+            main_mod._sql_literal(result_path.as_posix())
+        )).fetchall()
+
+        assert rows == []
+
+    @pytest.mark.parametrize("accounting_status", [None, "future"])
+    def test_rejects_invalid_v2_accounting_status(
+        self, tmp_path, accounting_status
+    ):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path)
+        value = json.loads(result_path.read_text())
+        if accounting_status is None:
+            value.pop("accounting_status")
+        else:
+            value["accounting_status"] = accounting_status
+        result_path.write_text(json.dumps(value))
+
+        with pytest.raises(duckdb.Error, match="unsupported AOP accounting status"):
+            duckdb.sql(main_mod._aop_sql(
+                main_mod._sql_literal(result_path.as_posix())
+            )).fetchall()
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"input_tokens": -1}, "cannot be negative"),
+            ({"cached_input_tokens": 101}, "cached input cannot exceed input"),
+            ({"reasoning_output_tokens": 11}, "reasoning output cannot exceed output"),
+            ({"accounting_status": "unavailable"}, "requires complete or partial"),
+        ],
+    )
+    def test_aop_fixture_rejects_invalid_contract(self, tmp_path, overrides, message):
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+
+        with pytest.raises(ValueError, match=message):
+            _write_aop_result(result_path, **overrides)
 
     def test_resume_runs_aggregate_without_native_double_counting(self, tmp_path):
         first = tmp_path / "project" / ".aop" / "runs" / "one" / "result.json"
