@@ -1,0 +1,13 @@
+name: Release eligibility
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  release-eligible:
+    uses: ./.github/workflows/validation.yml

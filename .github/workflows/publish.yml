@@ -5,25 +5,26 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
+  validate:
+    uses: ./.github/workflows/validation.yml
+
   publish:
+    needs: validate
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-      - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
-          enable-cache: false
-      - name: Verify version tag
-        run: test "$GITHUB_REF_NAME" = "v$(uv --no-config version --short)"
-      - name: Test
-        run: uv --no-config run --locked pytest
-      - name: Build
-        run: uv --no-config build --no-sources
-      - name: Publish
-        run: uv publish --trusted-publishing always
+          version: "0.11.29"
+      - name: Verify tag version
+        run: test "v$(uv --no-config version --short)" = "$GITHUB_REF_NAME"
+      - run: uv --no-config build --no-sources
+      - run: uv publish --trusted-publishing always
