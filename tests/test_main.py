@@ -914,8 +914,26 @@ class TestCostCalculation:
                500, 100, 50, 4000, 4650)
         db = _make_db(row)
         cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (500 * 5.0 + 50 * 6.25 + 4000 * 0.50 + 100 * 30.0) / 1e6
+        expected = (500 * 4.0 + 50 * 5.0 + 4000 * 0.40 + 100 * 20.0) / 1e6
         assert abs(cost - expected) < 0.0001
+
+    @pytest.mark.parametrize("model,rates", [
+        ("gpt-6-astra", (10.0, 12.5, 1.0, 50.0)),
+        ("gpt-5.6-sol", (4.0, 5.0, 0.4, 20.0)),
+    ])
+    @pytest.mark.parametrize("context_tokens", [272000, 272001])
+    def test_current_codex_request_tier_boundary(self, model, rates, context_tokens):
+        uncached, written = 1000, 500
+        cached = context_tokens - uncached - written
+        row = ("Codex", "proj", "s", "2026-09-05", model,
+               uncached, 200, written, cached, context_tokens + 200)
+        db = _make_db(row, row)
+        input_factor, output_factor = (2, 1.5) if context_tokens > 272000 else (1, 1)
+        expected = 2 * ((uncached * rates[0] + written * rates[1]
+                        + cached * rates[2]) * input_factor
+                       + 200 * rates[3] * output_factor) / 1e6
+        # Two standard requests remain standard even when their aggregate exceeds the limit.
+        assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0] == pytest.approx(expected)
 
     def test_codex_56_long_context_multipliers(self):
         row = ("Codex", "codexproj", "s2", "2026-08-20", "gpt-5.6-terra",

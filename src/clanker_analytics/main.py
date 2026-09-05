@@ -800,12 +800,20 @@ COST_PER_ROW = """
     CASE
         WHEN coalesce(source_kind, 'native') = 'aop' THEN cost_usd
         WHEN tool = 'Codex' THEN CASE
-            WHEN lower(model) LIKE '%gpt-5.6-sol%' THEN
-                ((input_tokens * 5.0 + cache_write_tokens * 6.25
-                  + cache_read_tokens * 0.50)
+            WHEN lower(model) LIKE '%gpt-6-astra%' THEN
+                ((input_tokens * 10.0 + cache_write_tokens * 12.50
+                  + cache_read_tokens * 1.00)
                  * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
                         THEN 2.0 ELSE 1.0 END
-                 + output_tokens * 30.0
+                 + output_tokens * 50.0
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 1.5 ELSE 1.0 END) / 1e6
+            WHEN lower(model) LIKE '%gpt-5.6-sol%' THEN
+                ((input_tokens * 4.0 + cache_write_tokens * 5.0
+                  + cache_read_tokens * 0.40)
+                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
+                        THEN 2.0 ELSE 1.0 END
+                 + output_tokens * 20.0
                  * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
                         THEN 1.5 ELSE 1.0 END) / 1e6
             WHEN lower(model) LIKE '%gpt-5.6-terra%' THEN
@@ -853,7 +861,7 @@ COST_PER_ROW = """
     END
 """
 
-API_PRICING_BASIS = "clanker-analytics-api-rates-2026-08-20"
+API_PRICING_BASIS = "clanker-analytics-api-rates-2026-09-05"
 
 COST_EXPR = f"fmtcost(sum({COST_PER_ROW}))"
 

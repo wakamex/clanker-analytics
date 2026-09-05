@@ -205,14 +205,17 @@ same cache discount across sources. Cache reads use these rates for the native p
 | Claude Sonnet | $3/MTok | $0.30/MTok | $3.75/MTok | $15/MTok |
 | Claude Opus | $5/MTok | $0.50/MTok | $6.25/MTok | $25/MTok |
 | GPT-5 fallback | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
-| GPT-5.6 Sol | $5/MTok | $0.50/MTok | $6.25/MTok | $30/MTok |
+| GPT-6 Astra | $10/MTok | $1/MTok | $12.50/MTok | $50/MTok |
+| GPT-5.6 Sol | $4/MTok | $0.40/MTok | $5/MTok | $20/MTok |
 | GPT-5.6 Terra | $2/MTok | $0.20/MTok | $2.50/MTok | $12/MTok |
 | GPT-5.6 Luna | $0.20/MTok | $0.02/MTok | $0.25/MTok | $1.20/MTok |
 | Gemini Flash | $0.15/MTok | $0.0375/MTok | (auto) | $0.60/MTok |
 | Gemini 2.5 Pro | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
 | Gemini 3.1 Pro | $2/MTok | $0.50/MTok | (auto) | $12/MTok |
 
-Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [OpenAI model pricing](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing)
+Codex long-context rates apply per inference request: above 272,000 input tokens including cached input, input rates double and output rates increase by 50%. Aggregating several shorter requests does not trigger this tier. Astra and Sol rates were checked on September 5, 2026. These estimates represent API-equivalent usage, not subscription charges.
+
+Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [Astra pricing](https://developers.openai.com/api/docs/models/gpt-6-astra), [Sol pricing](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing)
 
 ## Environmental impact estimates
 
