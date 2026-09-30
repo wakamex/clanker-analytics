@@ -208,7 +208,7 @@ For Agy, discovery reads canonical logs at
 roots. Compact copies, chunk mirrors, internal trajectories, duplicate events, and resumed
 `CONVERSATION_HISTORY` entries are not counted.
 
-Antigravity transcripts do not name the model. Each session's model comes from its conversation database, `conversations/<session>.db`, where every model call's generation metadata records the model it used; the session takes the model most of its calls used. Antigravity's own names such as `gemini-default` stay unpriced until llm-prices knows which model they mean.
+Antigravity transcripts do not name the model. Each session's model comes from its conversation database, `conversations/<session>.db`, whose generation metadata records every model call. Most records name the model the user selected, such as `Gemini 3.5 Flash (High)`, which is stored in Antigravity's slug form `gemini-3.5-flash-high`. Sessions whose records lack that name use the last model selection noted in the conversation, then the serving model name. Serving names can be aliases: `gemini-default` and `gemini-3-flash-a` both ran Gemini 3.5 Flash (High) in July and August 2026.
 
 When complete API usage metadata is retained for a model turn, those counters are reported exactly.
 Otherwise, Agy reports a processed-token estimate. Each completed `PLANNER_RESPONSE` is a model turn,

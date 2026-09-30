@@ -79,7 +79,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 19
+CACHE_SCHEMA_VERSION = 20
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -466,17 +466,34 @@ def _agy_metadata_paths() -> list[str]:
 
 
 AGY_MODELS_TABLE = "agy_conversation_models"
-# In each generation's metadata protobuf, the model is field 19 (tag 0x9a 0x01), a
-# length-prefixed string that directly follows the request's 16-character hex hash.
-# Matching the hash too keeps the same tag inside message content from matching.
-AGY_MODEL_FIELD = re.compile(rb"[0-9a-f]{16}\x9a\x01([\x01-\x7f])")
+# In each generation's metadata protobuf, field 19 (tag 0x9a 0x01) is the serving model
+# name, a length-prefixed string directly after the request's 16-character hex hash;
+# matching the hash too keeps the same tag inside message content from matching. Most
+# records end with field 21 (tag 0xaa 0x01), the display name of the model the user
+# selected, such as "Gemini 3.5 Flash (High)". Serving names can be aliases:
+# gemini-default and gemini-3-flash-a both ran Gemini 3.5 Flash (High).
+AGY_SERVED_FIELD = re.compile(rb"[0-9a-f]{16}\x9a\x01([\x01-\x7f])")
+AGY_SELECTED_FIELD = re.compile(rb"\xaa\x01([\x01-\x7f])([\x20-\x7e]+)\Z")
+# Antigravity also notes each model choice in the conversation, which covers sessions
+# whose records lack the display name field.
+AGY_SELECTION_SETTING = re.compile(
+    rb"changed setting `Model Selection` from [^`\n]*? to "
+    rb"((?:Gemini|Claude|GPT)[\w .-]*?(?: \(\w+\))?)\. "
+)
+
+
+def _agy_slug(display_name: str) -> str:
+    """Antigravity's slug for a display name: "Gemini 3.5 Flash (High)" is gemini-3.5-flash-high."""
+    return "-".join(display_name.lower().replace("(", "").replace(")", "").split())
 
 
 def _load_agy_models(db: duckdb.DuckDBPyConnection, transcript_paths: list[str]) -> None:
     """Record each session's model from Antigravity's conversation database.
 
-    Transcripts do not name the model. Each model call's generation metadata in
-    conversations/<session>.db does; a session's model is the one most of its calls used.
+    Transcripts do not name the model; each model call's generation metadata in
+    conversations/<session>.db does. A session's model is the selected model most of its
+    calls recorded, else the last model selection noted in the conversation, else the
+    serving name most of its calls used.
     """
     rows = []
     for transcript in transcript_paths:
@@ -485,23 +502,34 @@ def _load_agy_models(db: duckdb.DuckDBPyConnection, transcript_paths: list[str])
         database = path.parents[4] / "conversations" / f"{session}.db"
         if not database.exists():
             continue
-        counts: dict[str, int] = {}
+        selected: dict[str, int] = {}
+        served: dict[str, int] = {}
+        selection = None
         try:
             source = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
             try:
                 for (data,) in source.execute("SELECT data FROM gen_metadata ORDER BY idx"):
-                    match = AGY_MODEL_FIELD.search(data or b"")
-                    if match:
-                        length = match.group(1)[0]
-                        model = data[match.end():match.end() + length].decode(errors="replace")
-                        counts[model] = counts.get(model, 0) + 1
+                    data = data or b""
+                    display = AGY_SELECTED_FIELD.search(data)
+                    if display and display.group(1)[0] == len(display.group(2)):
+                        name = _agy_slug(display.group(2).decode())
+                        selected[name] = selected.get(name, 0) + 1
+                    serving = AGY_SERVED_FIELD.search(data)
+                    if serving:
+                        end = serving.end() + serving.group(1)[0]
+                        name = data[serving.end():end].decode(errors="replace")
+                        served[name] = served.get(name, 0) + 1
+                    for choice in AGY_SELECTION_SETTING.findall(data):
+                        selection = _agy_slug(choice.decode())
             finally:
                 source.close()
         except sqlite3.Error as error:
             print(f"  warning: could not read Antigravity models from {database}: {error}",
                   file=sys.stderr)
-        if counts:
-            rows.append((session, max(counts, key=counts.get)))
+        model = (max(selected, key=selected.get) if selected
+                 else selection or (max(served, key=served.get) if served else None))
+        if model:
+            rows.append((session, model))
     db.execute(f"CREATE OR REPLACE TEMP TABLE {AGY_MODELS_TABLE} (session VARCHAR, model VARCHAR)")
     if rows:
         db.executemany(f"INSERT INTO {AGY_MODELS_TABLE} VALUES (?, ?)", rows)

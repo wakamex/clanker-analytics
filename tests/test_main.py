@@ -377,7 +377,8 @@ class TestSourceLoaders:
         assert row[5:10] == (80, 40, 0, 20, 140)
         assert row[11:13] == ("/code/project", "exact")
 
-    def test_agy_takes_model_from_conversation_database(self, tmp_path):
+    @staticmethod
+    def _agy_session_model(tmp_path, blobs):
         session = "11111111-2222-3333-4444-555555555555"
         root = tmp_path / "antigravity-cli"
         logs = root / "brain" / session / ".system_generated" / "logs"
@@ -390,19 +391,10 @@ class TestSourceLoaders:
         (root / "conversations").mkdir()
         database = sqlite3.connect(root / "conversations" / f"{session}.db")
         database.execute("CREATE TABLE gen_metadata (idx integer, data blob, size integer)")
-        # Generation metadata protobuf: field 19 after the request hash holds the model, as in
-        # b'"\x10465011cf2a4ad107\x9a\x01\x0egemini-default\xa2\x01#\n\nmodel_enum'. The same
-        # tag inside message content, without the hash, must not count.
-        blobs = [
-            b'"\x10ed9d840ced35d80d\x9a\x01\x10gemini-3.7-flash\xa2\x01#\n\nmodel_enum',
-            b'content listing \x9a\x01\x0egpt-transcribe as a text mention',
-            b'content listing \x9a\x01\x0egpt-transcribe as a text mention',
-        ]
         database.executemany("INSERT INTO gen_metadata VALUES (?, ?, ?)",
                              [(index, blob, len(blob)) for index, blob in enumerate(blobs)])
         database.commit()
         database.close()
-
         metadata = tmp_path / "conversation_metadata.json"
         metadata.write_text(json.dumps({"conversations": {"id": {"summary": {"ID": session}}}}))
 
@@ -413,8 +405,31 @@ class TestSourceLoaders:
             main_mod._sql_literal(metadata.as_posix()),
             models_table=main_mod.AGY_MODELS_TABLE,
         )).fetchone()
+        return row[4]
 
-        assert row[2:5] == (session, "2026-08-14", "gemini-3.7-flash")
+    # Generation metadata protobuf, as recorded by Antigravity: field 19 after the request
+    # hash is the serving model and a trailing field 21 names the selected model.
+    SERVED = b'"\x10465011cf2a4ad107\x9a\x01\x0egemini-default\xa2\x01#\n\nmodel_enum'
+    SELECTED = b"\xaa\x01\x17Gemini 3.5 Flash (High)"
+
+    def test_agy_model_is_the_selected_model_recorded_by_each_call(self, tmp_path):
+        blobs = [self.SERVED + self.SELECTED, self.SERVED + self.SELECTED, self.SERVED]
+
+        assert self._agy_session_model(tmp_path, blobs) == "gemini-3.5-flash-high"
+
+    def test_agy_model_falls_back_to_the_noted_model_selection(self, tmp_path):
+        note = (b"The user changed setting `Model Selection` from None to "
+                b"Gemini 3.7 Flash (High). No need to acknowledge this.")
+        served = b'"\x10ed9d840ced35d80d\x9a\x01\x16gemini-3.7-flash-exp-a\xa2\x01'
+
+        assert self._agy_session_model(tmp_path, [note + served, served]) == "gemini-3.7-flash-high"
+
+    def test_agy_model_falls_back_to_the_serving_name(self, tmp_path):
+        served = b'"\x10ed9d840ced35d80d\x9a\x01\x10gemini-3.7-flash\xa2\x01#\n\nmodel_enum'
+        # The same tag inside message content, without the request hash, does not count.
+        mention = b"content listing \x9a\x01\x0egpt-transcribe as a text mention"
+
+        assert self._agy_session_model(tmp_path, [served, mention, mention]) == "gemini-3.7-flash"
 
     def test_agy_estimates_cumulative_turns_and_classifies_tool_results(self, tmp_path):
         session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
