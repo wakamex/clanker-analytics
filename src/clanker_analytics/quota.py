@@ -973,19 +973,13 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
         )
 
         quality = []
-        if used_pct < period["max_used_pct"]:
-            quality.append("inconsistent")
-        if used_pct < 25:
-            quality.append("early")
-        if period["observation_count"] < 2:
-            quality.append("sparse")
         if any(item["pricing"] == "fallback" for item in period["model_mix"]):
             quality.append("fallback_pricing")
         if any(item["pricing"] == "aop_missing_cost" for item in period["model_mix"]):
             quality.append("missing_aop_cost")
         if any(item["rate_mode"] != "default" for item in period["model_mix"]):
             quality.append("unsupported_rate_mode")
-        period["quality"] = quality or ["high_utilization"]
+        period["quality"] = quality
 
         limit_key = (period["tool"], period["limit_id"], period["window_minutes"])
         previous = previous_by_limit.get(limit_key)
@@ -1040,7 +1034,7 @@ def print_quota_history(report: dict[str, Any]) -> None:
             f"{change:+.1f}%" if change is not None else "-",
             f"{cache:.1f}%" if cache is not None else "-",
             _compact_model_mix(period["model_mix"]),
-            ",".join(period["quality"]),
+            ",".join(period["quality"]) or "-",
         ])
     headers = [
         "reset (UTC)", "tool", "limit", "window", "used", "api cost", "implied full",
@@ -1058,13 +1052,14 @@ PLAN_TOOLS = {"Agy": "Gemini"}
 
 def build_value_report(history: dict[str, Any],
                        plans: dict[str, tuple[str, float]]) -> dict[str, Any]:
-    """Compare each tool's latest weekly full-quota API value with its plan price."""
+    """Compare each tool's most-used weekly full-quota API value with its plan price."""
     latest: dict[str, dict[str, Any]] = {}
     for period in history["periods"]:
         if period["window_minutes"] != 7 * 24 * 60 or period["total_tokens"] <= 0:
             continue
         current = latest.get(period["tool"])
-        rank = ("early" not in period["quality"], period["resets_at"], period["used_pct"])
+        # The most-used period needs the least extrapolation to a full quota.
+        rank = (period["used_pct"], period["resets_at"])
         if current is None or rank > current["rank"]:
             latest[period["tool"]] = {"rank": rank, "period": period}
 
@@ -1123,7 +1118,7 @@ def print_value_report(report: dict[str, Any]) -> None:
             f"{multiple:.0f}x" if multiple else "-",
             money(item["api_usd_per_million_tokens"], 3),
             money(item["effective_usd_per_million_tokens"], 4),
-            ",".join(item["quality"]),
+            ",".join(item["quality"]) or "-",
         ])
     headers = [
         "tool", "plan", "price/mo", "week ending", "used", "full week", "month",
@@ -1132,8 +1127,8 @@ def print_value_report(report: dict[str, Any]) -> None:
     for line in _format_table(headers, rows, {2, 4, 5, 6, 7, 8, 9}):
         print(line)
     print(
-        "\nFull week: API-equivalent value of 100% of the latest weekly quota period, "
-        "preferring periods at least 25% used. "
+        "\nFull week: API-equivalent value of 100% of the weekly quota period with the "
+        "highest used percentage, latest first on ties. "
         f"Month: full week x {report['weeks_per_month']:.3f}. $/1M uses that week's own "
         "token mix, counting input, cache, and output tokens."
     )

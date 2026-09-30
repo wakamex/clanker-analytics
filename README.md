@@ -130,7 +130,7 @@ For each period it uses the chronologically last nonzero quota observation, tota
 
 Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run without a recorded cost adds tokens but no cost and flags the period `missing_aop_cost`.
 
-`value` summarizes what each subscription is worth at API prices. For each tool it takes the latest weekly period from the quota history, preferring periods at least 25 percent used, and reports:
+`value` summarizes what each subscription is worth at API prices. For each tool it takes the weekly period with the highest used percentage from the quota history, the latest one on ties, because it needs the least extrapolation to a full quota. It reports:
 
 - The implied full-week and monthly API-equivalent value, using 365.25 / 12 / 7 weeks per month.
 - The monthly plan price and the value as a multiple of it.
@@ -145,9 +145,9 @@ otherwise timezone-less coercion can move activity across quota boundaries on no
 
 Native rows in all periods are repriced with the same immutable rate-card identity shown above the table, while AOP runs keep the API-equivalent cost AOP recorded when they ran. This
 constant-price comparison keeps public API price changes from looking like quota changes. Models
-without an explicit rate show `fallback_pricing`, non-default rate modes are flagged, and estimates
-below 25 percent utilization show `early`. Those rows are useful leads, not strong quota-capacity
-evidence.
+without an explicit rate show `fallback_pricing`, and non-default rate modes show
+`unsupported_rate_mode`. Estimates extrapolate from the used percentage, so low-usage periods are
+rough.
 
 The report reads the incremental Parquet cache. The first run may need one full source-file rebuild;
 later runs update only changed files and query the complete history in one DuckDB aggregation. Codex

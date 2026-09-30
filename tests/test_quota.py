@@ -448,10 +448,9 @@ def test_quota_history_estimates_full_cost_from_last_period_observation():
     assert first["api_equivalent_cost_usd"] == 25
     assert first["full_quota_api_equivalent_cost_estimate_usd"] == 50
     assert first["cached_input_pct"] == 160 / 190 * 100
-    assert first["quality"] == ["high_utilization"]
+    assert first["quality"] == []
     assert second["full_quota_api_equivalent_cost_estimate_usd"] == 80
     assert second["change_from_previous_estimate_pct"] == pytest.approx(60)
-    assert "early" not in second["quality"]
 
 
 def test_quota_history_combines_recorded_snapshots_and_embedded_limit_hits(tmp_path):
@@ -557,14 +556,15 @@ def _history_period(tool, resets_at, used_pct, cost, tokens, quality, window_min
     }
 
 
-def test_value_report_prefers_latest_substantial_weekly_period():
+def test_value_report_uses_the_most_used_weekly_period():
     history = {"pricing_basis": "test", "periods": [
-        _history_period("Claude Code", "2026-09-29T13:00:00Z", 50, 1000.0, 1_000_000_000,
-                        ["high_utilization"]),
-        _history_period("Claude Code", "2026-10-06T13:00:00Z", 10, 50.0, 10_000_000, ["early"]),
-        _history_period("Claude Code", "2026-10-01T00:00:00Z", 100, 5.0, 1000, ["sparse"],
+        _history_period("Claude Code", "2026-09-22T13:00:00Z", 50, 900.0, 1_000_000_000, []),
+        _history_period("Claude Code", "2026-09-29T13:00:00Z", 50, 1000.0, 1_000_000_000, []),
+        _history_period("Claude Code", "2026-10-06T13:00:00Z", 10, 50.0, 10_000_000, []),
+        _history_period("Claude Code", "2026-10-01T00:00:00Z", 100, 5.0, 1000, [],
                         window_minutes=300),
-        _history_period("Agy", "2026-09-30T00:00:00Z", 10, 3.0, 5_000_000, ["early"]),
+        _history_period("Agy", "2026-09-30T00:00:00Z", 10, 3.0, 5_000_000,
+                        ["fallback_pricing"]),
     ]}
 
     report = build_value_report(history, {"Claude Code": ("max_20x", 200), "Gemini": ("ultra", 250)})
@@ -579,4 +579,4 @@ def test_value_report_prefers_latest_substantial_weekly_period():
         1.0 / claude["api_equivalent_multiple"]
     )
     assert agy["plan"] == "ultra"
-    assert "early" in agy["quality"]
+    assert agy["quality"] == ["fallback_pricing"]
