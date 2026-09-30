@@ -76,7 +76,7 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 16
+CACHE_SCHEMA_VERSION = 17
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -799,7 +799,7 @@ ZCODE_USAGE_COLUMNS = """
     parent_session_id VARCHAR,
     directory VARCHAR,
     model_id VARCHAR,
-    started_at BIGINT,
+    charged_at BIGINT,
     input_tokens BIGINT,
     output_tokens BIGINT,
     cache_write_tokens BIGINT,
@@ -808,7 +808,8 @@ ZCODE_USAGE_COLUMNS = """
 """
 
 ZCODE_USAGE_QUERY = """
-    SELECT m.session_id, s.parent_id, s.directory, m.model_id, m.started_at,
+    SELECT m.session_id, s.parent_id, s.directory, m.model_id,
+           coalesce(m.completed_at, m.started_at),
            m.input_tokens, m.output_tokens, m.cache_creation_input_tokens,
            m.cache_read_input_tokens,
            CASE WHEN m.error_type = 'rate_limited' THEN m.error_message END
@@ -846,6 +847,8 @@ def _zcode_sql(source_expr: str) -> str:
     A rejected request whose message says a usage limit was reached becomes a zero-token
     row carrying an exact 100% quota observation for that window.
     """
+    # Z.ai starts a quota window within a second of the first request's completion,
+    # so requests are timed when they finish.
     # Zcode input and total counts include cache reads and writes, like OpenAI usage.
     return f"""
 WITH usage AS (
@@ -872,7 +875,7 @@ SELECT
     '{ZCODE_TOOL}' as tool,
     lower(regexp_extract(replace(directory, '\\', '/'), '([^/]+)/?$', 1)) as project,
     session_id as session,
-    strftime(epoch_ms(started_at), '%Y-%m-%d') as date,
+    strftime(epoch_ms(charged_at), '%Y-%m-%d') as date,
     'zai/' || lower(model_id) as model,
     greatest(input_tokens - cache_read_tokens - cache_write_tokens, 0)::INT as input_tokens,
     output_tokens::INT as output_tokens,
@@ -889,7 +892,7 @@ SELECT
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
     source_file,
-    strftime(epoch_ms(started_at), '%Y-%m-%dT%H:%M:%S.%gZ') as timestamp,
+    strftime(epoch_ms(charged_at), '%Y-%m-%dT%H:%M:%S.%gZ') as timestamp,
     '' as rate_mode,
     CASE WHEN limit_resets_at IS NOT NULL THEN 100.0 END as quota_used_pct,
     CASE WHEN limit_minutes IS NOT NULL THEN limit_resets_at END as quota_resets_at,

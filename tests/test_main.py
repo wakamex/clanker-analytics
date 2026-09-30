@@ -722,7 +722,7 @@ def _write_zcode_db(path: Path, requests: list[tuple]) -> sqlite3.Connection:
         CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL);
         CREATE TABLE model_usage (
             id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model_id TEXT NOT NULL,
-            status TEXT NOT NULL, started_at INTEGER NOT NULL,
+            status TEXT NOT NULL, started_at INTEGER NOT NULL, completed_at INTEGER,
             input_tokens INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -794,6 +794,17 @@ class TestZcodeSourceLoader:
         assert cost == pytest.approx(
             (100 * 1.40 + 900 * 0.26 + 50 * 4.40 + 100 * 0.15 + 10 * 0.50) / 1e6
         )
+
+    def test_requests_are_timed_at_completion(self, tmp_path, monkeypatch):
+        path = self._configure(tmp_path, monkeypatch)
+        connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790522685219, 10, 1, 0, 0)])
+        connection.execute("UPDATE model_usage SET completed_at = 1790522692694")
+        connection.commit()
+
+        db = self._load()
+        connection.close()
+
+        assert db.sql("SELECT timestamp FROM tokens").fetchone()[0] == "2026-09-27T15:24:52.694Z"
 
     def test_usage_limit_errors_become_full_quota_observations(self, tmp_path, monkeypatch):
         path = self._configure(tmp_path, monkeypatch)
