@@ -87,30 +87,35 @@ def configured_plans(path: Path = CONFIG_PATH) -> dict[str, tuple[str, float]]:
 
 
 def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
-    """Yield (rowid, cost when run, cost at today's prices) for each fetched row."""
+    """Yield (rowid, cost when run, cost at today's prices, inferred) for each fetched row.
+
+    inferred is true when the model was inferred from a default-model alias.
+    """
     for rowid, tool, model, timestamp, date, uncached, output, written, read in rows:
         at = timestamp or date
         historical = current = None
+        inferred = False
         if model and at:
-            usage = {
-                "input_tokens": uncached or 0, "output_tokens": output or 0,
-                "cache_write_tokens": written or 0, "cache_read_tokens": read or 0,
-            }
+            usage = (uncached or 0, output or 0, read or 0, written or 0)
             try:
-                historical = llm_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
-                                             at=at, **usage)
-                current = llm_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
-                                          at=at, prices_at=today, **usage)
+                then = llm_prices.rates(model, provider=TOOL_PROVIDERS.get(tool), at=at)
+                now = llm_prices.rates(model, provider=TOOL_PROVIDERS.get(tool), at=at,
+                                       prices_at=today)
             except ValueError:
-                pass
-        yield rowid, historical, current
+                then = now = None
+            if then is not None:
+                historical = then.cost(usage[0], usage[1], usage[2], usage[3])
+                current = now.cost(usage[0], usage[1], usage[2], usage[3]) if now else None
+                inferred = then.inferred_from is not None
+        yield rowid, historical, current, inferred
 
 
 def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     """Price unpriced rows, or every row, at the rates in effect when each request ran
     (api_cost_usd) and at today's price list (current_api_cost_usd).
 
-    AOP runs whose model llm-prices cannot price keep the cost AOP recorded.
+    AOP runs whose model llm-prices cannot price keep the cost AOP recorded. Rows priced
+    through a default-model alias, whose model is inferred, are marked default_model.
     """
     columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     for column, kind in (("api_cost_usd", "DOUBLE"), ("current_api_cost_usd", "DOUBLE"),
@@ -133,15 +138,18 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
             csv.writer(stream).writerows(_price_rows(rows, datetime.now(timezone.utc)))
         db.execute(f"""
             UPDATE tokens SET api_cost_usd = prices.historical,
-                              current_api_cost_usd = prices.current
+                              current_api_cost_usd = prices.current,
+                              pricing = CASE WHEN prices.inferred THEN 'default_model' END
             FROM read_csv('{path.as_posix()}', header = false, auto_detect = false,
                           delim = ',', columns = {{
-                'id': 'BIGINT', 'historical': 'DOUBLE', 'current': 'DOUBLE'}}) prices
+                'id': 'BIGINT', 'historical': 'DOUBLE', 'current': 'DOUBLE',
+                'inferred': 'BOOLEAN'}}) prices
             WHERE tokens.rowid = prices.id
         """)
     db.execute(f"""
         UPDATE tokens SET
             pricing = CASE
+                WHEN pricing = 'default_model' THEN pricing
                 WHEN api_cost_usd IS NOT NULL THEN 'llm-prices'
                 WHEN source_kind = 'aop' AND cost_usd IS NOT NULL THEN 'aop'
                 ELSE 'unpriced'

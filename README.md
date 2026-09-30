@@ -155,7 +155,7 @@ that removal, local usage can be counted again every time a session is forked.
 Codex timestamps are read as their original UTC strings instead of relying on JSON type inference;
 otherwise timezone-less coercion can move activity across quota boundaries on non-UTC hosts.
 
-Periods are priced at the rates in effect when each request ran; the line above the table names the llm-prices data and pricing basis. With `--prices current`, every period uses today's rates, so API price changes do not look like quota changes. Periods with usage that could not be priced show `unpriced_models`, periods priced partly from AOP's recorded costs show `aop_recorded_pricing`, and non-default rate modes show
+Periods are priced at the rates in effect when each request ran; the line above the table names the llm-prices data and pricing basis. With `--prices current`, every period uses today's rates, so API price changes do not look like quota changes. Periods with usage that could not be priced show `unpriced_models`, periods priced partly from AOP's recorded costs show `aop_recorded_pricing`, periods with inferred default-model usage show `inferred_default_model`, and non-default rate modes show
 `unsupported_rate_mode`. Estimates extrapolate from the used percentage, so low-usage periods are
 rough.
 
@@ -208,7 +208,7 @@ For Agy, discovery reads canonical logs at
 roots. Compact copies, chunk mirrors, internal trajectories, duplicate events, and resumed
 `CONVERSATION_HISTORY` entries are not counted.
 
-Antigravity transcripts do not name the model. Each session's model comes from its conversation database, `conversations/<session>.db`, where every model call's generation metadata records the model it used; the session takes the model most of its calls used. Antigravity's own names such as `gemini-default` stay unpriced until llm-prices knows which model they mean.
+Antigravity transcripts do not name the model. Each session's model comes from its conversation database, `conversations/<session>.db`, where every model call's generation metadata records the model it used; the session takes the model most of its calls used. Sessions that ran on Antigravity's default model report `gemini-default`; llm-prices prices them as the model the Antigravity SDK named as its default on that date, and they are marked `default_model`.
 
 When complete API usage metadata is retained for a model turn, those counters are reported exactly.
 Otherwise, Agy reports a processed-token estimate. Each completed `PLANNER_RESPONSE` is a model turn,
@@ -232,6 +232,7 @@ Every row is priced with [llm-prices](https://github.com/wakamex/llm-prices), wh
 Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). The cache records llm-prices' data version and reprices every row when it changes. The `pricing` column says where each row's price came from:
 
 - `llm-prices`: priced from the model's API price history.
+- `default_model`: priced by llm-prices as the model a default-model alias named on that date, such as Antigravity's `gemini-default`, so the model is inferred rather than recorded.
 - `aop`: an AOP run whose model llm-prices cannot price, which keeps the API-equivalent cost AOP recorded.
 - `unpriced`: no price is known, such as Codex's internal `codex-auto-review`. These rows count as zero in cost totals.
 

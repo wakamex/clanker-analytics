@@ -1144,6 +1144,16 @@ class TestCostCalculation:
             0.5, 0.5, "aop"
         )
 
+    def test_default_model_rows_are_priced_and_marked_inferred(self):
+        row = ("Agy", "p", "s", "2026-07-23", "gemini-default", 1000, 100, 0, 0, 1100,
+               "2026-07-23T12:00:00Z")
+        db = _make_db(row)
+
+        cost, pricing = db.sql(f"SELECT sum({COST_PER_ROW}), any_value(pricing) FROM tokens").fetchone()
+        assert pricing == "default_model"
+        assert cost == pytest.approx(llm_prices.cost(
+            "gemini-3.6-flash", at="2026-07-23T12:00:00Z", input_tokens=1000, output_tokens=100))
+
     def test_null_cost_on_empty(self):
         assert self._cost() is None
 
