@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -517,6 +518,7 @@ class TestAOPSourceLoader:
             ("dsh", None, "DeepSeek Harness", (70, 10, 30, 110)),
             ("grok", None, "Grok", (70, 10, 30, 110)),
             ("hermes", None, "Hermes", (70, 10, 30, 110)),
+            ("zcode", None, "Zcode", (70, 10, 30, 110)),
             ("dsh", "anthropic", "DeepSeek Harness", (70, 10, 30, 110)),
         ],
     )
@@ -709,6 +711,100 @@ class TestAOPSourceLoader:
         assert db.sql("SELECT sum(turn_count) FROM tokens").fetchone()[0] == 2
         assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0] == 0.75
 
+
+def _write_zcode_db(path: Path, requests: list[tuple]) -> sqlite3.Connection:
+    """Create a minimal Zcode database; each request is
+    (session, model, started_at_ms, input, output, cache_write, cache_read)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.executescript("""
+        CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL);
+        CREATE TABLE model_usage (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model_id TEXT NOT NULL,
+            status TEXT NOT NULL, started_at INTEGER NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+            error_type TEXT, error_message TEXT
+        );
+        INSERT INTO session VALUES ('main', NULL, '/code/Proj'), ('child', 'main', '/code/Proj');
+    """)
+    add_zcode_requests(connection, requests)
+    return connection
+
+
+def add_zcode_requests(connection: sqlite3.Connection, requests: list[tuple]) -> None:
+    offset = connection.execute("SELECT count(*) FROM model_usage").fetchone()[0]
+    connection.executemany(
+        "INSERT INTO model_usage (id, session_id, model_id, status, started_at, input_tokens,"
+        " output_tokens, cache_creation_input_tokens, cache_read_input_tokens)"
+        " VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?)",
+        [(f"req-{offset + index}", *request) for index, request in enumerate(requests)],
+    )
+    connection.commit()
+
+
+class TestZcodeSourceLoader:
+    def _configure(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            (main_mod.ZCODE_TOOL, tmp_path / ".zcode" / "cli" / "db", "db.sqlite"),
+        ])
+        monkeypatch.setattr(main_mod, "SOURCES", {
+            "zcode": (main_mod.ZCODE_TOOL, main_mod._zcode_sql),
+        })
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+        return tmp_path / ".zcode" / "cli" / "db" / "db.sqlite"
+
+    def _load(self):
+        db = duckdb.connect()
+        register_macros(db)
+        main_mod.load_tokens(db, refresh=False)
+        return db
+
+    def test_normalizes_requests_with_inclusive_input_counts(self, tmp_path, monkeypatch):
+        path = self._configure(tmp_path, monkeypatch)
+        # 2026-09-27T14:11:47.654Z
+        connection = _write_zcode_db(path, [
+            ("main", "GLM-5.3", 1790518307654, 1000, 50, 0, 900),
+            ("child", "GLM-5.3-Flash", 1790518307654, 100, 10, 0, 0),
+            ("main", "GLM-5.3", 1790518307654, 0, 0, 0, 0),
+        ])
+
+        db = self._load()
+        connection.close()
+        rows = db.sql("""
+            SELECT tool, project, session, date, model, input_tokens, output_tokens,
+                   cache_read_tokens, total_tokens, execution_type, timestamp
+            FROM tokens ORDER BY model
+        """).fetchall()
+
+        assert rows == [
+            ("Zcode", "proj", "main", "2026-09-27", "zai/glm-5.3", 100, 50, 900, 1050,
+             "interactive", "2026-09-27T14:11:47.654Z"),
+            ("Zcode", "proj", "child", "2026-09-27", "zai/glm-5.3-flash", 100, 10, 0, 110,
+             "subagent", "2026-09-27T14:11:47.654Z"),
+        ]
+        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        assert cost == pytest.approx(
+            (100 * 1.40 + 900 * 0.26 + 50 * 4.40 + 100 * 0.15 + 10 * 0.50) / 1e6
+        )
+
+    def test_cache_refreshes_when_only_the_write_ahead_log_changes(self, tmp_path, monkeypatch):
+        path = self._configure(tmp_path, monkeypatch)
+        connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790518307654, 10, 1, 0, 0)])
+        assert self._load().sql("SELECT count(*) FROM tokens").fetchone()[0] == 1
+
+        add_zcode_requests(connection, [("main", "GLM-5.3", 1790518307655, 10, 1, 0, 0)])
+        assert Path(f"{path}-wal").exists()
+
+        assert self._load().sql("SELECT count(*) FROM tokens").fetchone()[0] == 2
+        connection.close()
 
 # ===========================================================================
 # fmt() tests

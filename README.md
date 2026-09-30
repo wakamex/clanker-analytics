@@ -2,7 +2,7 @@
 
 Token usage analytics for AI coding tools. It reads local session logs and normalized runs from [Agent Orchestration Process (AOP)](https://github.com/wakamex/agent-orchestration-process), a tool for running bounded jobs across multiple agent CLI harnesses, then shows per-project breakdowns using DuckDB.
 
-Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, and every harness recorded by AOP.
+Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, Zcode, and every harness recorded by AOP.
 
 ![clanker-analytics chart](share.png)
 ![clanker-analytics table](table.png)
@@ -32,7 +32,7 @@ clanker-analytics --table                # tabular view
 clanker-analytics --table --by date      # table grouped by date (also: model, session)
 clanker-analytics --table --by execution # interactive, exec, and subagent usage
 clanker-analytics --regime               # detect cache rate regime changes
-clanker-analytics --tool claude          # Claude Code only (also: codex, gemini, agy, aop)
+clanker-analytics --tool claude          # Claude Code only (also: codex, gemini, agy, aop, zcode)
 clanker-analytics --record-quota         # retain current provider quota percentages
 clanker-analytics pace                   # compare quota and local token pace at 1h, 6h, and 24h
 clanker-analytics pace 5m 10m 15m        # arbitrary human-readable periods
@@ -50,7 +50,7 @@ clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
 ## How it works
 
 DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, and
-`~/.gemini/tmp/`. It also discovers retained `.aop/runs/*/result.json` records in the current Git
+`~/.gemini/tmp/`, and per-request Zcode usage from `~/.zcode/cli/db/db.sqlite`. It also discovers retained `.aop/runs/*/result.json` records in the current Git
 repository, neighboring repositories, and repositories nested one workspace level deeper. Results
 are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest
 at `~/.cache/clanker-analytics/tokens-meta.json`.
@@ -191,6 +191,8 @@ distinguishable from repeated processed context. Hidden system prompts, media to
 unrecorded context truncation cannot be reconstructed. Share cards mark processed estimates with `~`
 and a `processed estimate` tool label.
 
+For Zcode, each row is one model request from the `model_usage` table, including compaction and subagent requests. Zcode reports input with cache reads and writes included, so `input_tokens` holds the uncached remainder. Sessions with a parent session are `subagent` rows. Models are named `zai/<model>` to match AOP's Zcode results, and AOP's `zcode` provider is reported as the same `Zcode` tool. The cache manifest tracks the database together with its write-ahead log, because SQLite commits new requests to the log first.
+
 For current AOP records, each `aop-token-usage-v2` result with complete or usage-bearing partial accounting contributes the exact normalized usage delta for that provider invocation. Results with unavailable accounting are omitted. Input and output are totals, while cached input and reasoning output are subsets that are not added again. The earlier `aop-token-usage-v1` contract remains supported, and unversioned results from older AOP releases are normalized with their provider's legacy token semantics. Unknown named schemas and invalid v2 accounting statuses are rejected. Resumed runs remain separate deltas under one session and are summed. Overlapping Claude Code, Codex, and Agy native session rows are suppressed so the same work is not counted twice. AOP rows are attributed to the repository that owns `.aop`, use a synthetic path under that repository's `.aop/worktrees/` directory, and have `execution_type = 'subagent'`. `turn_count` is the number of retained AOP invocations because the normalized result does not retain a portable count of internal model turns.
 
 ## API cost calculation
@@ -212,10 +214,14 @@ same cache discount across sources. Cache reads use these rates for the native p
 | Gemini Flash | $0.15/MTok | $0.0375/MTok | (auto) | $0.60/MTok |
 | Gemini 2.5 Pro | $1.25/MTok | $0.125/MTok | (auto) | $10/MTok |
 | Gemini 3.1 Pro | $2/MTok | $0.50/MTok | (auto) | $12/MTok |
+| GLM-5.3, 5.2, 5.1, and other GLM fallback | $1.40/MTok | $0.26/MTok | (input) | $4.40/MTok |
+| GLM-5 | $1/MTok | $0.20/MTok | (input) | $3.20/MTok |
+| GLM-5.3 Flash | $0.15/MTok | $0.03/MTok | (input) | $0.50/MTok |
+| GLM-5.3 FlashX | $0.37/MTok | $0.075/MTok | (input) | $1.25/MTok |
 
-Codex long-context rates apply per inference request: above 272,000 input tokens including cached input, input rates double and output rates increase by 50%. Aggregating several shorter requests does not trigger this tier. Astra and Sol rates were checked on September 5, 2026. These estimates represent API-equivalent usage, not subscription charges.
+Codex long-context rates apply per inference request: above 272,000 input tokens including cached input, input rates double and output rates increase by 50%. Aggregating several shorter requests does not trigger this tier. Astra and Sol rates were checked on September 5, 2026. Z.ai lists no cache-write price, so GLM cache writes are priced as input; GLM rates were checked on September 30, 2026. These estimates represent API-equivalent usage, not subscription charges.
 
-Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [Astra pricing](https://developers.openai.com/api/docs/models/gpt-6-astra), [Sol pricing](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing)
+Sources: [Anthropic pricing](https://docs.anthropic.com/en/docs/about-claude/pricing), [Astra pricing](https://developers.openai.com/api/docs/models/gpt-6-astra), [Sol pricing](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [Google AI pricing](https://ai.google.dev/gemini-api/docs/pricing), [Z.ai pricing](https://docs.z.ai/guides/overview/pricing)
 
 ## Environmental impact estimates
 

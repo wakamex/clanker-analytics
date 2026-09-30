@@ -658,7 +658,7 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
             "token_calibration": {
                 "status": "experimental",
                 "basis": "local_api_equivalent_usd",
-                "pricing_basis": "clanker-analytics-api-rates-2026-09-05",
+                "pricing_basis": "clanker-analytics-api-rates-2026-09-30",
                 "method": "local_window_cost_divided_by_current_provider_used_pct",
                 "api_usd_per_quota_percentage_point": api_usd_per_pp,
                 "window_start": _time_text(window_start) if window_start else None,

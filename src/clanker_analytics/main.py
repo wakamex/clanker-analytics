@@ -12,6 +12,7 @@ import json
 import os
 import pstats
 import re
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -75,10 +76,12 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 14
+CACHE_SCHEMA_VERSION = 15
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
+ZCODE_TOOL = "Zcode"
+ZCODE_USAGE_TABLE = "zcode_model_usage"
 
 SOURCE_TREES = [
     ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
@@ -89,6 +92,7 @@ SOURCE_TREES = [
     (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
      "conversation_metadata.json"),
     (AOP_RESULT_TOOL, Path.cwd(), ""),
+    (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
 ]
 
 TOKEN_SCHEMA = """
@@ -755,6 +759,7 @@ SELECT
         WHEN 'grok' THEN 'Grok'
         WHEN 'hermes' THEN 'Hermes'
         WHEN 'opencode' THEN 'OpenCode'
+        WHEN 'zcode' THEN 'Zcode'
         ELSE coalesce(nullif(provider, ''), 'AOP')
     END as tool,
     lower(regexp_extract(owner_path, '([^/]+)$', 1)) as project,
@@ -788,12 +793,89 @@ WHERE timestamp IS NOT NULL
 """
 
 
+ZCODE_USAGE_COLUMNS = """
+    source_file VARCHAR,
+    session_id VARCHAR,
+    parent_session_id VARCHAR,
+    directory VARCHAR,
+    model_id VARCHAR,
+    started_at BIGINT,
+    input_tokens BIGINT,
+    output_tokens BIGINT,
+    cache_write_tokens BIGINT,
+    cache_read_tokens BIGINT
+"""
+
+ZCODE_USAGE_QUERY = """
+    SELECT m.session_id, s.parent_id, s.directory, m.model_id, m.started_at,
+           m.input_tokens, m.output_tokens, m.cache_creation_input_tokens,
+           m.cache_read_input_tokens
+    FROM model_usage m LEFT JOIN session s ON s.id = m.session_id
+    WHERE m.input_tokens + m.output_tokens > 0
+"""
+
+
+def _load_zcode_usage(db: duckdb.DuckDBPyConnection, paths: list[str]) -> None:
+    """Copy per-request usage from Zcode's SQLite databases into DuckDB."""
+    rows = []
+    for path in paths:
+        try:
+            source = sqlite3.connect(f"{Path(path).as_uri()}?mode=ro", uri=True)
+            try:
+                rows.extend((path, *row) for row in source.execute(ZCODE_USAGE_QUERY))
+            finally:
+                source.close()
+        except sqlite3.Error as error:
+            print(f"  warning: could not read Zcode usage from {path}: {error}", file=sys.stderr)
+    db.execute(f"CREATE OR REPLACE TEMP TABLE {ZCODE_USAGE_TABLE} ({ZCODE_USAGE_COLUMNS})")
+    if rows:
+        db.executemany(
+            f"INSERT INTO {ZCODE_USAGE_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+        )
+
+
+def _zcode_sql(source_expr: str) -> str:
+    """Normalize requests that _load_zcode_usage copied from the source databases."""
+    # Zcode input and total counts include cache reads and writes, like OpenAI usage.
+    return f"""
+SELECT
+    '{ZCODE_TOOL}' as tool,
+    lower(regexp_extract(replace(directory, '\\', '/'), '([^/]+)/?$', 1)) as project,
+    session_id as session,
+    strftime(epoch_ms(started_at), '%Y-%m-%d') as date,
+    'zai/' || lower(model_id) as model,
+    greatest(input_tokens - cache_read_tokens - cache_write_tokens, 0)::INT as input_tokens,
+    output_tokens::INT as output_tokens,
+    cache_write_tokens::INT as cache_write_tokens,
+    cache_read_tokens::INT as cache_read_tokens,
+    (greatest(input_tokens, cache_read_tokens + cache_write_tokens)
+      + output_tokens)::BIGINT as total_tokens,
+    CASE WHEN parent_session_id IS NOT NULL THEN 'subagent' ELSE 'interactive' END
+        as execution_type,
+    replace(directory, '\\', '/') as project_path,
+    'exact' as token_count_type,
+    1 as turn_count,
+    NULL::BIGINT as retained_tokens,
+    'native' as source_kind,
+    NULL::DOUBLE as cost_usd,
+    source_file,
+    strftime(epoch_ms(started_at), '%Y-%m-%dT%H:%M:%S.%gZ') as timestamp,
+    '' as rate_mode,
+    NULL::DOUBLE as quota_used_pct,
+    NULL::BIGINT as quota_resets_at,
+    NULL::INTEGER as quota_window_minutes,
+    NULL::VARCHAR as quota_limit_id
+FROM {ZCODE_USAGE_TABLE}
+"""
+
+
 SOURCES = {
     "claude": ("Claude Code", _claude_sql),
     "codex": ("Codex", _codex_sql),
     "gemini": ("Gemini", _gemini_sql),
     "agy": ("Agy", _agy_sql),
     "aop": (AOP_RESULT_TOOL, _aop_sql),
+    "zcode": (ZCODE_TOOL, _zcode_sql),
 }
 
 COST_PER_ROW = """
@@ -847,6 +929,20 @@ COST_PER_ROW = """
                 (input_tokens * 2.0 + cache_read_tokens * 0.50
                  + output_tokens * 12.0) / 1e6
         END
+        WHEN tool = 'Zcode' THEN CASE
+            WHEN model LIKE '%glm-5.3-flashx%' THEN
+                (input_tokens * 0.37 + cache_write_tokens * 0.37
+                 + cache_read_tokens * 0.075 + output_tokens * 1.25) / 1e6
+            WHEN model LIKE '%glm-5.3-flash%' THEN
+                (input_tokens * 0.15 + cache_write_tokens * 0.15
+                 + cache_read_tokens * 0.03 + output_tokens * 0.50) / 1e6
+            WHEN model LIKE '%glm-5' THEN
+                (input_tokens * 1.00 + cache_write_tokens * 1.00
+                 + cache_read_tokens * 0.20 + output_tokens * 3.20) / 1e6
+            ELSE
+                (input_tokens * 1.40 + cache_write_tokens * 1.40
+                 + cache_read_tokens * 0.26 + output_tokens * 4.40) / 1e6
+        END
         ELSE CASE
             WHEN model LIKE '%opus%' THEN
                 (input_tokens * 5.0 + cache_write_tokens * 6.25
@@ -861,7 +957,7 @@ COST_PER_ROW = """
     END
 """
 
-API_PRICING_BASIS = "clanker-analytics-api-rates-2026-09-05"
+API_PRICING_BASIS = "clanker-analytics-api-rates-2026-09-30"
 
 COST_EXPR = f"fmtcost(sum({COST_PER_ROW}))"
 
@@ -1047,6 +1143,7 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
             (AGY_METADATA_TOOL,
              Path(wsl_home) / ".gemini" / "antigravity-cli" / "cache",
              "conversation_metadata.json"),
+            (ZCODE_TOOL, Path(wsl_home) / ".zcode" / "cli" / "db", "db.sqlite"),
         ])
     return trees
 
@@ -1130,11 +1227,16 @@ def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
                 continue
             dir_count += 1
             for path in root.rglob(pattern):
-                stat = path.stat()
+                stats = [path.stat()]
+                if tool == ZCODE_TOOL:
+                    # SQLite commits land in the write-ahead log before checkpointing.
+                    wal = path.with_name(path.name + "-wal")
+                    if wal.exists():
+                        stats.append(wal.stat())
                 files[path.as_posix()] = SourceSnapshot(
                     tool=tool,
-                    mtime_ns=stat.st_mtime_ns,
-                    size=stat.st_size,
+                    mtime_ns=max(stat.st_mtime_ns for stat in stats),
+                    size=sum(stat.st_size for stat in stats),
                 )
         except OSError:
             continue
@@ -1199,11 +1301,14 @@ def _group_files_by_tool(files: dict[str, SourceSnapshot]) -> dict[str, list[str
     return grouped
 
 
-def _build_source_sql(grouped_files: dict[str, list[str]]) -> list[str]:
+def _build_source_sql(db: duckdb.DuckDBPyConnection,
+                      grouped_files: dict[str, list[str]]) -> list[str]:
     parts = []
     for tool_name, builder in SOURCES.values():
         paths = grouped_files.get(tool_name, [])
         if paths:
+            if tool_name == ZCODE_TOOL:
+                _load_zcode_usage(db, paths)
             parts.append(builder(_sql_file_list(paths)))
     return parts
 
@@ -1241,7 +1346,7 @@ def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot]
 
 def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
                     timer: DebugTimer) -> None:
-    parts = _build_source_sql(_group_files_by_tool(files))
+    parts = _build_source_sql(db, _group_files_by_tool(files))
     if parts:
         with timer.span("build tokens table", f"{len(parts)} sources"):
             db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({part})" for part in parts))
@@ -1289,7 +1394,7 @@ def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceS
                          timer: DebugTimer) -> None:
     if not files:
         return
-    parts = _build_source_sql(_group_files_by_tool(files))
+    parts = _build_source_sql(db, _group_files_by_tool(files))
     if not parts:
         return
     with timer.span("append changed files", f"{len(files)} files"):
