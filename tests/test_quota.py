@@ -511,3 +511,36 @@ def test_quota_history_combines_recorded_snapshots_and_embedded_limit_hits(tmp_p
     fable = periods[("Claude Code", "7d_fable", "2026-09-29T13:00:00Z")]
     assert fable["full_quota_api_equivalent_cost_estimate_usd"] == 50
     assert [item["model"] for item in fable["model_mix"]] == ["claude-fable-5-1"]
+
+
+def test_quota_history_counts_aop_runs_on_the_same_subscription():
+    db = duckdb.connect()
+    db.execute("""
+        CREATE TABLE tokens (
+            tool VARCHAR, model VARCHAR, rate_mode VARCHAR, source_kind VARCHAR,
+            input_tokens BIGINT, output_tokens BIGINT, cache_write_tokens BIGINT,
+            cache_read_tokens BIGINT, total_tokens BIGINT, cost_usd DOUBLE,
+            timestamp VARCHAR, quota_used_pct DOUBLE, quota_resets_at BIGINT,
+            quota_window_minutes INTEGER, quota_limit_id VARCHAR
+        )
+    """)
+    reset = int(datetime(2026, 8, 20, tzinfo=timezone.utc).timestamp())
+    db.executemany(
+        "INSERT INTO tokens VALUES ('Codex', 'gpt-5.6-sol', '', ?, 0, 0, 0, 0, 100, ?, ?, ?, ?, ?, ?)",
+        [
+            ("native", 10.0, "2026-08-14T00:00:00Z", 40, reset, 10080, "codex"),
+            ("aop", 10.0, "2026-08-15T00:00:00Z", None, None, None, None),
+            ("aop", None, "2026-08-16T00:00:00Z", None, None, None, None),
+            ("native", 0.0, "2026-08-19T00:00:00Z", 50, reset, 10080, "codex"),
+        ],
+    )
+
+    period, = build_quota_history(db, "cost_usd", "test-rate-card")["periods"]
+
+    assert period["api_equivalent_cost_usd"] == 20
+    assert period["total_tokens"] == 400
+    assert period["full_quota_api_equivalent_cost_estimate_usd"] == 40
+    assert {item["pricing"] for item in period["model_mix"]} == {
+        "rate_card", "aop_missing_cost",
+    }
+    assert "missing_aop_cost" in period["quality"]

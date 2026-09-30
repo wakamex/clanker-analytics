@@ -872,6 +872,9 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             o.observation_count,
             coalesce(nullif(t.model, ''), 'unknown') as model,
             coalesce(nullif(t.rate_mode, ''), 'default') as rate_mode,
+            coalesce(t.source_kind, 'native') as source_kind,
+            count(*) FILTER (WHERE t.source_kind = 'aop' AND t.cost_usd IS NULL)
+                as unpriced_rows,
             coalesce(sum(t.input_tokens), 0)::BIGINT as input_tokens,
             coalesce(sum(t.output_tokens), 0)::BIGINT as output_tokens,
             coalesce(sum(t.cache_write_tokens), 0)::BIGINT as cache_write_tokens,
@@ -881,7 +884,6 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
         FROM observations o
         LEFT JOIN tokens t
           ON t.tool = o.quota_tool
-         AND t.source_kind = 'native'
          AND try_cast(t.timestamp AS TIMESTAMPTZ)
              >= to_timestamp(o.quota_resets_at)
                 - o.quota_window_minutes * INTERVAL '1 minute'
@@ -893,7 +895,8 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             o.last_used_pct, o.max_used_pct, o.first_observed_at,
             o.observed_at, o.observation_count,
             coalesce(nullif(t.model, ''), 'unknown'),
-            coalesce(nullif(t.rate_mode, ''), 'default')
+            coalesce(nullif(t.rate_mode, ''), 'default'),
+            coalesce(t.source_kind, 'native')
         ORDER BY o.quota_resets_at, o.quota_tool, api_cost_usd DESC, total_tokens DESC
     """).fetchall()
     columns = [item[0] for item in token_db.description]
@@ -936,15 +939,19 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             period[field] += row[field]
         period["api_equivalent_cost_usd"] += row["api_cost_usd"]
         if row["total_tokens"] or row["model"] != "unknown":
+            if row["source_kind"] == "aop":
+                pricing = "aop_missing_cost" if row["unpriced_rows"] else "aop_recorded"
+            elif _known_price(row["quota_tool"], row["model"]):
+                pricing = "rate_card"
+            else:
+                pricing = "fallback"
             period["model_mix"].append({
                 "model": row["model"],
                 "rate_mode": row["rate_mode"],
+                "source_kind": row["source_kind"],
                 "total_tokens": row["total_tokens"],
                 "api_equivalent_cost_usd": row["api_cost_usd"],
-                "pricing": (
-                    "rate_card" if _known_price(row["quota_tool"], row["model"])
-                    else "fallback"
-                ),
+                "pricing": pricing,
             })
 
     periods = sorted(grouped.values(), key=lambda item: (item["resets_at"], item["tool"]))
@@ -974,6 +981,8 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             quality.append("sparse")
         if any(item["pricing"] == "fallback" for item in period["model_mix"]):
             quality.append("fallback_pricing")
+        if any(item["pricing"] == "aop_missing_cost" for item in period["model_mix"]):
+            quality.append("missing_aop_cost")
         if any(item["rate_mode"] != "default" for item in period["model_mix"]):
             quality.append("unsupported_rate_mode")
         period["quality"] = quality or ["high_utilization"]
@@ -993,22 +1002,28 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
         "generated_at": _time_text(datetime.now(timezone.utc)),
         "pricing_basis": pricing_basis,
         "pricing_method": "constant_rate_card_applied_to_all_periods",
-        "usage_source": "local_native_session_usage",
+        "usage_source": "local_native_sessions_and_aop_runs",
         "periods": periods,
     }
 
 
 def _compact_model_mix(mix: list[dict[str, Any]]) -> str:
-    total = sum(item["api_equivalent_cost_usd"] for item in mix)
+    costs: dict[str, float] = {}
+    for item in mix:
+        costs[item["model"]] = costs.get(item["model"], 0.0) + item["api_equivalent_cost_usd"]
+    total = sum(costs.values())
     parts = []
-    for item in mix[:2]:
-        share = item["api_equivalent_cost_usd"] / total * 100 if total else 0
-        parts.append(f"{item['model']} {share:.0f}%")
+    for model, cost in sorted(costs.items(), key=lambda entry: -entry[1])[:2]:
+        share = cost / total * 100 if total else 0
+        parts.append(f"{model} {share:.0f}%")
     return ", ".join(parts) or "-"
 
 
 def print_quota_history(report: dict[str, Any]) -> None:
-    print(f"pricing basis: {report['pricing_basis']} (constant across all periods)")
+    print(
+        f"pricing basis: {report['pricing_basis']} for native rows in every period; "
+        "AOP runs use their recorded cost"
+    )
     rows = []
     for period in report["periods"]:
         estimate = period["full_quota_api_equivalent_cost_estimate_usd"]

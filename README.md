@@ -120,20 +120,20 @@ the JSON report regardless.
 - Zcode usage-limit errors are exact 100% observations of their window.
 - The quota recorder database supplies Claude, Antigravity, and Zcode snapshots from `--record-quota`.
 
-For each period it uses the chronologically last nonzero quota observation, totals native local token usage for that tool from the window start up to that observation, and reports:
+For each period it uses the chronologically last nonzero quota observation, totals local token usage for that tool, including AOP runs of that tool, from the window start up to that observation, and reports:
 
 - API-equivalent cost accumulated at the last observation.
 - The implied full-quota API-equivalent cost, calculated as cost divided by used percentage.
 - Change from the preceding estimate for the same tool, limit, and window length, cached-input share, model mix, and quality flags.
 
-Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP rows are not counted, so AOP runs that share a subscription make its estimate low.
+Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run without a recorded cost adds tokens but no cost and flags the period `missing_aop_cost`.
 
 For Codex, the report also removes inherited `token_count` events replayed into newly forked sessions. Without
 that removal, local usage can be counted again every time a session is forked.
 Codex timestamps are read as their original UTC strings instead of relying on JSON type inference;
 otherwise timezone-less coercion can move activity across quota boundaries on non-UTC hosts.
 
-All periods are repriced with the same immutable rate-card identity shown above the table. This
+Native rows in all periods are repriced with the same immutable rate-card identity shown above the table, while AOP runs keep the API-equivalent cost AOP recorded when they ran. This
 constant-price comparison keeps public API price changes from looking like quota changes. Models
 without an explicit rate show `fallback_pricing`, non-default rate modes are flagged, and estimates
 below 25 percent utilization show `early`. Those rows are useful leads, not strong quota-capacity
