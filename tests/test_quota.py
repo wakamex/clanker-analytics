@@ -15,6 +15,7 @@ from clanker_analytics.quota import (
     normalize_antigravity,
     normalize_anthropic,
     normalize_openai,
+    normalize_zai,
     parse_duration,
     print_report,
 )
@@ -96,6 +97,30 @@ def test_anthropic_adapter_classifies_windows_by_plan(plan, expected):
     assert samples[0].window_kind == expected
     assert samples[0].resets_at == "2026-08-25T13:00:00Z"
 
+
+def test_zai_adapter_maps_credit_windows_and_keeps_fractional_usage():
+    data = {
+        "plan": "lite",
+        "source": "api",
+        "updated_at": "2026-09-28T16:31:42.657428+00:00",
+        "limits": [
+            {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "used": 0, "limit": 2000,
+             "remaining": 2000, "pct": 0, "resets_at": None},
+            {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "used": 2004, "limit": 10000,
+             "remaining": 7995, "pct": 20,
+             "resets_at": "2026-10-04T15:24:38.984000+00:00"},
+        ],
+        "stale": True,
+    }
+
+    session, week = normalize_zai(data, datetime(2026, 9, 30, tzinfo=timezone.utc))
+
+    assert (session.bucket_id, session.window_seconds, session.resets_at) == ("5h", 18000, None)
+    assert (week.bucket_id, week.window_seconds) == ("1w", 604800)
+    assert week.used_pct == pytest.approx(20.04)
+    assert week.resets_at == "2026-10-04T15:24:38.984000Z"
+    assert week.effective_at == "2026-09-28T16:31:42.657428Z"
+    assert week.window_kind == "fixed"
 
 def test_antigravity_adapter_classifies_reset_windows_as_fixed():
     data = {

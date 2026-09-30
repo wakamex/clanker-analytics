@@ -23,13 +23,18 @@ PROVIDER_TO_TOOL = {
     "anthropic": "Claude Code",
     "openai": "Codex",
     "antigravity": "Agy",
+    "zai": "Zcode",
 }
 
 PROVIDER_SHORT_NAMES = {
     "anthropic": "claude",
     "openai": "codex",
     "antigravity": "agy",
+    "zai": "zcode",
 }
+
+# Z.ai quota units observed from the coding plan API: 3 is hours and 6 is weeks.
+ZAI_UNIT_SECONDS = {3: 3600, 6: 7 * 86400}
 
 
 @dataclass(frozen=True)
@@ -263,10 +268,54 @@ def normalize_antigravity(data: dict[str, Any], collected_at: datetime) -> list[
     return samples
 
 
+def normalize_zai(data: dict[str, Any], collected_at: datetime) -> list[QuotaSample]:
+    effective_at = _time_text(data.get("updated_at"), collected_at)
+    account_key = str(data.get("account_key") or "default")
+    source = str(data.get("source") or "unknown")
+    samples = []
+    for value in data.get("limits") or []:
+        if not isinstance(value, dict) or "pct" not in value:
+            continue
+        unit_seconds = ZAI_UNIT_SECONDS.get(value.get("unit"))
+        number = value.get("number")
+        window_seconds = int(unit_seconds * number) if unit_seconds and number else None
+        window = (
+            format_duration(window_seconds) if window_seconds
+            else f"{number}u{value.get('unit')}"
+        )
+        kind = str(value.get("type") or "limit").lower().removesuffix("_limit")
+        bucket_id = window if kind == "credit" else f"{kind}:{window}"
+        # The rounded API percentage hides fractional usage that used/limit retains.
+        limit = value.get("limit")
+        used_pct = (
+            value["used"] / limit * 100
+            if isinstance(limit, (int, float)) and limit > 0
+            and isinstance(value.get("used"), (int, float))
+            else value["pct"]
+        )
+        samples.append(_make_sample(
+            provider="zai",
+            account_key=account_key,
+            bucket_id=bucket_id,
+            bucket_label=bucket_id,
+            scope_type="account",
+            scope_id="",
+            window_kind="fixed",
+            window_seconds=window_seconds,
+            effective_at=effective_at,
+            collected_at=_time_text(collected_at),
+            used_pct=used_pct,
+            resets_at=value.get("resets_at"),
+            source=source,
+        ))
+    return samples
+
+
 NORMALIZERS = {
     "anthropic": normalize_anthropic,
     "openai": normalize_openai,
     "antigravity": normalize_antigravity,
+    "zai": normalize_zai,
 }
 
 
@@ -277,6 +326,8 @@ def _collector_command(provider: str) -> list[str] | None:
         return [sys.executable, "-m", "codex_cli_usage", "json"]
     if provider == "antigravity":
         return [sys.executable, "-m", "agy_usage", "json"]
+    if provider == "zai":
+        return [sys.executable, "-m", "zcode_cli_usage", "json"]
     return None
 
 
@@ -951,6 +1002,10 @@ def _pace_bucket_label(bucket: dict[str, Any]) -> str:
             return "Week (all models)"
         if bucket["bucket_id"].startswith("7d_"):
             return f"Week ({bucket['bucket_id'][3:].replace('_', ' ').title()})"
+    if provider == "zai":
+        return {"5h": "Session (5h)", "1w": "Week"}.get(
+            bucket["bucket_id"], bucket["bucket_label"]
+        )
     if provider == "antigravity" and scope:
         scope = re.sub(r"\s+models$", "", scope, flags=re.IGNORECASE)
         window_label = {5 * 3600: "5h", 7 * 86400: "weekly"}.get(seconds)

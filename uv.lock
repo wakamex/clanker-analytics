@@ -31,6 +31,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "gemini-cli-usage" },
     { name = "matplotlib" },
+    { name = "zcode-cli-usage" },
 ]
 
 [package.dev-dependencies]
@@ -46,6 +47,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.0" },
     { name = "gemini-cli-usage", specifier = ">=0.1.5" },
     { name = "matplotlib", specifier = ">=3.9" },
+    { name = "zcode-cli-usage", specifier = ">=0.1.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -499,4 +501,13 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "zcode-cli-usage"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/53/5d3dc48350ad12c149a73f1376888e91aa60c497cdff2749f49e25037ff2/zcode_cli_usage-0.1.0.tar.gz", hash = "sha256:cd7cae543b2beee115962b50483d187ca210d53909a16db260ee4a2e7ec9b23c", size = 6849, upload-time = "2026-09-06T03:05:06.921Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/8d/35f5d641f59e780b25225379c6c9ccf699b95f55ca73338a1b40ec9b71ec/zcode_cli_usage-0.1.0-py3-none-any.whl", hash = "sha256:f5b45e6a0c301a0c56c3fd9fafdf9841214f81bf3abb4d4d5563fde31bac0bbe", size = 6062, upload-time = "2026-09-06T03:05:06.009Z" },
 ]

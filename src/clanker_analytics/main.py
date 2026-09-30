@@ -1518,12 +1518,12 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     timer = timing or DebugTimer(False)
 
     if args.record_quota:
-        from clanker_analytics.quota import record_quota
+        from clanker_analytics.quota import NORMALIZERS, record_quota
         inserted, errors = record_quota(Path(args.quota_db))
         print(f"Recorded {inserted} new quota samples in {Path(args.quota_db).expanduser()}")
         for error in errors:
             print(f"  warning: {error}", file=sys.stderr)
-        return 1 if len(errors) == 3 else 0
+        return 1 if len(errors) == len(NORMALIZERS) else 0
 
     db = duckdb.connect()
     with timer.span("register macros"):

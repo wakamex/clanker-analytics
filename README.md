@@ -59,11 +59,13 @@ The cache is incremental: unchanged source files are reused, changed files are r
 
 ## Quota pace comparison
 
-`--record-quota` asks the installed Claude, Codex, and Antigravity usage packages for fresh quota
+`--record-quota` asks the installed Claude, Codex, Antigravity, and Zcode usage packages for fresh quota
 percentages and stores normalized snapshots in
 `~/.local/state/clanker-analytics/quota.sqlite3`. The provider percentage remains authoritative and
-includes activity that local session logs may miss. Claude and Antigravity history starts when the
-recorder starts running. Codex session logs also retain embedded historical quota observations.
+includes activity that local session logs may miss. Claude, Antigravity, and Zcode history starts when the
+recorder starts running.
+
+Zcode quotas come from [zcode-cli-usage](https://github.com/wakamex/zcode-cli-usage), which needs `ZAI_API_KEY` configured. Its 5-hour and weekly credit buckets are recorded as `5h` and `1w`, using used credits divided by the credit limit because the API's percentage is rounded to whole numbers. When the API is unavailable, zcode-cli-usage returns its last cached reading, which keeps its original timestamp and so does not create a duplicate sample. Codex session logs also retain embedded historical quota observations.
 
 `pace` compares the observed percentage-point change with local token activity over each requested
 period. Local tokens are converted to API-equivalent dollars by model and cache category. An

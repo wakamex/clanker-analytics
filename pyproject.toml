@@ -11,6 +11,7 @@ dependencies = [
     "codex-cli-usage>=0.1.8",
     "gemini-cli-usage>=0.1.5",
     "agy-usage>=0.1.6",
+    "zcode-cli-usage>=0.1.0",
 ]
 
 [project.urls]
