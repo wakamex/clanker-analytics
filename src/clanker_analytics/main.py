@@ -19,22 +19,11 @@ from pathlib import Path
 
 import duckdb
 
+from clanker_analytics.pricing import plan_price, price_tokens, pricing_basis
+
 HOME = os.path.expanduser("~").replace("\\", "/")
 
-# Plan detection from cached usage-limits.json files
-PLAN_COSTS = {
-    # Claude
-    "pro": 20, "max_5x": 100, "max_20x": 200,
-    # Codex / ChatGPT (handled separately — "pro" means $200 for Codex)
-    "plus": 20,
-    # Gemini (normalized from g1-pro-tier, g1-ultra-tier)
-    "pro": 20, "ultra": 250, "free": 0,
-}
-
-# Z.ai lists only the Lite price officially: https://docs.z.ai/devpack/overview
-ZCODE_PLAN_COSTS = {"lite": 18}
-
-def detect_plans() -> dict[str, tuple[str, int]]:
+def detect_plans() -> dict[str, tuple[str, float]]:
     """Detect subscription plans by shelling out to usage tools. Returns {tool: (plan_name, monthly_cost)}."""
     import subprocess
     plans = {}
@@ -62,15 +51,7 @@ def detect_plans() -> dict[str, tuple[str, int]]:
             plan = (plan.replace("default_claude_", "")
                         .replace("g1-pro-tier", "pro")
                         .replace("g1-ultra-tier", "ultra"))
-            if tool == "Codex" and plan == "pro":
-                cost = 200
-            elif tool == "Codex" and plan == "plus":
-                cost = 20
-            elif tool == ZCODE_TOOL:
-                cost = ZCODE_PLAN_COSTS.get(plan, 0)
-            else:
-                cost = PLAN_COSTS.get(plan, 0)
-            return tool, (plan, cost)
+            return tool, (plan, plan_price(tool, plan))
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
             return tool, None
 
@@ -85,7 +66,7 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 17
+CACHE_SCHEMA_VERSION = 18
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -923,86 +904,14 @@ SOURCES = {
     "zcode": (ZCODE_TOOL, _zcode_sql),
 }
 
-COST_PER_ROW = """
-    CASE
-        WHEN coalesce(source_kind, 'native') = 'aop' THEN cost_usd
-        WHEN tool = 'Codex' THEN CASE
-            WHEN lower(model) LIKE '%gpt-6-astra%' THEN
-                ((input_tokens * 10.0 + cache_write_tokens * 12.50
-                  + cache_read_tokens * 1.00)
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 2.0 ELSE 1.0 END
-                 + output_tokens * 50.0
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 1.5 ELSE 1.0 END) / 1e6
-            WHEN lower(model) LIKE '%gpt-5.6-sol%' THEN
-                ((input_tokens * 4.0 + cache_write_tokens * 5.0
-                  + cache_read_tokens * 0.40)
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 2.0 ELSE 1.0 END
-                 + output_tokens * 20.0
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 1.5 ELSE 1.0 END) / 1e6
-            WHEN lower(model) LIKE '%gpt-5.6-terra%' THEN
-                ((input_tokens * 2.0 + cache_write_tokens * 2.50
-                  + cache_read_tokens * 0.20)
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 2.0 ELSE 1.0 END
-                 + output_tokens * 12.0
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 1.5 ELSE 1.0 END) / 1e6
-            WHEN lower(model) LIKE '%gpt-5.6-luna%' THEN
-                ((input_tokens * 0.20 + cache_write_tokens * 0.25
-                  + cache_read_tokens * 0.02)
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 2.0 ELSE 1.0 END
-                 + output_tokens * 1.20
-                 * CASE WHEN input_tokens + cache_write_tokens + cache_read_tokens > 272000
-                        THEN 1.5 ELSE 1.0 END) / 1e6
-            ELSE
-                (input_tokens * 1.25 + cache_write_tokens * 1.25
-                 + cache_read_tokens * 0.125 + output_tokens * 10.0) / 1e6
-        END
-        WHEN tool IN ('Gemini', 'Agy') THEN CASE
-            WHEN model LIKE '%flash%' THEN
-                (input_tokens * 0.15 + cache_read_tokens * 0.0375
-                 + output_tokens * 0.60) / 1e6
-            WHEN model LIKE '%2.5%pro%' THEN
-                (input_tokens * 1.25 + cache_read_tokens * 0.125
-                 + output_tokens * 10.0) / 1e6
-            ELSE
-                (input_tokens * 2.0 + cache_read_tokens * 0.50
-                 + output_tokens * 12.0) / 1e6
-        END
-        WHEN tool = 'Zcode' THEN CASE
-            WHEN model LIKE '%glm-5.3-flashx%' THEN
-                (input_tokens * 0.37 + cache_write_tokens * 0.37
-                 + cache_read_tokens * 0.075 + output_tokens * 1.25) / 1e6
-            WHEN model LIKE '%glm-5.3-flash%' THEN
-                (input_tokens * 0.15 + cache_write_tokens * 0.15
-                 + cache_read_tokens * 0.03 + output_tokens * 0.50) / 1e6
-            WHEN model LIKE '%glm-5' THEN
-                (input_tokens * 1.00 + cache_write_tokens * 1.00
-                 + cache_read_tokens * 0.20 + output_tokens * 3.20) / 1e6
-            ELSE
-                (input_tokens * 1.40 + cache_write_tokens * 1.40
-                 + cache_read_tokens * 0.26 + output_tokens * 4.40) / 1e6
-        END
-        ELSE CASE
-            WHEN model LIKE '%opus%' THEN
-                (input_tokens * 5.0 + cache_write_tokens * 6.25
-                 + cache_read_tokens * 0.50 + output_tokens * 25.0) / 1e6
-            WHEN model LIKE '%haiku%' THEN
-                (input_tokens * 1.0 + cache_write_tokens * 1.25
-                 + cache_read_tokens * 0.10 + output_tokens * 5.0) / 1e6
-            ELSE
-                (input_tokens * 3.0 + cache_write_tokens * 3.75
-                 + cache_read_tokens * 0.30 + output_tokens * 15.0) / 1e6
-        END
-    END
-"""
+# API-equivalent cost of each row, priced by llm-prices when the cache is built. Rows
+# of models without a price count as zero; their pricing column says "unpriced".
+COST_PER_ROW = "coalesce(api_cost_usd, 0)"
 
-API_PRICING_BASIS = "clanker-analytics-api-rates-2026-09-30"
+PRICE_BASES = {
+    "historical": "rates in effect when each request ran",
+    "current": "current rates applied to every request",
+}
 
 COST_EXPR = f"fmtcost(sum({COST_PER_ROW}))"
 
@@ -1295,7 +1204,7 @@ def sources_mtime() -> tuple[float, int, int, float]:
     return newest, len(files), dir_count, elapsed
 
 
-def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot]] | None:
+def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot], str] | None:
     if not CACHE_META_FILE.exists():
         return None
     try:
@@ -1316,13 +1225,14 @@ def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot]] | None:
         }
     except (KeyError, TypeError, ValueError):
         return None
-    return version, files
+    return version, files, str(data.get("pricing_basis", ""))
 
 
 def _write_cache_meta(files: dict[str, SourceSnapshot]) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": CACHE_SCHEMA_VERSION,
+        "pricing_basis": pricing_basis(),
         "files": {path: meta.to_json() for path, meta in sorted(files.items())},
     }
     CACHE_META_FILE.write_text(json.dumps(payload, separators=(",", ":")))
@@ -1398,6 +1308,8 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
     else:
         _empty_tokens_table(db)
     _deduplicate_aop(db, timer)
+    with timer.span("price rows"):
+        price_tokens(db, all_rows=True)
 
 
 def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
@@ -1443,9 +1355,8 @@ def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceS
     if not parts:
         return
     with timer.span("append changed files", f"{len(files)} files"):
-        columns = ", ".join(row[0] for row in db.sql("DESCRIBE tokens").fetchall())
         db.execute(
-            f"INSERT INTO tokens ({columns}) "
+            "INSERT INTO tokens BY NAME "
             + " UNION ALL ".join(f"SELECT * FROM ({part})" for part in parts)
         )
 
@@ -1490,7 +1401,9 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     newest_source = max((meta.mtime_ns / 1e9 for meta in files.values()), default=0.0)
 
     if CACHE_FILE.exists() and meta and meta[0] == CACHE_SCHEMA_VERSION:
-        _, cached_files = meta
+        _, cached_files, cached_basis = meta
+        # Price data changed since the cache was written: reprice every row.
+        reprice = cached_basis != pricing_basis()
         changed = sorted(
             path for path, snapshot in files.items()
             if cached_files.get(path) != snapshot
@@ -1500,6 +1413,11 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         if not changed and not deleted:
             with timer.span("load parquet cache", CACHE_FILE.as_posix()):
                 db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
+            if reprice:
+                with timer.span("reprice rows", pricing_basis()):
+                    price_tokens(db, all_rows=True)
+                _write_cache(db, files, timer, "repriced cache", pricing_basis())
+                return
             print("  (cached)", file=sys.stderr)
             timer.note(
                 f"cache hit: {len(files)} source files unchanged since cache {_fmt_debug_ts(cache_mt)}"
@@ -1527,6 +1445,8 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         _delete_source_files(db, changed + deleted, timer)
         _append_source_files(db, {path: files[path] for path in changed}, timer)
         _deduplicate_aop(db, timer)
+        with timer.span("price rows"):
+            price_tokens(db, all_rows=reprice)
         _write_cache(
             db,
             files,
@@ -1575,6 +1495,10 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         register_macros(db)
     with timer.span("load tokens"):
         load_tokens(db, args.refresh, timer)
+    if args.prices == "current":
+        # Reprice every request from today's price list; the on-disk cache keeps both.
+        db.execute("UPDATE tokens SET api_cost_usd = current_api_cost_usd")
+    basis = f"{pricing_basis()}, {PRICE_BASES[args.prices]}"
 
     if args.pace:
         from clanker_analytics.quota import build_report, connect, print_report
@@ -1583,7 +1507,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         with connect(Path(args.quota_db)) as quota_db:
             report = build_report(
                 quota_db, db, lookbacks, COST_PER_ROW,
-                include_inactive=args.all_buckets,
+                include_inactive=args.all_buckets, pricing_basis=basis,
             )
         if args.quota_json:
             print(json.dumps(report, indent=2))
@@ -1606,7 +1530,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             print_value_report,
         )
         with connect(Path(args.quota_db)) as quota_db:
-            report = build_quota_history(db, COST_PER_ROW, API_PRICING_BASIS, quota_db)
+            report = build_quota_history(db, COST_PER_ROW, basis, quota_db)
         if args.value:
             with timer.span("detect plans"):
                 plans = detect_plans()
@@ -1755,6 +1679,9 @@ def main(argv: list[str] | None = None):
                             help="Show full monthly subscription cost")
     cost_group.add_argument("--prorated", action="store_true",
                             help="Show pro-rated subscription cost for the period")
+    parser.add_argument("--prices", choices=list(PRICE_BASES), default="historical",
+                        help="Price requests at the rates in effect when they ran "
+                             "(historical, default) or at today's rates (current)")
     parser.add_argument("--refresh", action="store_true",
                         help="Force rebuild of cache from source files")
     parser.add_argument("--debug-timing", action="store_true",

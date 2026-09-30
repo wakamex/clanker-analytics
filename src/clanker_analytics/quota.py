@@ -534,7 +534,8 @@ def _token_window(db: Any, tool: str, start: datetime, end: datetime,
 
 
 def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Iterable[int],
-                 cost_expression: str, include_inactive: bool = False) -> dict[str, Any]:
+                 cost_expression: str, include_inactive: bool = False,
+                 pricing_basis: str = "") -> dict[str, Any]:
     requested = sorted(set(lookbacks))
     buckets = []
     hidden_bucket_count = 0
@@ -709,7 +710,7 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
             "token_calibration": {
                 "status": "experimental",
                 "basis": "local_api_equivalent_usd",
-                "pricing_basis": "clanker-analytics-api-rates-2026-09-30",
+                "pricing_basis": pricing_basis,
                 "method": "local_window_cost_divided_by_current_provider_used_pct",
                 "api_usd_per_quota_percentage_point": api_usd_per_pp,
                 "window_start": _time_text(window_start) if window_start else None,
@@ -745,22 +746,6 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
         "collecting_bucket_count": collecting_bucket_count,
         "buckets": buckets,
     }
-
-
-def _known_price(tool: str, model: str) -> bool:
-    normalized = model.lower()
-    if tool == "Codex":
-        return any(name in normalized for name in (
-            "gpt-6-astra",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-        ))
-    if tool == "Zcode":
-        return re.search(r"glm-5(\.[123])?(-flashx?)?$", normalized) is not None
-    if tool == "Claude Code":
-        return any(name in normalized for name in ("opus", "sonnet", "haiku"))
-    return True
 
 
 # Codex logs carry their own quota history, so recorder samples are needed only here.
@@ -873,8 +858,9 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             coalesce(nullif(t.model, ''), 'unknown') as model,
             coalesce(nullif(t.rate_mode, ''), 'default') as rate_mode,
             coalesce(t.source_kind, 'native') as source_kind,
-            count(*) FILTER (WHERE t.source_kind = 'aop' AND t.cost_usd IS NULL)
+            count(*) FILTER (WHERE t.pricing = 'unpriced' AND t.total_tokens > 0)
                 as unpriced_rows,
+            count(*) FILTER (WHERE t.pricing = 'aop') as aop_priced_rows,
             coalesce(sum(t.input_tokens), 0)::BIGINT as input_tokens,
             coalesce(sum(t.output_tokens), 0)::BIGINT as output_tokens,
             coalesce(sum(t.cache_write_tokens), 0)::BIGINT as cache_write_tokens,
@@ -939,12 +925,12 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             period[field] += row[field]
         period["api_equivalent_cost_usd"] += row["api_cost_usd"]
         if row["total_tokens"] or row["model"] != "unknown":
-            if row["source_kind"] == "aop":
-                pricing = "aop_missing_cost" if row["unpriced_rows"] else "aop_recorded"
-            elif _known_price(row["quota_tool"], row["model"]):
-                pricing = "rate_card"
+            if row["unpriced_rows"]:
+                pricing = "unpriced"
+            elif row["aop_priced_rows"]:
+                pricing = "aop_recorded"
             else:
-                pricing = "fallback"
+                pricing = "llm-prices"
             period["model_mix"].append({
                 "model": row["model"],
                 "rate_mode": row["rate_mode"],
@@ -973,10 +959,10 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
         )
 
         pricing_flags = []
-        if any(item["pricing"] == "fallback" for item in period["model_mix"]):
-            pricing_flags.append("fallback_pricing")
-        if any(item["pricing"] == "aop_missing_cost" for item in period["model_mix"]):
-            pricing_flags.append("missing_aop_cost")
+        if any(item["pricing"] == "unpriced" for item in period["model_mix"]):
+            pricing_flags.append("unpriced_models")
+        if any(item["pricing"] == "aop_recorded" for item in period["model_mix"]):
+            pricing_flags.append("aop_recorded_pricing")
         if any(item["rate_mode"] != "default" for item in period["model_mix"]):
             pricing_flags.append("unsupported_rate_mode")
         period["pricing_flags"] = pricing_flags
@@ -991,11 +977,10 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             previous_by_limit[limit_key] = estimate
 
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "report_type": "quota_history",
         "generated_at": _time_text(datetime.now(timezone.utc)),
         "pricing_basis": pricing_basis,
-        "pricing_method": "constant_rate_card_applied_to_all_periods",
         "usage_source": "local_native_sessions_and_aop_runs",
         "periods": periods,
     }
@@ -1014,10 +999,7 @@ def _compact_model_mix(mix: list[dict[str, Any]]) -> str:
 
 
 def print_quota_history(report: dict[str, Any]) -> None:
-    print(
-        f"pricing basis: {report['pricing_basis']} for native rows in every period; "
-        "AOP runs use their recorded cost"
-    )
+    print(f"pricing: {report['pricing_basis']}")
     rows = []
     for period in report["periods"]:
         estimate = period["full_quota_api_equivalent_cost_estimate_usd"]

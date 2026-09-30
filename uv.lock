@@ -30,6 +30,7 @@ dependencies = [
     { name = "codex-cli-usage" },
     { name = "duckdb" },
     { name = "gemini-cli-usage" },
+    { name = "llm-prices" },
     { name = "matplotlib" },
     { name = "zcode-cli-usage" },
 ]
@@ -46,6 +47,7 @@ requires-dist = [
     { name = "codex-cli-usage", specifier = ">=0.1.8" },
     { name = "duckdb", specifier = ">=1.5.0" },
     { name = "gemini-cli-usage", specifier = ">=0.1.5" },
+    { name = "llm-prices", editable = "../llm-prices" },
     { name = "matplotlib", specifier = ">=3.9" },
     { name = "zcode-cli-usage", specifier = ">=0.1.0" },
 ]
@@ -274,6 +276,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/3b/b5/98222136d839b8afabcaa943b09bd05888c2d36355b7e448550211d1fca4/kiwisolver-1.5.0-cp314-cp314t-win_amd64.whl", hash = "sha256:1dd9b0b119a350976a6d781e7278ec7aca0b201e1a9e2d23d9804afecb6ca681", size = 79687, upload-time = "2026-03-09T13:15:33.204Z" },
     { url = "https://files.pythonhosted.org/packages/99/a2/ca7dc962848040befed12732dff6acae7fb3c4f6fc4272b3f6c9a30b8713/kiwisolver-1.5.0-cp314-cp314t-win_arm64.whl", hash = "sha256:58f812017cd2985c21fbffb4864d59174d4903dd66fa23815e74bbc7a0e2dd57", size = 70032, upload-time = "2026-03-09T13:15:34.411Z" },
 ]
+
+[[package]]
+name = "llm-prices"
+version = "0.1.0"
+source = { editable = "../llm-prices" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest" }]
 
 [[package]]
 name = "matplotlib"

@@ -13,6 +13,8 @@ import pytest
 
 import clanker_analytics.main as main_mod
 from clanker_analytics.main import COST_PER_ROW, fmt, register_macros, detect_plans
+from clanker_analytics.pricing import TOOL_PROVIDERS, price_tokens
+import llm_prices
 
 
 # ---------------------------------------------------------------------------
@@ -31,15 +33,17 @@ def _make_db(*rows):
         total_tokens BIGINT, execution_type VARCHAR DEFAULT 'interactive',
         project_path VARCHAR, token_count_type VARCHAR DEFAULT 'exact',
         turn_count INT DEFAULT 1, retained_tokens BIGINT,
-        source_kind VARCHAR DEFAULT 'native', cost_usd DOUBLE, source_file VARCHAR
+        source_kind VARCHAR DEFAULT 'native', cost_usd DOUBLE, source_file VARCHAR,
+        timestamp VARCHAR
     )""")
     for r in rows:
         db.execute("""
             INSERT INTO tokens (
                 tool, project, session, date, model, input_tokens, output_tokens,
-                cache_write_tokens, cache_read_tokens, total_tokens
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, r)
+                cache_write_tokens, cache_read_tokens, total_tokens, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (*r, *([None] * (11 - len(r)))))
+    price_tokens(db, all_rows=True)
     return db
 
 
@@ -51,7 +55,7 @@ CODEX_ROW = ("Codex", "codexproj", "s2", "2026-03-15", "",
              500, 100, 0, 4000, 4600)
 GEMINI_ROW = ("Gemini", "gemproj", "s3", "2026-03-15", "gemini-2.5-pro",
               500, 50, 0, 200, 750)
-HAIKU_ROW = ("Claude Code", "other", "s4", "2026-03-14", "claude-haiku-4-20250514",
+HAIKU_ROW = ("Claude Code", "other", "s4", "2026-03-14", "claude-haiku-4-5-20251001",
              300, 50, 100, 2000, 2450)
 
 ALL_ROWS = [SONNET_ROW, OPUS_ROW, CODEX_ROW, GEMINI_ROW, HAIKU_ROW]
@@ -705,6 +709,7 @@ class TestAOPSourceLoader:
         """)
 
         main_mod._deduplicate_aop(db, main_mod.DebugTimer(False))
+        price_tokens(db, all_rows=True)
 
         assert db.sql("SELECT count(*) FROM tokens").fetchone()[0] == 2
         assert db.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 330
@@ -1022,79 +1027,86 @@ class TestTokenCounting:
 # ===========================================================================
 
 class TestCostCalculation:
-    def test_sonnet_cost(self):
-        db = _make_db(SONNET_ROW)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (1000 * 3.0 + 500 * 3.75 + 8000 * 0.30 + 200 * 15.0) / 1e6
-        assert abs(cost - expected) < 0.0001
+    @staticmethod
+    def _cost(*rows):
+        return _make_db(*rows).sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
 
-    def test_opus_cost(self):
-        db = _make_db(OPUS_ROW)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (2000 * 5.0 + 1000 * 6.25 + 15000 * 0.50 + 500 * 25.0) / 1e6
-        assert abs(cost - expected) < 0.0001
+    @pytest.mark.parametrize("row", [SONNET_ROW, OPUS_ROW, HAIKU_ROW, GEMINI_ROW])
+    def test_rows_are_priced_by_llm_prices_at_their_date(self, row):
+        tool, _, _, date, model, uncached, output, written, read, _ = row
+        expected = llm_prices.cost(
+            model, provider=TOOL_PROVIDERS[tool], at=date, input_tokens=uncached,
+            output_tokens=output, cache_write_tokens=written, cache_read_tokens=read,
+        )
 
-    def test_haiku_cost(self):
-        db = _make_db(HAIKU_ROW)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (300 * 1.0 + 100 * 1.25 + 2000 * 0.10 + 50 * 5.0) / 1e6
-        assert abs(cost - expected) < 0.0001
+        assert expected is not None
+        assert self._cost(row) == pytest.approx(expected)
 
-    def test_codex_cost(self):
-        db = _make_db(CODEX_ROW)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (500 * 1.25 + 0 * 1.25 + 4000 * 0.125 + 100 * 10.0) / 1e6
-        assert abs(cost - expected) < 0.0001
+    def test_opus_5_5_uses_its_own_rates(self):
+        row = ("Claude Code", "p", "s", "2026-09-25", "claude-opus-5-5",
+               1000, 100, 200, 10000, 11300)
 
-    def test_codex_56_sol_cost_includes_cache_discount(self):
-        row = ("Codex", "codexproj", "s2", "2026-08-20", "gpt-5.6-sol",
-               500, 100, 50, 4000, 4650)
-        db = _make_db(row)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (500 * 4.0 + 50 * 5.0 + 4000 * 0.40 + 100 * 20.0) / 1e6
-        assert abs(cost - expected) < 0.0001
+        assert self._cost(row) == pytest.approx(
+            (1000 * 4 + 100 * 20 + 200 * 5 + 10000 * 0.20) / 1e6
+        )
 
-    @pytest.mark.parametrize("model,rates", [
-        ("gpt-6-astra", (10.0, 12.5, 1.0, 50.0)),
-        ("gpt-5.6-sol", (4.0, 5.0, 0.4, 20.0)),
-    ])
+    def test_price_changes_apply_from_their_date(self):
+        before = ("Codex", "p", "s", "2026-08-20", "gpt-5.6-sol", 1000, 100, 0, 0, 1100)
+        after = ("Codex", "p", "s", "2026-09-01", "gpt-5.6-sol", 1000, 100, 0, 0, 1100)
+
+        assert self._cost(before) == pytest.approx((1000 * 5 + 100 * 30) / 1e6)
+        assert self._cost(after) == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
+
+    def test_current_prices_reprice_every_row(self):
+        db = _make_db(("Codex", "p", "s", "2026-08-20", "gpt-5.6-sol", 1000, 100, 0, 0, 1100))
+
+        current = db.sql("SELECT sum(current_api_cost_usd) FROM tokens").fetchone()[0]
+        assert current == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
+
+    def test_deepseek_peak_hours_use_the_request_time(self):
+        peak = ("DeepSeek Harness", "p", "s", "2026-09-30", "deepseek-flash",
+                1000, 0, 0, 0, 1000, "2026-09-30T02:00:00Z")
+        off_peak = peak[:10] + ("2026-09-30T12:00:00Z",)
+
+        assert self._cost(peak) == pytest.approx(1000 * 0.30 / 1e6)
+        assert self._cost(off_peak) == pytest.approx(1000 * 0.15 / 1e6)
+
     @pytest.mark.parametrize("context_tokens", [272000, 272001])
-    def test_current_codex_request_tier_boundary(self, model, rates, context_tokens):
+    def test_long_context_tier_applies_per_request(self, context_tokens):
         uncached, written = 1000, 500
         cached = context_tokens - uncached - written
-        row = ("Codex", "proj", "s", "2026-09-05", model,
+        row = ("Codex", "proj", "s", "2026-09-20", "gpt-6-astra",
                uncached, 200, written, cached, context_tokens + 200)
-        db = _make_db(row, row)
-        input_factor, output_factor = (2, 1.5) if context_tokens > 272000 else (1, 1)
-        expected = 2 * ((uncached * rates[0] + written * rates[1]
-                        + cached * rates[2]) * input_factor
-                       + 200 * rates[3] * output_factor) / 1e6
+        rates = (20, 25, 2, 75) if context_tokens > 272000 else (10, 12.5, 1, 50)
+        expected = 2 * (uncached * rates[0] + written * rates[1] + cached * rates[2]
+                        + 200 * rates[3]) / 1e6
+
         # Two standard requests remain standard even when their aggregate exceeds the limit.
-        assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0] == pytest.approx(expected)
+        assert self._cost(row, row) == pytest.approx(expected)
 
-    def test_codex_56_long_context_multipliers(self):
-        row = ("Codex", "codexproj", "s2", "2026-08-20", "gpt-5.6-terra",
-               280000, 1000, 0, 0, 281000)
-        db = _make_db(row)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (280000 * 2.0 * 2.0 + 1000 * 12.0 * 1.5) / 1e6
-        assert abs(cost - expected) < 0.0001
+    def test_unknown_models_stay_unpriced(self):
+        db = _make_db(CODEX_ROW)
 
-    def test_gemini_cost(self):
-        db = _make_db(GEMINI_ROW)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        expected = (500 * 1.25 + 200 * 0.315 + 50 * 10.0) / 1e6
-        assert abs(cost - expected) < 0.0001
+        assert db.sql(f"SELECT sum({COST_PER_ROW}), any_value(pricing) FROM tokens").fetchone() == (
+            0, "unpriced"
+        )
 
-    def test_total_cost_all_tools(self):
-        db = _make_db(*ALL_ROWS)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        assert cost > 0
+    def test_aop_runs_of_unknown_models_keep_their_recorded_cost(self):
+        db = _make_db()
+        db.execute("""
+            INSERT INTO tokens (tool, date, model, input_tokens, output_tokens,
+                                cache_write_tokens, cache_read_tokens, total_tokens,
+                                source_kind, cost_usd)
+            VALUES ('Devin', '2026-09-01', 'swe-2-medium', 10, 1, 0, 0, 11, 'aop', 0.5)
+        """)
+        price_tokens(db, all_rows=False)
+
+        assert db.sql("SELECT api_cost_usd, current_api_cost_usd, pricing FROM tokens").fetchone() == (
+            0.5, 0.5, "aop"
+        )
 
     def test_null_cost_on_empty(self):
-        db = _make_db()
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        assert cost is None
+        assert self._cost() is None
 
 
 # ===========================================================================
@@ -1233,13 +1245,14 @@ class TestPlanDetection:
         with mock.patch("subprocess.run") as m:
             m.return_value = mock.Mock(returncode=0, stdout='{"account_quota":{"user_tier":"g1-pro-tier"}}')
             plans = detect_plans()
-        assert plans["Gemini"] == ("pro", 20)
+        assert plans["Gemini"] == ("pro", 19.99)
 
     def test_gemini_ultra_tier_normalized(self):
         with mock.patch("subprocess.run") as m:
             m.return_value = mock.Mock(returncode=0, stdout='{"account_quota":{"user_tier":"g1-ultra-tier"}}')
             plans = detect_plans()
-        assert plans["Gemini"] == ("ultra", 250)
+        # Google AI Ultra has two tiers that the plan name cannot tell apart.
+        assert plans["Gemini"] == ("ultra", 0)
 
     def test_default_claude_prefix_stripped(self):
         with mock.patch("subprocess.run") as m:
@@ -1288,7 +1301,7 @@ class TestPlanDetection:
             return mock.Mock(returncode=0, stdout=outputs.get(module, "{}"))
         with mock.patch("subprocess.run", side_effect=fake_run):
             plans = detect_plans()
-        assert sum(c for _, c in plans.values()) == 420
+        assert sum(c for _, c in plans.values()) == pytest.approx(419.99)
 
 
 # ===========================================================================
@@ -1387,13 +1400,13 @@ class TestEdgeCases:
         assert tools == ["Claude Code"]
 
     def test_zero_cache_tokens(self):
-        row = ("Claude Code", "p", "s", "2026-03-15", "sonnet", 1000, 200, 0, 0, 1200)
+        row = ("Claude Code", "p", "s", "2026-03-15", "claude-sonnet-4-6", 1000, 200, 0, 0, 1200)
         db = _make_db(row)
         cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
         assert cost > 0
 
     def test_all_cache_tokens(self):
-        row = ("Claude Code", "p", "s", "2026-03-15", "sonnet", 0, 0, 0, 10000, 10000)
+        row = ("Claude Code", "p", "s", "2026-03-15", "claude-sonnet-4-6", 0, 0, 0, 10000, 10000)
         db = _make_db(row)
         cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
         expected = (10000 * 0.30) / 1e6
@@ -1504,7 +1517,8 @@ class TestDebugHooks:
                     NULL::BIGINT as retained_tokens,
                     'native' as source_kind,
                     NULL::DOUBLE as cost_usd,
-                    replace(filename, '\\\\', '/') as source_file
+                    replace(filename, '\\\\', '/') as source_file,
+                    NULL::VARCHAR as timestamp
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
             """
@@ -1576,7 +1590,8 @@ class TestDebugHooks:
                     NULL::BIGINT as retained_tokens,
                     'native' as source_kind,
                     NULL::DOUBLE as cost_usd,
-                    replace(filename, '\\\\', '/') as source_file
+                    replace(filename, '\\\\', '/') as source_file,
+                    NULL::VARCHAR as timestamp
                 FROM read_json({source_expr},
                     format='newline_delimited', filename=true, union_by_name=true)
             """

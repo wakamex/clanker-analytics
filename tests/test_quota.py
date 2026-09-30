@@ -439,11 +439,12 @@ def test_quota_history_estimates_full_cost_from_last_period_observation():
         ],
     )
 
+    db.execute("ALTER TABLE tokens ADD COLUMN pricing VARCHAR DEFAULT 'llm-prices'")
     report = build_quota_history(db, "cost_usd", "test-rate-card")
 
     first, second = report["periods"]
     assert len(report["periods"]) == 2
-    assert report["pricing_method"] == "constant_rate_card_applied_to_all_periods"
+    assert report["pricing_basis"] == "test-rate-card"
     assert first["used_pct"] == 50
     assert first["api_equivalent_cost_usd"] == 25
     assert first["full_quota_api_equivalent_cost_estimate_usd"] == 50
@@ -493,6 +494,7 @@ def test_quota_history_combines_recorded_snapshots_and_embedded_limit_hits(tmp_p
                 "7d_fable": {"pct": 20, "resets_at": "2026-09-29T13:00:00Z"},
             }, datetime(2026, 9, 26, tzinfo=timezone.utc)),
         ])
+        db.execute("ALTER TABLE tokens ADD COLUMN pricing VARCHAR DEFAULT 'llm-prices'")
         report = build_quota_history(db, "cost_usd", "test-rate-card", connection)
 
     periods = {(item["tool"], item["limit_id"], item["resets_at"]): item
@@ -535,15 +537,17 @@ def test_quota_history_counts_aop_runs_on_the_same_subscription():
         ],
     )
 
+    db.execute("""
+        ALTER TABLE tokens ADD COLUMN pricing VARCHAR;
+        UPDATE tokens SET pricing = CASE WHEN cost_usd IS NULL THEN 'unpriced' ELSE 'llm-prices' END;
+    """)
     period, = build_quota_history(db, "cost_usd", "test-rate-card")["periods"]
 
     assert period["api_equivalent_cost_usd"] == 20
     assert period["total_tokens"] == 400
     assert period["full_quota_api_equivalent_cost_estimate_usd"] == 40
-    assert {item["pricing"] for item in period["model_mix"]} == {
-        "rate_card", "aop_missing_cost",
-    }
-    assert "missing_aop_cost" in period["pricing_flags"]
+    assert {item["pricing"] for item in period["model_mix"]} == {"llm-prices", "unpriced"}
+    assert "unpriced_models" in period["pricing_flags"]
 
 
 def _history_period(tool, resets_at, used_pct, cost, tokens, pricing_flags,
