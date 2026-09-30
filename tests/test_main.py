@@ -377,6 +377,45 @@ class TestSourceLoaders:
         assert row[5:10] == (80, 40, 0, 20, 140)
         assert row[11:13] == ("/code/project", "exact")
 
+    def test_agy_takes_model_from_conversation_database(self, tmp_path):
+        session = "11111111-2222-3333-4444-555555555555"
+        root = tmp_path / "antigravity-cli"
+        logs = root / "brain" / session / ".system_generated" / "logs"
+        logs.mkdir(parents=True)
+        transcript = logs / "transcript_full.jsonl"
+        transcript.write_text(json.dumps({
+            "step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+            "created_at": "2026-08-14T12:00:00Z", "content": "response without a model field",
+        }) + "\n")
+        (root / "conversations").mkdir()
+        database = sqlite3.connect(root / "conversations" / f"{session}.db")
+        database.execute("CREATE TABLE gen_metadata (idx integer, data blob, size integer)")
+        # Generation metadata protobuf: field 19 after the request hash holds the model, as in
+        # b'"\x10465011cf2a4ad107\x9a\x01\x0egemini-default\xa2\x01#\n\nmodel_enum'. The same
+        # tag inside message content, without the hash, must not count.
+        blobs = [
+            b'"\x10ed9d840ced35d80d\x9a\x01\x10gemini-3.7-flash\xa2\x01#\n\nmodel_enum',
+            b'content listing \x9a\x01\x0egpt-transcribe as a text mention',
+            b'content listing \x9a\x01\x0egpt-transcribe as a text mention',
+        ]
+        database.executemany("INSERT INTO gen_metadata VALUES (?, ?, ?)",
+                             [(index, blob, len(blob)) for index, blob in enumerate(blobs)])
+        database.commit()
+        database.close()
+
+        metadata = tmp_path / "conversation_metadata.json"
+        metadata.write_text(json.dumps({"conversations": {"id": {"summary": {"ID": session}}}}))
+
+        db = duckdb.connect()
+        main_mod._load_agy_models(db, [transcript.as_posix()])
+        row = db.sql(main_mod._agy_sql(
+            main_mod._sql_literal(transcript.as_posix()),
+            main_mod._sql_literal(metadata.as_posix()),
+            models_table=main_mod.AGY_MODELS_TABLE,
+        )).fetchone()
+
+        assert row[2:5] == (session, "2026-08-14", "gemini-3.7-flash")
+
     def test_agy_estimates_cumulative_turns_and_classifies_tool_results(self, tmp_path):
         session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         transcript = tmp_path / "brain" / session / ".system_generated" / "logs" / "transcript_full.jsonl"

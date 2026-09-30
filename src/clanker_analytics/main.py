@@ -66,7 +66,7 @@ def detect_plans() -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 18
+CACHE_SCHEMA_VERSION = 19
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -452,8 +452,54 @@ def _agy_metadata_paths() -> list[str]:
     return [path.as_posix() for path in paths if path.exists()]
 
 
-def _agy_sql(source_expr: str, metadata_expr: str | None = None) -> str:
-    """Load top-level Antigravity sessions and estimate processed model tokens."""
+AGY_MODELS_TABLE = "agy_conversation_models"
+# In each generation's metadata protobuf, the model is field 19 (tag 0x9a 0x01), a
+# length-prefixed string that directly follows the request's 16-character hex hash.
+# Matching the hash too keeps the same tag inside message content from matching.
+AGY_MODEL_FIELD = re.compile(rb"[0-9a-f]{16}\x9a\x01([\x01-\x7f])")
+
+
+def _load_agy_models(db: duckdb.DuckDBPyConnection, transcript_paths: list[str]) -> None:
+    """Record each session's model from Antigravity's conversation database.
+
+    Transcripts do not name the model. Each model call's generation metadata in
+    conversations/<session>.db does; a session's model is the one most of its calls used.
+    """
+    rows = []
+    for transcript in transcript_paths:
+        path = Path(transcript)
+        session = path.parents[2].name
+        database = path.parents[4] / "conversations" / f"{session}.db"
+        if not database.exists():
+            continue
+        counts: dict[str, int] = {}
+        try:
+            source = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+            try:
+                for (data,) in source.execute("SELECT data FROM gen_metadata ORDER BY idx"):
+                    match = AGY_MODEL_FIELD.search(data or b"")
+                    if match:
+                        length = match.group(1)[0]
+                        model = data[match.end():match.end() + length].decode(errors="replace")
+                        counts[model] = counts.get(model, 0) + 1
+            finally:
+                source.close()
+        except sqlite3.Error as error:
+            print(f"  warning: could not read Antigravity models from {database}: {error}",
+                  file=sys.stderr)
+        if counts:
+            rows.append((session, max(counts, key=counts.get)))
+    db.execute(f"CREATE OR REPLACE TEMP TABLE {AGY_MODELS_TABLE} (session VARCHAR, model VARCHAR)")
+    if rows:
+        db.executemany(f"INSERT INTO {AGY_MODELS_TABLE} VALUES (?, ?)", rows)
+
+
+def _agy_sql(source_expr: str, metadata_expr: str | None = None,
+             models_table: str | None = None) -> str:
+    """Load top-level Antigravity sessions and estimate processed model tokens.
+
+    models_table maps sessions to models when transcripts do not name them.
+    """
     if metadata_expr is None:
         metadata_paths = _agy_metadata_paths()
         metadata_expr = _sql_file_list(metadata_paths) if metadata_paths else None
@@ -487,6 +533,12 @@ metadata AS (
     SELECT NULL::VARCHAR as session, NULL::VARCHAR as workspace_path WHERE false
 ),
 """
+
+    models_cte = (
+        f"conversation_models AS (SELECT session, model FROM {models_table}),"
+        if models_table else
+        "conversation_models AS (SELECT NULL::VARCHAR as session, NULL::VARCHAR as model WHERE false),"
+    )
 
     return f"""
 WITH raw AS (
@@ -550,6 +602,7 @@ events AS (
     FROM raw
 ),
 {metadata_cte}
+{models_cte}
 session_meta AS (
     SELECT
         filename,
@@ -566,9 +619,10 @@ sessions AS (
         s.filename,
         s.session,
         coalesce(nullif(m.workspace_path, ''), s.observed_path) as project_path,
-        s.model
+        coalesce(s.model, c.model) as model
     FROM session_meta s
     LEFT JOIN metadata m USING (session)
+    LEFT JOIN conversation_models c USING (session)
     WHERE {session_filter}
 ),
 ordered AS (
@@ -1264,6 +1318,10 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
         if paths:
             if tool_name == ZCODE_TOOL:
                 _load_zcode_usage(db, paths)
+            if tool_name == "Agy":
+                _load_agy_models(db, paths)
+                parts.append(builder(_sql_file_list(paths), models_table=AGY_MODELS_TABLE))
+                continue
             parts.append(builder(_sql_file_list(paths)))
     return parts
 

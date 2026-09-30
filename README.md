@@ -197,6 +197,8 @@ For Agy, discovery reads canonical logs at
 roots. Compact copies, chunk mirrors, internal trajectories, duplicate events, and resumed
 `CONVERSATION_HISTORY` entries are not counted.
 
+Antigravity transcripts do not name the model. Each session's model comes from its conversation database, `conversations/<session>.db`, where every model call's generation metadata records the model it used; the session takes the model most of its calls used. Antigravity's own names such as `gemini-default` stay unpriced until llm-prices knows which model they mean.
+
 When complete API usage metadata is retained for a model turn, those counters are reported exactly.
 Otherwise, Agy reports a processed-token estimate. Each completed `PLANNER_RESPONSE` is a model turn,
 its output is estimated from that response, and its input is estimated from the cumulative retained
