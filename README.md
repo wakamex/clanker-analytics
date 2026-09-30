@@ -137,7 +137,7 @@ Native rows in all periods are repriced with the same immutable rate-card identi
 constant-price comparison keeps public API price changes from looking like quota changes. Models
 without an explicit rate show `fallback_pricing`, non-default rate modes are flagged, and estimates
 below 25 percent utilization show `early`. Those rows are useful leads, not strong quota-capacity
-evidence. Claude Code deletes old transcripts after its `cleanupPeriodDays` setting (30 days by default), so older Claude periods undercount local usage.
+evidence.
 
 The report reads the incremental Parquet cache. The first run may need one full source-file rebuild;
 later runs update only changed files and query the complete history in one DuckDB aggregation. Codex
