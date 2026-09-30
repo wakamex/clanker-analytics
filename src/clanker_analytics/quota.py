@@ -1045,6 +1045,8 @@ def print_quota_history(report: dict[str, Any]) -> None:
 
 
 WEEKS_PER_MONTH = 365.25 / 12 / 7
+# Below this much usage, extrapolating one week to a full quota is too noisy to use.
+VALUE_MIN_USED_PCT = 15
 
 # Antigravity quota comes with the Google AI plan that gemini-cli-usage reports.
 PLAN_TOOLS = {"Agy": "Gemini"}
@@ -1052,14 +1054,14 @@ PLAN_TOOLS = {"Agy": "Gemini"}
 
 def build_value_report(history: dict[str, Any],
                        plans: dict[str, tuple[str, float]]) -> dict[str, Any]:
-    """Compare each tool's most-used weekly full-quota API value with its plan price."""
+    """Compare each tool's latest weekly full-quota API value with its plan price."""
     latest: dict[str, dict[str, Any]] = {}
     for period in history["periods"]:
-        if period["window_minutes"] != 7 * 24 * 60 or period["total_tokens"] <= 0:
+        if (period["window_minutes"] != 7 * 24 * 60 or period["total_tokens"] <= 0
+                or period["used_pct"] <= VALUE_MIN_USED_PCT):
             continue
         current = latest.get(period["tool"])
-        # The most-used period needs the least extrapolation to a full quota.
-        rank = (period["used_pct"], period["resets_at"])
+        rank = (period["resets_at"], period["used_pct"])
         if current is None or rank > current["rank"]:
             latest[period["tool"]] = {"rank": rank, "period": period}
 
@@ -1127,8 +1129,8 @@ def print_value_report(report: dict[str, Any]) -> None:
     for line in _format_table(headers, rows, {2, 4, 5, 6, 7, 8, 9}):
         print(line)
     print(
-        "\nFull week: API-equivalent value of 100% of the weekly quota period with the "
-        "highest used percentage, latest first on ties. "
+        "\nFull week: API-equivalent value of 100% of the latest weekly quota period "
+        f"more than {VALUE_MIN_USED_PCT}% used. "
         f"Month: full week x {report['weeks_per_month']:.3f}. $/1M uses that week's own "
         "token mix, counting input, cache, and output tokens."
     )

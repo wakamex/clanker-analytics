@@ -556,15 +556,16 @@ def _history_period(tool, resets_at, used_pct, cost, tokens, quality, window_min
     }
 
 
-def test_value_report_uses_the_most_used_weekly_period():
+def test_value_report_uses_the_latest_week_above_minimum_usage():
     history = {"pricing_basis": "test", "periods": [
-        _history_period("Claude Code", "2026-09-22T13:00:00Z", 50, 900.0, 1_000_000_000, []),
+        _history_period("Claude Code", "2026-09-22T13:00:00Z", 90, 900.0, 1_000_000_000, []),
         _history_period("Claude Code", "2026-09-29T13:00:00Z", 50, 1000.0, 1_000_000_000, []),
-        _history_period("Claude Code", "2026-10-06T13:00:00Z", 10, 50.0, 10_000_000, []),
+        _history_period("Claude Code", "2026-10-06T13:00:00Z", 15, 50.0, 10_000_000, []),
         _history_period("Claude Code", "2026-10-01T00:00:00Z", 100, 5.0, 1000, [],
                         window_minutes=300),
-        _history_period("Agy", "2026-09-30T00:00:00Z", 10, 3.0, 5_000_000,
+        _history_period("Agy", "2026-09-30T00:00:00Z", 20, 3.0, 5_000_000,
                         ["fallback_pricing"]),
+        _history_period("Codex", "2026-09-30T00:00:00Z", 10, 3.0, 5_000_000, []),
     ]}
 
     report = build_value_report(history, {"Claude Code": ("max_20x", 200), "Gemini": ("ultra", 250)})

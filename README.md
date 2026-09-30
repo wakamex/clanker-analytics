@@ -130,7 +130,7 @@ For each period it uses the chronologically last nonzero quota observation, tota
 
 Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run without a recorded cost adds tokens but no cost and flags the period `missing_aop_cost`.
 
-`value` summarizes what each subscription is worth at API prices. For each tool it takes the weekly period with the highest used percentage from the quota history, the latest one on ties, because it needs the least extrapolation to a full quota. It reports:
+`value` summarizes what each subscription is worth at API prices. For each tool it takes the latest weekly period from the quota history that is more than 15 percent used, since extrapolating a barely used week to a full quota is too noisy. Tools without such a week are omitted. It reports:
 
 - The implied full-week and monthly API-equivalent value, using 365.25 / 12 / 7 weeks per month.
 - The monthly plan price and the value as a multiple of it.
