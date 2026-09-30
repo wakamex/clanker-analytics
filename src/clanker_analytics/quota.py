@@ -972,14 +972,14 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             period["cache_read_tokens"] / denominator * 100 if denominator else None
         )
 
-        quality = []
+        pricing_flags = []
         if any(item["pricing"] == "fallback" for item in period["model_mix"]):
-            quality.append("fallback_pricing")
+            pricing_flags.append("fallback_pricing")
         if any(item["pricing"] == "aop_missing_cost" for item in period["model_mix"]):
-            quality.append("missing_aop_cost")
+            pricing_flags.append("missing_aop_cost")
         if any(item["rate_mode"] != "default" for item in period["model_mix"]):
-            quality.append("unsupported_rate_mode")
-        period["quality"] = quality
+            pricing_flags.append("unsupported_rate_mode")
+        period["pricing_flags"] = pricing_flags
 
         limit_key = (period["tool"], period["limit_id"], period["window_minutes"])
         previous = previous_by_limit.get(limit_key)
@@ -991,7 +991,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             previous_by_limit[limit_key] = estimate
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "report_type": "quota_history",
         "generated_at": _time_text(datetime.now(timezone.utc)),
         "pricing_basis": pricing_basis,
@@ -1034,11 +1034,11 @@ def print_quota_history(report: dict[str, Any]) -> None:
             f"{change:+.1f}%" if change is not None else "-",
             f"{cache:.1f}%" if cache is not None else "-",
             _compact_model_mix(period["model_mix"]),
-            ",".join(period["quality"]) or "-",
+            ",".join(period["pricing_flags"]) or "-",
         ])
     headers = [
         "reset (UTC)", "tool", "limit", "window", "used", "api cost", "implied full",
-        "change", "cache", "model mix", "quality",
+        "change", "cache", "model mix", "pricing flags",
     ]
     for line in _format_table(headers, rows, {4, 5, 6, 7, 8}):
         print(line)
@@ -1090,7 +1090,7 @@ def build_value_report(history: dict[str, Any],
             "effective_usd_per_million_tokens": (
                 api_usd_per_million / multiple if multiple else None
             ),
-            "quality": period["quality"],
+            "pricing_flags": period["pricing_flags"],
         })
     return {
         "schema_version": 1,
@@ -1120,11 +1120,11 @@ def print_value_report(report: dict[str, Any]) -> None:
             f"{multiple:.0f}x" if multiple else "-",
             money(item["api_usd_per_million_tokens"], 3),
             money(item["effective_usd_per_million_tokens"], 4),
-            ",".join(item["quality"]) or "-",
+            ",".join(item["pricing_flags"]) or "-",
         ])
     headers = [
         "tool", "plan", "price/mo", "week ending", "used", "full week", "month",
-        "multiple", "api $/1M", "effective $/1M", "quality",
+        "multiple", "api $/1M", "effective $/1M", "pricing flags",
     ]
     for line in _format_table(headers, rows, {2, 4, 5, 6, 7, 8, 9}):
         print(line)

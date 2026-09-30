@@ -126,7 +126,7 @@ For each period it uses the chronologically last nonzero quota observation, tota
 
 - API-equivalent cost accumulated at the last observation.
 - The implied full-quota API-equivalent cost, calculated as cost divided by used percentage.
-- Change from the preceding estimate for the same tool, limit, and window length, cached-input share, model mix, and quality flags.
+- Change from the preceding estimate for the same tool, limit, and window length, cached-input share, model mix, and pricing flags.
 
 Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run without a recorded cost adds tokens but no cost and flags the period `missing_aop_cost`.
 

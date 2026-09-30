@@ -448,7 +448,7 @@ def test_quota_history_estimates_full_cost_from_last_period_observation():
     assert first["api_equivalent_cost_usd"] == 25
     assert first["full_quota_api_equivalent_cost_estimate_usd"] == 50
     assert first["cached_input_pct"] == 160 / 190 * 100
-    assert first["quality"] == []
+    assert first["pricing_flags"] == []
     assert second["full_quota_api_equivalent_cost_estimate_usd"] == 80
     assert second["change_from_previous_estimate_pct"] == pytest.approx(60)
 
@@ -543,16 +543,17 @@ def test_quota_history_counts_aop_runs_on_the_same_subscription():
     assert {item["pricing"] for item in period["model_mix"]} == {
         "rate_card", "aop_missing_cost",
     }
-    assert "missing_aop_cost" in period["quality"]
+    assert "missing_aop_cost" in period["pricing_flags"]
 
 
-def _history_period(tool, resets_at, used_pct, cost, tokens, quality, window_minutes=10080):
+def _history_period(tool, resets_at, used_pct, cost, tokens, pricing_flags,
+                    window_minutes=10080):
     return {
         "tool": tool, "limit_id": "7d", "resets_at": resets_at, "used_pct": used_pct,
         "window_minutes": window_minutes, "total_tokens": tokens,
         "api_equivalent_cost_usd": cost,
         "full_quota_api_equivalent_cost_estimate_usd": cost * 100 / used_pct,
-        "quality": quality,
+        "pricing_flags": pricing_flags,
     }
 
 
@@ -580,4 +581,4 @@ def test_value_report_uses_the_latest_week_above_minimum_usage():
         1.0 / claude["api_equivalent_multiple"]
     )
     assert agy["plan"] == "ultra"
-    assert agy["quality"] == ["fallback_pricing"]
+    assert agy["pricing_flags"] == ["fallback_pricing"]
