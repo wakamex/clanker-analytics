@@ -1050,6 +1050,95 @@ def print_quota_history(report: dict[str, Any]) -> None:
         print(line)
 
 
+WEEKS_PER_MONTH = 365.25 / 12 / 7
+
+# Antigravity quota comes with the Google AI plan that gemini-cli-usage reports.
+PLAN_TOOLS = {"Agy": "Gemini"}
+
+
+def build_value_report(history: dict[str, Any],
+                       plans: dict[str, tuple[str, float]]) -> dict[str, Any]:
+    """Compare each tool's latest weekly full-quota API value with its plan price."""
+    latest: dict[str, dict[str, Any]] = {}
+    for period in history["periods"]:
+        if period["window_minutes"] != 7 * 24 * 60 or period["total_tokens"] <= 0:
+            continue
+        current = latest.get(period["tool"])
+        rank = ("early" not in period["quality"], period["resets_at"], period["used_pct"])
+        if current is None or rank > current["rank"]:
+            latest[period["tool"]] = {"rank": rank, "period": period}
+
+    tools = []
+    for tool, entry in sorted(latest.items()):
+        period = entry["period"]
+        weekly = period["full_quota_api_equivalent_cost_estimate_usd"]
+        monthly = weekly * WEEKS_PER_MONTH
+        plan, price = plans.get(PLAN_TOOLS.get(tool, tool), (None, None))
+        price = price or None
+        multiple = monthly / price if price and monthly else None
+        api_usd_per_million = (
+            period["api_equivalent_cost_usd"] / period["total_tokens"] * 1e6
+        )
+        tools.append({
+            "tool": tool,
+            "plan": plan,
+            "plan_usd_per_month": price,
+            "limit_id": period["limit_id"],
+            "resets_at": period["resets_at"],
+            "used_pct": period["used_pct"],
+            "full_week_api_equivalent_usd": weekly,
+            "monthly_api_equivalent_usd": monthly,
+            "api_equivalent_multiple": multiple,
+            "api_usd_per_million_tokens": api_usd_per_million,
+            "effective_usd_per_million_tokens": (
+                api_usd_per_million / multiple if multiple else None
+            ),
+            "quality": period["quality"],
+        })
+    return {
+        "schema_version": 1,
+        "report_type": "subscription_value",
+        "generated_at": _time_text(datetime.now(timezone.utc)),
+        "pricing_basis": history["pricing_basis"],
+        "weeks_per_month": WEEKS_PER_MONTH,
+        "tools": tools,
+    }
+
+
+def print_value_report(report: dict[str, Any]) -> None:
+    def money(value: float | None, digits: int = 0) -> str:
+        return f"${value:,.{digits}f}" if value is not None else "-"
+
+    rows = []
+    for item in report["tools"]:
+        multiple = item["api_equivalent_multiple"]
+        rows.append([
+            item["tool"],
+            item["plan"] or "-",
+            money(item["plan_usd_per_month"]),
+            item["resets_at"][:10],
+            f"{item['used_pct']:.0f}%",
+            money(item["full_week_api_equivalent_usd"]),
+            money(item["monthly_api_equivalent_usd"]),
+            f"{multiple:.0f}x" if multiple else "-",
+            money(item["api_usd_per_million_tokens"], 3),
+            money(item["effective_usd_per_million_tokens"], 4),
+            ",".join(item["quality"]),
+        ])
+    headers = [
+        "tool", "plan", "price/mo", "week ending", "used", "full week", "month",
+        "multiple", "api $/1M", "effective $/1M", "quality",
+    ]
+    for line in _format_table(headers, rows, {2, 4, 5, 6, 7, 8, 9}):
+        print(line)
+    print(
+        "\nFull week: API-equivalent value of 100% of the latest weekly quota period, "
+        "preferring periods at least 25% used. "
+        f"Month: full week x {report['weeks_per_month']:.3f}. $/1M uses that week's own "
+        "token mix, counting input, cache, and output tokens."
+    )
+
+
 def _format_mix(mix: list[dict[str, Any]]) -> str:
     total = sum(item["api_cost_usd"] or 0 for item in mix)
     if not mix:

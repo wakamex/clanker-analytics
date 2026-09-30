@@ -10,6 +10,7 @@ from clanker_analytics.quota import (
     QuotaSample,
     build_quota_history,
     build_report,
+    build_value_report,
     connect,
     insert_samples,
     normalize_antigravity,
@@ -544,3 +545,38 @@ def test_quota_history_counts_aop_runs_on_the_same_subscription():
         "rate_card", "aop_missing_cost",
     }
     assert "missing_aop_cost" in period["quality"]
+
+
+def _history_period(tool, resets_at, used_pct, cost, tokens, quality, window_minutes=10080):
+    return {
+        "tool": tool, "limit_id": "7d", "resets_at": resets_at, "used_pct": used_pct,
+        "window_minutes": window_minutes, "total_tokens": tokens,
+        "api_equivalent_cost_usd": cost,
+        "full_quota_api_equivalent_cost_estimate_usd": cost * 100 / used_pct,
+        "quality": quality,
+    }
+
+
+def test_value_report_prefers_latest_substantial_weekly_period():
+    history = {"pricing_basis": "test", "periods": [
+        _history_period("Claude Code", "2026-09-29T13:00:00Z", 50, 1000.0, 1_000_000_000,
+                        ["high_utilization"]),
+        _history_period("Claude Code", "2026-10-06T13:00:00Z", 10, 50.0, 10_000_000, ["early"]),
+        _history_period("Claude Code", "2026-10-01T00:00:00Z", 100, 5.0, 1000, ["sparse"],
+                        window_minutes=300),
+        _history_period("Agy", "2026-09-30T00:00:00Z", 10, 3.0, 5_000_000, ["early"]),
+    ]}
+
+    report = build_value_report(history, {"Claude Code": ("max_20x", 200), "Gemini": ("ultra", 250)})
+
+    agy, claude = report["tools"]
+    assert claude["resets_at"] == "2026-09-29T13:00:00Z"
+    assert claude["full_week_api_equivalent_usd"] == 2000
+    assert claude["monthly_api_equivalent_usd"] == pytest.approx(2000 * 365.25 / 84)
+    assert claude["api_equivalent_multiple"] == pytest.approx(2000 * 365.25 / 84 / 200)
+    assert claude["api_usd_per_million_tokens"] == pytest.approx(1.0)
+    assert claude["effective_usd_per_million_tokens"] == pytest.approx(
+        1.0 / claude["api_equivalent_multiple"]
+    )
+    assert agy["plan"] == "ultra"
+    assert "early" in agy["quality"]

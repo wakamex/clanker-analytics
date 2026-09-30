@@ -40,6 +40,8 @@ clanker-analytics pace --quota-json      # versioned machine-readable comparison
 clanker-analytics pace --all-buckets     # include inactive quota buckets
 clanker-analytics pace --model-mix       # include the model mix column
 clanker-analytics --quota-history        # implied full-quota API cost for every observed period
+clanker-analytics value                  # API-equivalent value of each subscription vs its price
+clanker-analytics value --plan-price claude=100   # what-if with a different monthly price
 clanker-analytics --quota-history --quota-json
 clanker-analytics --refresh              # force cache rebuild
 clanker-analytics --debug-timing         # print cache decisions and stage timings
@@ -127,6 +129,14 @@ For each period it uses the chronologically last nonzero quota observation, tota
 - Change from the preceding estimate for the same tool, limit, and window length, cached-input share, model mix, and quality flags.
 
 Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run without a recorded cost adds tokens but no cost and flags the period `missing_aop_cost`.
+
+`value` summarizes what each subscription is worth at API prices. For each tool it takes the latest weekly period from the quota history, preferring periods at least 25 percent used, and reports:
+
+- The implied full-week and monthly API-equivalent value, using 365.25 / 12 / 7 weeks per month.
+- The monthly plan price and the value as a multiple of it.
+- API-equivalent and effective dollars per million tokens, from that week's own mix of input, cache, and output tokens. The effective price is the API price divided by the multiple.
+
+Plan prices come from the same usage packages as the chart. Zcode Lite is $18 per month; Pro and Max are unpriced because Z.ai's documentation does not list them. A usage package's stale cached reading does not count as a current plan. Pass `--plan-price TOOL=USD`, repeatable, to supply or override a price. Antigravity uses the Google AI plan reported for Gemini.
 
 For Codex, the report also removes inherited `token_count` events replayed into newly forked sessions. Without
 that removal, local usage can be counted again every time a session is forked.

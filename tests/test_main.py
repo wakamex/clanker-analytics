@@ -1247,6 +1247,17 @@ class TestPlanDetection:
             plans = detect_plans()
         assert plans["Claude Code"] == ("max_5x", 100)
 
+    def test_zcode_lite(self):
+        with mock.patch("subprocess.run") as m:
+            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"lite"}')
+            plans = detect_plans()
+        assert plans["Zcode"] == ("lite", 18)
+
+    def test_stale_plan_reading_is_ignored(self):
+        with mock.patch("subprocess.run") as m:
+            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"lite","stale":true}')
+            assert detect_plans() == {}
+
     def test_tool_not_installed(self):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             assert detect_plans() == {}
@@ -1838,3 +1849,26 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert "0." in result.stdout  # version number present
+
+
+class TestValueCommand:
+    def test_plan_price_requires_value(self):
+        with pytest.raises(SystemExit):
+            main_mod.main(["--plan-price", "zcode=18", "--sql", "select 1"])
+
+    @pytest.mark.parametrize("value", ["zcode", "nope=18", "aop=18", "zcode=0", "zcode=x"])
+    def test_plan_price_rejects_invalid_values(self, value):
+        with pytest.raises(SystemExit):
+            main_mod.main(["value", "--plan-price", value])
+
+    def test_plan_price_overrides_detected_plan(self):
+        captured = {}
+
+        def fake_run(args, timer):
+            captured["args"] = args
+            return 0
+
+        with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+            assert main_mod.main(["value", "--plan-price", "Claude=100"]) == 0
+        assert captured["args"].value
+        assert captured["args"].plan_price == [("Claude Code", 100.0)]
