@@ -19,7 +19,9 @@ from pathlib import Path
 
 import duckdb
 
-from clanker_analytics.pricing import plan_price, price_tokens, pricing_basis
+from clanker_analytics.pricing import (
+    configured_plans, plan_choice, plan_price, price_tokens, pricing_basis,
+)
 
 HOME = os.path.expanduser("~").replace("\\", "/")
 
@@ -63,6 +65,17 @@ def detect_plans() -> dict[str, tuple[str, float]]:
                 plans[tool] = result
 
     return plans
+def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
+    """Detected plans, overridden by the config file and then by --plan."""
+    plans = detect_plans()
+    try:
+        plans.update(configured_plans())
+    except (ValueError, OSError) as error:
+        raise SystemExit(f"error: {error}") from None
+    plans.update(dict(args.plan))
+    return plans
+
+
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
@@ -1591,10 +1604,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             report = build_quota_history(db, COST_PER_ROW, basis, quota_db)
         if args.value:
             with timer.span("detect plans"):
-                plans = detect_plans()
-            for tool_name, price in args.plan_price:
-                plan = plans.get(tool_name, ("custom", 0))[0]
-                plans[tool_name] = (plan, price)
+                plans = plans_for(args)
             report = build_value_report(report, plans)
             if args.quota_json:
                 print(json.dumps(report, indent=2))
@@ -1666,7 +1676,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         with timer.span("apply default since", since):
             db.execute("DELETE FROM tokens WHERE date < (current_date - INTERVAL 7 DAY)::DATE::VARCHAR")
     with timer.span("detect plans"):
-        plans = detect_plans()
+        plans = plans_for(args)
     cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
     with timer.span("generate chart", since):
         path = generate(db, since, plans, cost_mode)
@@ -1691,18 +1701,14 @@ def main(argv: list[str] | None = None):
         except ValueError as error:
             raise argparse.ArgumentTypeError(str(error)) from error
 
-    def plan_price(value: str) -> tuple[str, float]:
-        tool, separator, price = value.partition("=")
-        tool_name = SOURCES.get(tool.lower(), (None,))[0]
+    def plan_setting(value: str) -> tuple[str, tuple[str, float]]:
+        key, separator, choice = value.partition("=")
+        if not separator:
+            raise argparse.ArgumentTypeError("plan must be TOOL=PLAN or TOOL=USD, such as codex=pro_200")
         try:
-            amount = float(price)
-        except ValueError:
-            amount = -1.0
-        if not separator or tool_name is None or tool_name == AOP_RESULT_TOOL or amount <= 0:
-            raise argparse.ArgumentTypeError(
-                "plan price must be TOOL=USD, such as zcode=18"
-            )
-        return tool_name, amount
+            return plan_choice(key, choice)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from None
 
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
     parser.add_argument(
@@ -1765,9 +1771,11 @@ def main(argv: list[str] | None = None):
                         help="Include quota buckets with no activity in requested periods")
     parser.add_argument("--model-mix", action="store_true",
                         help="Include model mix in the pace table")
-    parser.add_argument("--plan-price", action="append", type=plan_price, default=[],
-                        metavar="TOOL=USD",
-                        help="Monthly plan price for the value report, such as zcode=18")
+    parser.add_argument("--plan", action="append", type=plan_setting, default=[],
+                        metavar="TOOL=PLAN|USD",
+                        help="Subscription plan for this run, as an llm-prices plan id such as "
+                             "codex=pro_200 or a monthly price such as zcode=18; overrides "
+                             "the [plans] table in ~/.config/clanker-analytics/config.toml")
     args = parser.parse_args(argv)
     if args.command == "pace":
         if args.pace:
@@ -1780,8 +1788,6 @@ def main(argv: list[str] | None = None):
     if args.command == "value" and args.periods:
         parser.error("value does not accept periods")
     args.value = args.command == "value"
-    if args.plan_price and not args.value:
-        parser.error("--plan-price requires value")
     if args.lookback and not args.pace:
         parser.error("--lookback requires --pace")
     if args.quota_json and not (args.pace or args.quota_history or args.value):

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import tempfile
+import tomllib
 from typing import Iterator
 
 import duckdb
@@ -37,11 +39,51 @@ def pricing_basis() -> str:
     return llm_prices.pricing_basis()
 
 
+# Tool names accepted in plan settings, for the tools whose usage package reports a plan.
+PLAN_KEYS = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini", "zcode": "Zcode"}
+
+CONFIG_PATH = (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+               / "clanker-analytics" / "config.toml")
+
+
 def plan_price(tool: str, plan: str, at: datetime | str | None = None) -> float:
     """Monthly price of a detected plan, or 0 when llm-prices has no price for it."""
     provider = PLAN_PROVIDERS.get(tool)
     found = llm_prices.plan(provider, plan, at=at) if provider else None
     return found.usd_per_month if found else 0
+
+
+def plan_choice(key: str, value: object) -> tuple[str, tuple[str, float]]:
+    """Resolve a plan setting, an llm-prices plan id or a monthly USD price, for a tool."""
+    tool = PLAN_KEYS.get(key.lower())
+    if tool is None:
+        raise ValueError(f"no plan setting for {key!r}; use one of {', '.join(PLAN_KEYS)}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        price = float(value)
+    else:
+        try:
+            price = float(str(value))
+        except ValueError:
+            price = plan_price(tool, str(value))
+            if not price:
+                known = ", ".join(llm_prices.plan_ids(PLAN_PROVIDERS[tool]))
+                raise ValueError(f"no {key} plan {value!r}; use one of {known}, "
+                                 "or a monthly USD price") from None
+            return tool, (str(value), price)
+    if price <= 0:
+        raise ValueError(f"{key} plan price must be positive")
+    return tool, ("custom", price)
+
+
+def configured_plans(path: Path = CONFIG_PATH) -> dict[str, tuple[str, float]]:
+    """Plans named in the [plans] table of the config file, keyed by tool."""
+    if not path.exists():
+        return {}
+    settings = tomllib.loads(path.read_text()).get("plans", {})
+    try:
+        return dict(plan_choice(key, value) for key, value in settings.items())
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from None
 
 
 def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:

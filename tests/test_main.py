@@ -1905,17 +1905,13 @@ class TestCLI:
         assert "0." in result.stdout  # version number present
 
 
-class TestValueCommand:
-    def test_plan_price_requires_value(self):
+class TestPlanSettings:
+    @pytest.mark.parametrize("value", ["zcode", "nope=18", "agy=18", "zcode=0", "codex=pro_999"])
+    def test_plan_rejects_invalid_values(self, value):
         with pytest.raises(SystemExit):
-            main_mod.main(["--plan-price", "zcode=18", "--sql", "select 1"])
+            main_mod.main(["value", "--plan", value])
 
-    @pytest.mark.parametrize("value", ["zcode", "nope=18", "aop=18", "zcode=0", "zcode=x"])
-    def test_plan_price_rejects_invalid_values(self, value):
-        with pytest.raises(SystemExit):
-            main_mod.main(["value", "--plan-price", value])
-
-    def test_plan_price_overrides_detected_plan(self):
+    def test_plan_accepts_plan_ids_and_prices(self):
         captured = {}
 
         def fake_run(args, timer):
@@ -1923,6 +1919,32 @@ class TestValueCommand:
             return 0
 
         with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
-            assert main_mod.main(["value", "--plan-price", "Claude=100"]) == 0
-        assert captured["args"].value
-        assert captured["args"].plan_price == [("Claude Code", 100.0)]
+            assert main_mod.main(["value", "--plan", "Claude=100", "--plan", "codex=pro_500"]) == 0
+        assert captured["args"].plan == [
+            ("Claude Code", ("custom", 100.0)), ("Codex", ("pro_500", 500)),
+        ]
+
+    def test_config_file_names_plans(self, tmp_path):
+        from clanker_analytics.pricing import configured_plans
+        config = tmp_path / "config.toml"
+        config.write_text('[plans]\ncodex = "pro_100"\ngemini = 199.99\n')
+
+        assert configured_plans(config) == {
+            "Codex": ("pro_100", 100), "Gemini": ("custom", 199.99),
+        }
+        config.write_text('[plans]\ngemini = "ultra"\n')
+        with pytest.raises(ValueError, match="ultra_100, ultra_200"):
+            configured_plans(config)
+
+    def test_command_line_overrides_config_and_detection(self, tmp_path, monkeypatch):
+        from clanker_analytics.pricing import configured_plans
+        config = tmp_path / "config.toml"
+        config.write_text('[plans]\ncodex = "pro_100"\nclaude = "max_5x"\n')
+        monkeypatch.setattr(main_mod, "configured_plans", lambda: configured_plans(config))
+        monkeypatch.setattr(main_mod, "detect_plans",
+                            lambda: {"Codex": ("pro", 200), "Claude Code": ("max_20x", 200)})
+        args = main_mod.argparse.Namespace(plan=[("Codex", ("pro_500", 500))])
+
+        assert main_mod.plans_for(args) == {
+            "Codex": ("pro_500", 500), "Claude Code": ("max_5x", 100),
+        }

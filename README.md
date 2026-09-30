@@ -41,7 +41,7 @@ clanker-analytics pace --all-buckets     # include inactive quota buckets
 clanker-analytics pace --model-mix       # include the model mix column
 clanker-analytics --quota-history        # implied full-quota API cost for every observed period
 clanker-analytics value                  # API-equivalent value of each subscription vs its price
-clanker-analytics value --plan-price claude=100   # what-if with a different monthly price
+clanker-analytics value --plan codex=pro_500     # what-if with a different plan or price
 clanker-analytics --quota-history --quota-json
 clanker-analytics --prices current       # reprice all usage at today's API rates
 clanker-analytics --refresh              # force cache rebuild
@@ -137,7 +137,18 @@ Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's 
 - The monthly plan price and the value as a multiple of it.
 - API-equivalent and effective dollars per million tokens, from that week's own mix of input, cache, and output tokens. The effective price is the API price divided by the multiple.
 
-The plan comes from the same usage packages as the chart, and its monthly price from llm-prices. Plans whose reported name covers several prices, such as Google AI Ultra's two tiers, are unpriced, and ChatGPT Pro is priced at $200 although Codex reports its $100 and $500 tiers the same way. A usage package's stale cached reading does not count as a current plan. Pass `--plan-price TOOL=USD`, repeatable, to supply or override a price. Antigravity uses the Google AI plan reported for Gemini.
+The plan comes from the same usage packages as the chart, and its monthly price from llm-prices. Plans whose reported name covers several prices, such as Google AI Ultra's two tiers, are unpriced, and ChatGPT Pro is priced at $200 although Codex reports its $100 and $500 tiers the same way. A usage package's stale cached reading does not count as a current plan. Antigravity uses the Google AI plan reported for Gemini.
+
+When detection cannot tell your plan, name it once in `~/.config/clanker-analytics/config.toml`, either as an llm-prices plan id or as a monthly price:
+
+```toml
+[plans]
+codex = "pro_200"
+gemini = "ultra_200"
+zcode = 18
+```
+
+The keys are `claude`, `codex`, `gemini`, and `zcode`. An unknown plan id is an error that lists the valid ids. `--plan TOOL=PLAN|USD`, repeatable, overrides the file for one run, such as `--plan codex=pro_500` for a what-if. Plan settings apply wherever plan prices are shown, including the chart.
 
 For Codex, the report also removes inherited `token_count` events replayed into newly forked sessions. Without
 that removal, local usage can be counted again every time a session is forked.
