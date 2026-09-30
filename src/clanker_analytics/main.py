@@ -76,7 +76,7 @@ def detect_plans() -> dict[str, tuple[str, int]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 15
+CACHE_SCHEMA_VERSION = 16
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -803,16 +803,22 @@ ZCODE_USAGE_COLUMNS = """
     input_tokens BIGINT,
     output_tokens BIGINT,
     cache_write_tokens BIGINT,
-    cache_read_tokens BIGINT
+    cache_read_tokens BIGINT,
+    error_message VARCHAR
 """
 
 ZCODE_USAGE_QUERY = """
     SELECT m.session_id, s.parent_id, s.directory, m.model_id, m.started_at,
            m.input_tokens, m.output_tokens, m.cache_creation_input_tokens,
-           m.cache_read_input_tokens
+           m.cache_read_input_tokens,
+           CASE WHEN m.error_type = 'rate_limited' THEN m.error_message END
     FROM model_usage m LEFT JOIN session s ON s.id = m.session_id
-    WHERE m.input_tokens + m.output_tokens > 0
+    WHERE m.input_tokens + m.output_tokens > 0 OR m.error_type = 'rate_limited'
 """
+
+# Z.ai reports quota resets in China Standard Time: the reset in each observed limit
+# message is exactly one window after the first request that opened that window.
+ZAI_LIMIT_MESSAGE_UTC_OFFSET_HOURS = 8
 
 
 def _load_zcode_usage(db: duckdb.DuckDBPyConnection, paths: list[str]) -> None:
@@ -830,14 +836,38 @@ def _load_zcode_usage(db: duckdb.DuckDBPyConnection, paths: list[str]) -> None:
     db.execute(f"CREATE OR REPLACE TEMP TABLE {ZCODE_USAGE_TABLE} ({ZCODE_USAGE_COLUMNS})")
     if rows:
         db.executemany(
-            f"INSERT INTO {ZCODE_USAGE_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+            f"INSERT INTO {ZCODE_USAGE_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
         )
 
 
 def _zcode_sql(source_expr: str) -> str:
-    """Normalize requests that _load_zcode_usage copied from the source databases."""
+    """Normalize requests that _load_zcode_usage copied from the source databases.
+
+    A rejected request whose message says a usage limit was reached becomes a zero-token
+    row carrying an exact 100% quota observation for that window.
+    """
     # Zcode input and total counts include cache reads and writes, like OpenAI usage.
     return f"""
+WITH usage AS (
+    SELECT
+        *,
+        regexp_extract(error_message,
+            'Usage limit reached for ([0-9]+) (hour|day|week)', ['count', 'unit']) as limit_window,
+        try_strptime(regexp_extract(error_message,
+            'reset at ([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}} [0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}})', 1),
+            '%Y-%m-%d %H:%M:%S') as limit_reset_local
+    FROM {ZCODE_USAGE_TABLE}
+),
+limits AS (
+    SELECT
+        *,
+        try_cast(limit_window.count AS INTEGER)
+          * CASE limit_window.unit WHEN 'hour' THEN 60 WHEN 'day' THEN 1440
+                                   WHEN 'week' THEN 10080 END as limit_minutes,
+        epoch(limit_reset_local)::BIGINT
+          - {ZAI_LIMIT_MESSAGE_UTC_OFFSET_HOURS} * 3600 as limit_resets_at
+    FROM usage
+)
 SELECT
     '{ZCODE_TOOL}' as tool,
     lower(regexp_extract(replace(directory, '\\', '/'), '([^/]+)/?$', 1)) as project,
@@ -854,18 +884,21 @@ SELECT
         as execution_type,
     replace(directory, '\\', '/') as project_path,
     'exact' as token_count_type,
-    1 as turn_count,
+    CASE WHEN error_message IS NULL THEN 1 ELSE 0 END as turn_count,
     NULL::BIGINT as retained_tokens,
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
     source_file,
     strftime(epoch_ms(started_at), '%Y-%m-%dT%H:%M:%S.%gZ') as timestamp,
     '' as rate_mode,
-    NULL::DOUBLE as quota_used_pct,
-    NULL::BIGINT as quota_resets_at,
-    NULL::INTEGER as quota_window_minutes,
-    NULL::VARCHAR as quota_limit_id
-FROM {ZCODE_USAGE_TABLE}
+    CASE WHEN limit_resets_at IS NOT NULL THEN 100.0 END as quota_used_pct,
+    CASE WHEN limit_minutes IS NOT NULL THEN limit_resets_at END as quota_resets_at,
+    CASE WHEN limit_resets_at IS NOT NULL THEN limit_minutes END as quota_window_minutes,
+    CASE WHEN limit_resets_at IS NOT NULL AND limit_minutes IS NOT NULL
+         THEN limit_window.count || left(limit_window.unit, 1) END as quota_limit_id
+FROM limits
+WHERE error_message IS NULL
+   OR (limit_resets_at IS NOT NULL AND limit_minutes IS NOT NULL)
 """
 
 

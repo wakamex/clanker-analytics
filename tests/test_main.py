@@ -795,6 +795,36 @@ class TestZcodeSourceLoader:
             (100 * 1.40 + 900 * 0.26 + 50 * 4.40 + 100 * 0.15 + 10 * 0.50) / 1e6
         )
 
+    def test_usage_limit_errors_become_full_quota_observations(self, tmp_path, monkeypatch):
+        path = self._configure(tmp_path, monkeypatch)
+        connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790518307654, 10, 1, 0, 0)])
+        connection.executemany(
+            "INSERT INTO model_usage (id, session_id, model_id, status, started_at,"
+            " error_type, error_message) VALUES (?, 'main', 'GLM-5.3', 'error', ?, ?, ?)",
+            [
+                ("limit", 1790522463000, "rate_limited",
+                 "[1308][Usage limit reached for 5 hour. Your limit will reset at "
+                 "2026-09-28 03:11:57][20260927232104af14a2546f604536]"),
+                ("throttle", 1790522464000, "rate_limited", "Too many requests"),
+                ("cancel", 1790522465000, "cancelled", "Model request was cancelled."),
+            ],
+        )
+        connection.commit()
+
+        db = self._load()
+        connection.close()
+        rows = db.sql("""
+            SELECT total_tokens, turn_count, quota_used_pct, quota_resets_at,
+                   quota_window_minutes, quota_limit_id
+            FROM tokens ORDER BY timestamp
+        """).fetchall()
+
+        # 2026-09-28 03:11:57 China Standard Time is 2026-09-27T19:11:57Z.
+        assert rows == [
+            (11, 1, None, None, None, None),
+            (0, 0, 100.0, 1790536317, 300, "5h"),
+        ]
+
     def test_cache_refreshes_when_only_the_write_ahead_log_changes(self, tmp_path, monkeypatch):
         path = self._configure(tmp_path, monkeypatch)
         connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790518307654, 10, 1, 0, 0)])
