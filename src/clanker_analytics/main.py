@@ -1589,14 +1589,17 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         return 0
 
     if args.quota_history:
-        from clanker_analytics.quota import build_quota_history, print_quota_history
-        report = build_quota_history(db, COST_PER_ROW, API_PRICING_BASIS)
+        from clanker_analytics.quota import (
+            build_quota_history, connect, print_quota_history,
+        )
+        with connect(Path(args.quota_db)) as quota_db:
+            report = build_quota_history(db, COST_PER_ROW, API_PRICING_BASIS, quota_db)
         if args.quota_json:
             print(json.dumps(report, indent=2))
         elif report["periods"]:
             print_quota_history(report)
         else:
-            print("No weekly Codex quota observations found in local session files.")
+            print("No quota observations found in local logs or recorded snapshots.")
             return 1
         return 0
 
@@ -1724,7 +1727,7 @@ def main(argv: list[str] | None = None):
                              help="Compare quota-delta and local token-derived pace")
     quota_group.add_argument(
         "--quota-history", action="store_true",
-        help="Audit Codex API-equivalent usage across every observed weekly reset",
+        help="Audit API-equivalent usage across every observed fixed quota period",
     )
     parser.add_argument("--lookback", action="append", type=duration,
                         help="Pace period such as 3h or 7h; repeat for several periods")

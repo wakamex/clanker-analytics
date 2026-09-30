@@ -39,7 +39,7 @@ clanker-analytics pace 5m 10m 15m        # arbitrary human-readable periods
 clanker-analytics pace --quota-json      # versioned machine-readable comparison
 clanker-analytics pace --all-buckets     # include inactive quota buckets
 clanker-analytics pace --model-mix       # include the model mix column
-clanker-analytics --quota-history        # audit every weekly Codex period in local logs
+clanker-analytics --quota-history        # implied full-quota API cost for every observed period
 clanker-analytics --quota-history --quota-json
 clanker-analytics --refresh              # force cache rebuild
 clanker-analytics --debug-timing         # print cache decisions and stage timings
@@ -112,19 +112,23 @@ history is still being collected because its recent activity cannot yet be class
 The terminal table omits model mix by default. Use `--model-mix` to add it. Model mix remains in
 the JSON report regardless.
 
-## Codex quota history audit
+## Quota history audit
 
-`--quota-history` reconstructs every observed 7-day Codex quota period directly from local Codex
-session files. For each period it uses the chronologically last nonzero quota observation, totals
-native Codex token usage up to that observation, and reports:
+`--quota-history` reconstructs every observed fixed quota period and estimates what a full quota is worth at API prices. Observations come from three places:
+
+- Codex session files embed 7-day quota percentages in their token events.
+- Zcode usage-limit errors are exact 100% observations of their window.
+- The quota recorder database supplies Claude, Antigravity, and Zcode snapshots from `--record-quota`.
+
+For each period it uses the chronologically last nonzero quota observation, totals native local token usage for that tool from the window start up to that observation, and reports:
 
 - API-equivalent cost accumulated at the last observation.
 - The implied full-quota API-equivalent cost, calculated as cost divided by used percentage.
-- Change from the preceding estimate, cached-input share, model mix, and quality flags.
+- Change from the preceding estimate for the same tool, limit, and window length, cached-input share, model mix, and quality flags.
 
-Codex emits slightly different reset timestamps into concurrent sessions, so reset timestamps are
-rounded to a five-minute anchor when periods are grouped. Zero-percent fragments are skipped.
-The report also removes inherited `token_count` events replayed into newly forked sessions. Without
+Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP rows are not counted, so AOP runs that share a subscription make its estimate low.
+
+For Codex, the report also removes inherited `token_count` events replayed into newly forked sessions. Without
 that removal, local usage can be counted again every time a session is forked.
 Codex timestamps are read as their original UTC strings instead of relying on JSON type inference;
 otherwise timezone-less coercion can move activity across quota boundaries on non-UTC hosts.
@@ -133,7 +137,7 @@ All periods are repriced with the same immutable rate-card identity shown above 
 constant-price comparison keeps public API price changes from looking like quota changes. Models
 without an explicit rate show `fallback_pricing`, non-default rate modes are flagged, and estimates
 below 25 percent utilization show `early`. Those rows are useful leads, not strong quota-capacity
-evidence.
+evidence. Claude Code deletes old transcripts after its `cleanupPeriodDays` setting (30 days by default), so older Claude periods undercount local usage.
 
 The report reads the incremental Parquet cache. The first run may need one full source-file rebuild;
 later runs update only changed files and query the complete history in one DuckDB aggregation. Codex

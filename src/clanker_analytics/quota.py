@@ -747,45 +747,121 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
     }
 
 
-def _known_codex_price(model: str) -> bool:
+def _known_price(tool: str, model: str) -> bool:
     normalized = model.lower()
-    return any(name in normalized for name in (
-        "gpt-6-astra",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-    ))
+    if tool == "Codex":
+        return any(name in normalized for name in (
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ))
+    if tool == "Zcode":
+        return re.search(r"glm-5(\.[123])?(-flashx?)?$", normalized) is not None
+    if tool == "Claude Code":
+        return any(name in normalized for name in ("opus", "sonnet", "haiku"))
+    return True
 
 
-def build_quota_history(token_db: Any, cost_expression: str,
-                        pricing_basis: str) -> dict[str, Any]:
-    """Audit all weekly Codex quota periods retained in the token cache."""
+# Codex logs carry their own quota history, so recorder samples are needed only here.
+HISTORY_RECORDER_PROVIDERS = ("anthropic", "antigravity", "zai")
+
+QUOTA_OBSERVATION_COLUMNS = """
+    tool VARCHAR,
+    limit_id VARCHAR,
+    window_minutes INTEGER,
+    resets_at BIGINT,
+    observed_at TIMESTAMPTZ,
+    used_pct DOUBLE,
+    model_patterns VARCHAR[]
+"""
+
+
+def _recorder_observations(connection: sqlite3.Connection) -> list[tuple]:
+    placeholders = ", ".join("?" for _ in HISTORY_RECORDER_PROVIDERS)
+    rows = connection.execute(f"""
+        SELECT * FROM quota_samples
+        WHERE provider IN ({placeholders})
+          AND window_kind = 'fixed'
+          AND used_pct > 0
+          AND resets_at IS NOT NULL
+          AND window_seconds IS NOT NULL
+    """, HISTORY_RECORDER_PROVIDERS).fetchall()
+    observations = []
+    for row in rows:
+        sample = _sample_dict(row)
+        reset = _parse_time(sample["resets_at"])
+        observed = _parse_time(sample["effective_at"])
+        if reset is None or observed is None:
+            continue
+        limit_id = sample["bucket_id"]
+        if sample["account_key"] != "default":
+            limit_id = f"{sample['account_key']}:{limit_id}"
+        observations.append((
+            PROVIDER_TO_TOOL[sample["provider"]],
+            limit_id,
+            sample["window_seconds"] // 60,
+            int(reset.timestamp()),
+            observed,
+            sample["used_pct"],
+            _model_patterns(sample),
+        ))
+    return observations
+
+
+def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
+                        quota_connection: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Audit every fixed quota period observed in local logs or recorded snapshots.
+
+    Codex session logs and Zcode usage-limit errors embed quota observations in the token
+    cache. Claude, Antigravity, and Zcode snapshots come from the quota recorder database.
+    """
+    token_db.execute(
+        f"CREATE OR REPLACE TEMP TABLE quota_observations ({QUOTA_OBSERVATION_COLUMNS})"
+    )
+    token_db.execute("""
+        INSERT INTO quota_observations
+        SELECT
+            tool,
+            coalesce(nullif(quota_limit_id, ''), lower(tool)),
+            quota_window_minutes,
+            quota_resets_at,
+            try_cast(timestamp AS TIMESTAMPTZ),
+            quota_used_pct,
+            []::VARCHAR[]
+        FROM tokens
+        WHERE source_kind = 'native'
+          AND quota_used_pct IS NOT NULL
+          AND quota_used_pct > 0
+          AND quota_resets_at IS NOT NULL
+          AND quota_window_minutes IS NOT NULL
+    """)
+    if quota_connection is not None:
+        recorded = _recorder_observations(quota_connection)
+        if recorded:
+            token_db.executemany(
+                "INSERT INTO quota_observations VALUES (?, ?, ?, ?, ?, ?, ?)", recorded
+            )
     rows = token_db.execute(f"""
         WITH observations AS (
             SELECT
-                round(quota_resets_at / 300.0)::BIGINT * 300
-                    as canonical_resets_at,
-                arg_max(quota_resets_at, try_cast(timestamp AS TIMESTAMPTZ))
-                    as quota_resets_at,
-                quota_window_minutes,
-                coalesce(nullif(quota_limit_id, ''), 'codex') as quota_limit_id,
-                arg_max(quota_used_pct, try_cast(timestamp AS TIMESTAMPTZ))
-                    as last_used_pct,
-                max(quota_used_pct) as max_used_pct,
-                min(try_cast(timestamp AS TIMESTAMPTZ)) as first_observed_at,
-                max(try_cast(timestamp AS TIMESTAMPTZ)) as observed_at,
-                count(*)::BIGINT as observation_count
-            FROM tokens
-            WHERE tool = 'Codex'
-              AND source_kind = 'native'
-              AND quota_used_pct IS NOT NULL
-              AND quota_used_pct > 0
-              AND quota_resets_at IS NOT NULL
-              AND quota_window_minutes = 10080
-            GROUP BY canonical_resets_at, quota_window_minutes,
-                     coalesce(nullif(quota_limit_id, ''), 'codex')
+                tool as quota_tool,
+                round(resets_at / 300.0)::BIGINT * 300 as canonical_resets_at,
+                arg_max(resets_at, observed_at) as quota_resets_at,
+                window_minutes as quota_window_minutes,
+                limit_id as quota_limit_id,
+                arg_max(used_pct, observed_at) as last_used_pct,
+                max(used_pct) as max_used_pct,
+                min(observed_at) as first_observed_at,
+                max(observed_at) as observed_at,
+                count(*)::BIGINT as observation_count,
+                any_value(model_patterns) as model_patterns
+            FROM quota_observations
+            WHERE observed_at IS NOT NULL
+            GROUP BY quota_tool, canonical_resets_at, window_minutes, limit_id
         )
         SELECT
+            o.quota_tool,
             o.quota_resets_at,
             o.quota_window_minutes,
             o.quota_limit_id,
@@ -804,31 +880,35 @@ def build_quota_history(token_db: Any, cost_expression: str,
             coalesce(sum({cost_expression}), 0)::DOUBLE as api_cost_usd
         FROM observations o
         LEFT JOIN tokens t
-          ON t.tool = 'Codex'
+          ON t.tool = o.quota_tool
          AND t.source_kind = 'native'
          AND try_cast(t.timestamp AS TIMESTAMPTZ)
              >= to_timestamp(o.quota_resets_at)
                 - o.quota_window_minutes * INTERVAL '1 minute'
          AND try_cast(t.timestamp AS TIMESTAMPTZ) <= o.observed_at
+         AND (len(o.model_patterns) = 0
+              OR len(list_filter(o.model_patterns, pattern -> lower(t.model) LIKE pattern)) > 0)
         GROUP BY
-            o.quota_resets_at, o.quota_window_minutes, o.quota_limit_id,
+            o.quota_tool, o.quota_resets_at, o.quota_window_minutes, o.quota_limit_id,
             o.last_used_pct, o.max_used_pct, o.first_observed_at,
             o.observed_at, o.observation_count,
             coalesce(nullif(t.model, ''), 'unknown'),
             coalesce(nullif(t.rate_mode, ''), 'default')
-        ORDER BY o.quota_resets_at, api_cost_usd DESC, total_tokens DESC
+        ORDER BY o.quota_resets_at, o.quota_tool, api_cost_usd DESC, total_tokens DESC
     """).fetchall()
     columns = [item[0] for item in token_db.description]
 
-    grouped: dict[tuple[int, int, str], dict[str, Any]] = {}
+    grouped: dict[tuple[str, int, int, str], dict[str, Any]] = {}
     for raw_row in rows:
         row = dict(zip(columns, raw_row))
         key = (
+            row["quota_tool"],
             row["quota_resets_at"],
             row["quota_window_minutes"],
             row["quota_limit_id"],
         )
         period = grouped.setdefault(key, {
+            "tool": row["quota_tool"],
             "window_start": _time_text(
                 datetime.fromtimestamp(row["quota_resets_at"], timezone.utc)
                 - timedelta(minutes=row["quota_window_minutes"])
@@ -855,19 +935,20 @@ def build_quota_history(token_db: Any, cost_expression: str,
         ):
             period[field] += row[field]
         period["api_equivalent_cost_usd"] += row["api_cost_usd"]
-        period["model_mix"].append({
-            "model": row["model"],
-            "rate_mode": row["rate_mode"],
-            "total_tokens": row["total_tokens"],
-            "api_equivalent_cost_usd": row["api_cost_usd"],
-            "pricing": (
-                "rate_card" if _known_codex_price(row["model"])
-                else "fallback"
-            ),
-        })
+        if row["total_tokens"] or row["model"] != "unknown":
+            period["model_mix"].append({
+                "model": row["model"],
+                "rate_mode": row["rate_mode"],
+                "total_tokens": row["total_tokens"],
+                "api_equivalent_cost_usd": row["api_cost_usd"],
+                "pricing": (
+                    "rate_card" if _known_price(row["quota_tool"], row["model"])
+                    else "fallback"
+                ),
+            })
 
-    periods = sorted(grouped.values(), key=lambda item: item["resets_at"])
-    previous_by_limit: dict[str, float] = {}
+    periods = sorted(grouped.values(), key=lambda item: (item["resets_at"], item["tool"]))
+    previous_by_limit: dict[tuple[str, str, int], float] = {}
     for period in periods:
         used_pct = period["used_pct"]
         cost = period["api_equivalent_cost_usd"]
@@ -897,21 +978,22 @@ def build_quota_history(token_db: Any, cost_expression: str,
             quality.append("unsupported_rate_mode")
         period["quality"] = quality or ["high_utilization"]
 
-        previous = previous_by_limit.get(period["limit_id"])
+        limit_key = (period["tool"], period["limit_id"], period["window_minutes"])
+        previous = previous_by_limit.get(limit_key)
         period["change_from_previous_estimate_pct"] = (
             (estimate / previous - 1) * 100
             if estimate is not None and previous not in (None, 0) else None
         )
         if estimate is not None:
-            previous_by_limit[period["limit_id"]] = estimate
+            previous_by_limit[limit_key] = estimate
 
     return {
-        "schema_version": 1,
-        "report_type": "codex_quota_history",
+        "schema_version": 2,
+        "report_type": "quota_history",
         "generated_at": _time_text(datetime.now(timezone.utc)),
         "pricing_basis": pricing_basis,
         "pricing_method": "constant_rate_card_applied_to_all_periods",
-        "usage_source": "local_codex_native_session_files",
+        "usage_source": "local_native_session_usage",
         "periods": periods,
     }
 
@@ -927,22 +1009,30 @@ def _compact_model_mix(mix: list[dict[str, Any]]) -> str:
 
 def print_quota_history(report: dict[str, Any]) -> None:
     print(f"pricing basis: {report['pricing_basis']} (constant across all periods)")
-    print("reset (UTC)        used    api cost  implied full   change  cache  model mix  quality")
+    rows = []
     for period in report["periods"]:
         estimate = period["full_quota_api_equivalent_cost_estimate_usd"]
         change = period["change_from_previous_estimate_pct"]
         cache = period["cached_input_pct"]
-        estimate_text = f"${estimate:>11.2f}" if estimate is not None else f"{'-':>12}"
-        change_text = f"{change:>+6.1f}%" if change is not None else f"{'-':>7}"
-        cache_text = f"{cache:>5.1f}%" if cache is not None else f"{'-':>6}"
-        reset_text = period["resets_at"][:16].replace("T", " ")
-        print(
-            f"{reset_text}  {period['used_pct']:>5.1f}%  "
-            f"${period['api_equivalent_cost_usd']:>8.2f}  "
-            f"{estimate_text}  {change_text}  {cache_text}  "
-            f"{_compact_model_mix(period['model_mix'])}  "
-            f"{','.join(period['quality'])}"
-        )
+        rows.append([
+            period["resets_at"][:16].replace("T", " "),
+            period["tool"],
+            period["limit_id"],
+            format_duration(period["window_minutes"] * 60),
+            f"{period['used_pct']:.1f}%",
+            f"${period['api_equivalent_cost_usd']:.2f}",
+            f"${estimate:.2f}" if estimate is not None else "-",
+            f"{change:+.1f}%" if change is not None else "-",
+            f"{cache:.1f}%" if cache is not None else "-",
+            _compact_model_mix(period["model_mix"]),
+            ",".join(period["quality"]),
+        ])
+    headers = [
+        "reset (UTC)", "tool", "limit", "window", "used", "api cost", "implied full",
+        "change", "cache", "model mix", "quality",
+    ]
+    for line in _format_table(headers, rows, {4, 5, 6, 7, 8}):
+        print(line)
 
 
 def _format_mix(mix: list[dict[str, Any]]) -> str:

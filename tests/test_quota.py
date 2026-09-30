@@ -451,3 +451,63 @@ def test_quota_history_estimates_full_cost_from_last_period_observation():
     assert second["full_quota_api_equivalent_cost_estimate_usd"] == 80
     assert second["change_from_previous_estimate_pct"] == pytest.approx(60)
     assert "early" not in second["quality"]
+
+
+def test_quota_history_combines_recorded_snapshots_and_embedded_limit_hits(tmp_path):
+    db = duckdb.connect()
+    db.execute("""
+        CREATE TABLE tokens (
+            tool VARCHAR, model VARCHAR, rate_mode VARCHAR, source_kind VARCHAR,
+            input_tokens BIGINT, output_tokens BIGINT, cache_write_tokens BIGINT,
+            cache_read_tokens BIGINT, total_tokens BIGINT, cost_usd DOUBLE,
+            timestamp VARCHAR, quota_used_pct DOUBLE, quota_resets_at BIGINT,
+            quota_window_minutes INTEGER, quota_limit_id VARCHAR
+        )
+    """)
+    zcode_reset = int(datetime(2026, 9, 27, 19, 11, 57, tzinfo=timezone.utc).timestamp())
+    db.executemany(
+        "INSERT INTO tokens VALUES (?, ?, '', 'native', 0, 0, 0, 0, 100, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Zcode", "zai/glm-5.3", 3.0, "2026-09-27T14:12:00Z", None, None, None, None),
+            ("Zcode", "zai/glm-5.3", 3.0, "2026-09-27T15:00:00Z", None, None, None, None),
+            ("Zcode", "zai/glm-5.3", 0.0, "2026-09-27T15:21:03Z", 100, zcode_reset, 300, "5h"),
+            ("Zcode", "zai/glm-5.3", 5.0, "2026-09-27T16:00:00Z", None, None, None, None),
+            ("Claude Code", "claude-opus-5-5", 40.0, "2026-09-25T00:00:00Z",
+             None, None, None, None),
+            ("Claude Code", "claude-fable-5-1", 10.0, "2026-09-25T00:00:00Z",
+             None, None, None, None),
+        ],
+    )
+    with connect(tmp_path / "quota.sqlite3") as connection:
+        insert_samples(connection, [
+            *normalize_zai({
+                "updated_at": "2026-09-27T15:30:00Z",
+                "limits": [{"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "used": 1000,
+                            "limit": 2000, "pct": 50,
+                            "resets_at": "2026-09-27T20:24:52Z"}],
+            }, datetime(2026, 9, 27, 15, 30, tzinfo=timezone.utc)),
+            *normalize_anthropic({
+                "plan": "max_20x",
+                "updated_at": "2026-09-26T00:00:00Z",
+                "7d": {"pct": 50, "resets_at": "2026-09-29T13:00:00Z"},
+                "7d_fable": {"pct": 20, "resets_at": "2026-09-29T13:00:00Z"},
+            }, datetime(2026, 9, 26, tzinfo=timezone.utc)),
+        ])
+        report = build_quota_history(db, "cost_usd", "test-rate-card", connection)
+
+    periods = {(item["tool"], item["limit_id"], item["resets_at"]): item
+               for item in report["periods"]}
+    assert report["report_type"] == "quota_history"
+    hit = periods[("Zcode", "5h", "2026-09-27T19:11:57Z")]
+    assert hit["used_pct"] == 100
+    assert hit["window_start"] == "2026-09-27T14:11:57Z"
+    assert hit["full_quota_api_equivalent_cost_estimate_usd"] == 6.0
+    assert hit["change_from_previous_estimate_pct"] is None
+    recorded = periods[("Zcode", "5h", "2026-09-27T20:24:52Z")]
+    assert recorded["full_quota_api_equivalent_cost_estimate_usd"] == 0.0
+    assert recorded["change_from_previous_estimate_pct"] == -100
+    week = periods[("Claude Code", "7d", "2026-09-29T13:00:00Z")]
+    assert week["full_quota_api_equivalent_cost_estimate_usd"] == 100
+    fable = periods[("Claude Code", "7d_fable", "2026-09-29T13:00:00Z")]
+    assert fable["full_quota_api_equivalent_cost_estimate_usd"] == 50
+    assert [item["model"] for item in fable["model_mix"]] == ["claude-fable-5-1"]
