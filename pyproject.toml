@@ -12,7 +12,7 @@ dependencies = [
     "gemini-cli-usage>=0.1.5",
     "agy-usage>=0.1.6",
     "zcode-cli-usage>=0.1.0",
-    "llm-prices>=0.1.0",
+    "model-prices>=0.0.1",
 ]
 
 [project.urls]
@@ -22,9 +22,9 @@ Source = "https://github.com/wakamex/clanker-analytics"
 [project.scripts]
 clanker-analytics = "clanker_analytics.main:main"
 
-# Local checkout until llm-prices is published; builds use --no-sources.
+# Local checkout until model-prices is published; builds use --no-sources.
 [tool.uv.sources]
-llm-prices = { path = "../llm-prices", editable = true }
+model-prices = { path = "../model-prices", editable = true }
 
 [dependency-groups]
 dev = ["pytest"]

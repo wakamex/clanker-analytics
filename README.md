@@ -129,7 +129,7 @@ For each period it uses the chronologically last nonzero quota observation, tota
 - The implied full-quota API-equivalent cost, calculated as cost divided by used percentage.
 - Change from the preceding estimate for the same tool, limit, and window length, cached-input share, model mix, and pricing flags.
 
-Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run that neither llm-prices nor AOP could price adds tokens but no cost and flags the period `unpriced_models`.
+Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run that neither model-prices nor AOP could price adds tokens but no cost and flags the period `unpriced_models`.
 
 `value` summarizes what each subscription is worth at API prices. For each tool it takes the latest weekly period from the quota history that is more than 15 percent used, since extrapolating a barely used week to a full quota is too noisy. Tools without such a week are omitted. It reports:
 
@@ -137,9 +137,9 @@ Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's 
 - The monthly plan price and the value as a multiple of it.
 - API-equivalent and effective dollars per million tokens, from that week's own mix of input, cache, and output tokens. The effective price is the API price divided by the multiple.
 
-The plan comes from the same usage packages as the chart, and its monthly price from llm-prices. Plans whose reported name covers several prices, such as Google AI Ultra's two tiers, are unpriced, and ChatGPT Pro is priced at $200 although Codex reports its $100 and $500 tiers the same way. A usage package's stale cached reading does not count as a current plan. Antigravity uses the Google AI plan reported for Gemini.
+The plan comes from the same usage packages as the chart, and its monthly price from model-prices. Plans whose reported name covers several prices, such as Google AI Ultra's two tiers, are unpriced, and ChatGPT Pro is priced at $200 although Codex reports its $100 and $500 tiers the same way. A usage package's stale cached reading does not count as a current plan. Antigravity uses the Google AI plan reported for Gemini.
 
-When detection cannot tell your plan, name it once in `~/.config/clanker-analytics/config.toml`, either as an llm-prices plan id or as a monthly price:
+When detection cannot tell your plan, name it once in `~/.config/clanker-analytics/config.toml`, either as an model-prices plan id or as a monthly price:
 
 ```toml
 [plans]
@@ -155,7 +155,7 @@ that removal, local usage can be counted again every time a session is forked.
 Codex timestamps are read as their original UTC strings instead of relying on JSON type inference;
 otherwise timezone-less coercion can move activity across quota boundaries on non-UTC hosts.
 
-Periods are priced at the rates in effect when each request ran; the line above the table names the llm-prices data and pricing basis. With `--prices current`, every period uses today's rates, so API price changes do not look like quota changes. Periods with usage that could not be priced show `unpriced_models`, periods priced partly from AOP's recorded costs show `aop_recorded_pricing`, and non-default rate modes show
+Periods are priced at the rates in effect when each request ran; the line above the table names the model-prices data and pricing basis. With `--prices current`, every period uses today's rates, so API price changes do not look like quota changes. Periods with usage that could not be priced show `unpriced_models`, periods priced partly from AOP's recorded costs show `aop_recorded_pricing`, and non-default rate modes show
 `unsupported_rate_mode`. Estimates extrapolate from the used percentage, so low-usage periods are
 rough.
 
@@ -225,14 +225,14 @@ For current AOP records, each `aop-token-usage-v2` result with complete or usage
 
 ## API cost calculation
 
-Every row is priced with [llm-prices](https://github.com/wakamex/llm-prices), which records each model's API price history from models.dev with sourced corrections and time-of-day schedules. A row is priced at the rates in effect when its request ran: GPT-5.6 Sol usage before August 22, 2026 costs $5/$30 per million input/output tokens, and after it $4/$20. DeepSeek requests during its peak hours cost twice the off-peak rate. Long-context tiers apply per request, so several shorter requests never reach a tier together.
+Every row is priced with [model-prices](https://github.com/wakamex/model-prices), which records each model's API price history from models.dev with sourced corrections and time-of-day schedules. A row is priced at the rates in effect when its request ran: GPT-5.6 Sol usage before August 22, 2026 costs $5/$30 per million input/output tokens, and after it $4/$20. DeepSeek requests during its peak hours cost twice the off-peak rate. Long-context tiers apply per request, so several shorter requests never reach a tier together.
 
 `--prices current` reprices every request from today's price list instead, while keeping each request's own peak or off-peak hour. Use it to compare usage across periods without price changes showing up as usage changes.
 
-Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). The cache records llm-prices' data version and reprices every row when it changes. The `pricing` column says where each row's price came from:
+Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). The cache records model-prices' data version and reprices every row when it changes. The `pricing` column says where each row's price came from:
 
-- `llm-prices`: priced from the model's API price history.
-- `aop`: an AOP run whose model llm-prices cannot price, which keeps the API-equivalent cost AOP recorded.
+- `model-prices`: priced from the model's API price history.
+- `aop`: an AOP run whose model model-prices cannot price, which keeps the API-equivalent cost AOP recorded.
 - `unpriced`: no price is known, such as Codex's internal `codex-auto-review`. These rows count as zero in cost totals.
 
 The `billable` token column applies the same cache discount across sources. These estimates represent API-equivalent usage, not subscription charges.
@@ -262,6 +262,6 @@ Brand colors used in `--chart` / `--share` output:
 
 ## Requirements
 
-Python 3.13+, DuckDB 1.5+, matplotlib 3.9+, llm-prices 0.1+.
+Python 3.13+, DuckDB 1.5+, matplotlib 3.9+, model-prices 0.1+.
 
 Tested on Linux, macOS, and Windows (including WSL data auto-discovery).

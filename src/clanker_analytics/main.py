@@ -999,7 +999,7 @@ SOURCES = {
     "zcode": (ZCODE_TOOL, _zcode_sql),
 }
 
-# API-equivalent cost of each row, priced by llm-prices when the cache is built. Rows
+# API-equivalent cost of each row, priced by model-prices when the cache is built. Rows
 # of models without a price count as zero; their pricing column says "unpriced".
 COST_PER_ROW = "coalesce(api_cost_usd, 0)"
 
@@ -1801,7 +1801,7 @@ def main(argv: list[str] | None = None):
                         help="Include model mix in the pace table")
     parser.add_argument("--plan", action="append", type=plan_setting, default=[],
                         metavar="TOOL=PLAN|USD",
-                        help="Subscription plan for this run, as an llm-prices plan id such as "
+                        help="Subscription plan for this run, as an model-prices plan id such as "
                              "codex=pro_200 or a monthly price such as zcode=18; overrides "
                              "the [plans] table in ~/.config/clanker-analytics/config.toml")
     args = parser.parse_args(argv)

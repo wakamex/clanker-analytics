@@ -14,7 +14,7 @@ import pytest
 import clanker_analytics.main as main_mod
 from clanker_analytics.main import COST_PER_ROW, fmt, register_macros, detect_plans
 from clanker_analytics.pricing import TOOL_PROVIDERS, price_tokens
-import llm_prices
+import model_prices
 
 
 # ---------------------------------------------------------------------------
@@ -1086,9 +1086,9 @@ class TestCostCalculation:
         return _make_db(*rows).sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
 
     @pytest.mark.parametrize("row", [SONNET_ROW, OPUS_ROW, HAIKU_ROW, GEMINI_ROW])
-    def test_rows_are_priced_by_llm_prices_at_their_date(self, row):
+    def test_rows_are_priced_by_model_prices_at_their_date(self, row):
         tool, _, _, date, model, uncached, output, written, read, _ = row
-        expected = llm_prices.cost(
+        expected = model_prices.cost(
             model, provider=TOOL_PROVIDERS[tool], at=date, input_tokens=uncached,
             output_tokens=output, cache_write_tokens=written, cache_read_tokens=read,
         )

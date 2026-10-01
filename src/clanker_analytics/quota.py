@@ -930,7 +930,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             elif row["aop_priced_rows"]:
                 pricing = "aop_recorded"
             else:
-                pricing = "llm-prices"
+                pricing = "model-prices"
             period["model_mix"].append({
                 "model": row["model"],
                 "rate_mode": row["rate_mode"],

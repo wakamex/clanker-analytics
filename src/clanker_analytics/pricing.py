@@ -1,4 +1,4 @@
-"""API-equivalent prices for token rows and subscription plans, from llm-prices."""
+"""API-equivalent prices for token rows and subscription plans, from model-prices."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import tomllib
 from typing import Iterator
 
 import duckdb
-import llm_prices
+import model_prices
 
 # Provider hints for resolving each tool's model names; other tools report names that
 # resolve without one, such as "opencode/glm-5.3".
@@ -36,7 +36,7 @@ PLAN_PROVIDERS = {
 
 def pricing_basis() -> str:
     """Identify the price data, so cached prices are recomputed when it changes."""
-    return llm_prices.pricing_basis()
+    return model_prices.pricing_basis()
 
 
 # Tool names accepted in plan settings, for the tools whose usage package reports a plan.
@@ -47,14 +47,14 @@ CONFIG_PATH = (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 
 
 def plan_price(tool: str, plan: str, at: datetime | str | None = None) -> float:
-    """Monthly price of a detected plan, or 0 when llm-prices has no price for it."""
+    """Monthly price of a detected plan, or 0 when model-prices has no price for it."""
     provider = PLAN_PROVIDERS.get(tool)
-    found = llm_prices.plan(provider, plan, at=at) if provider else None
+    found = model_prices.plan(provider, plan, at=at) if provider else None
     return found.usd_per_month if found else 0
 
 
 def plan_choice(key: str, value: object) -> tuple[str, tuple[str, float]]:
-    """Resolve a plan setting, an llm-prices plan id or a monthly USD price, for a tool."""
+    """Resolve a plan setting, an model-prices plan id or a monthly USD price, for a tool."""
     tool = PLAN_KEYS.get(key.lower())
     if tool is None:
         raise ValueError(f"no plan setting for {key!r}; use one of {', '.join(PLAN_KEYS)}")
@@ -66,7 +66,7 @@ def plan_choice(key: str, value: object) -> tuple[str, tuple[str, float]]:
         except ValueError:
             price = plan_price(tool, str(value))
             if not price:
-                known = ", ".join(llm_prices.plan_ids(PLAN_PROVIDERS[tool]))
+                known = ", ".join(model_prices.plan_ids(PLAN_PROVIDERS[tool]))
                 raise ValueError(f"no {key} plan {value!r}; use one of {known}, "
                                  "or a monthly USD price") from None
             return tool, (str(value), price)
@@ -97,9 +97,9 @@ def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
                 "cache_write_tokens": written or 0, "cache_read_tokens": read or 0,
             }
             try:
-                historical = llm_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
+                historical = model_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
                                              at=at, **usage)
-                current = llm_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
+                current = model_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
                                           at=at, prices_at=today, **usage)
             except ValueError:
                 pass
@@ -110,7 +110,7 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     """Price unpriced rows, or every row, at the rates in effect when each request ran
     (api_cost_usd) and at today's price list (current_api_cost_usd).
 
-    AOP runs whose model llm-prices cannot price keep the cost AOP recorded.
+    AOP runs whose model model-prices cannot price keep the cost AOP recorded.
     """
     columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     for column, kind in (("api_cost_usd", "DOUBLE"), ("current_api_cost_usd", "DOUBLE"),
@@ -142,7 +142,7 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     db.execute(f"""
         UPDATE tokens SET
             pricing = CASE
-                WHEN api_cost_usd IS NOT NULL THEN 'llm-prices'
+                WHEN api_cost_usd IS NOT NULL THEN 'model-prices'
                 WHEN source_kind = 'aop' AND cost_usd IS NOT NULL THEN 'aop'
                 ELSE 'unpriced'
             END,

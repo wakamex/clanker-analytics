@@ -30,8 +30,8 @@ dependencies = [
     { name = "codex-cli-usage" },
     { name = "duckdb" },
     { name = "gemini-cli-usage" },
-    { name = "llm-prices" },
     { name = "matplotlib" },
+    { name = "model-prices" },
     { name = "zcode-cli-usage" },
 ]
 
@@ -47,8 +47,8 @@ requires-dist = [
     { name = "codex-cli-usage", specifier = ">=0.1.8" },
     { name = "duckdb", specifier = ">=1.5.0" },
     { name = "gemini-cli-usage", specifier = ">=0.1.5" },
-    { name = "llm-prices", editable = "../llm-prices" },
     { name = "matplotlib", specifier = ">=3.9" },
+    { name = "model-prices", editable = "../model-prices" },
     { name = "zcode-cli-usage", specifier = ">=0.1.0" },
 ]
 
@@ -278,16 +278,6 @@ wheels = [
 ]
 
 [[package]]
-name = "llm-prices"
-version = "0.1.0"
-source = { editable = "../llm-prices" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
-
-[[package]]
 name = "matplotlib"
 version = "3.10.8"
 source = { registry = "https://pypi.org/simple" }
@@ -333,6 +323,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7c/e6/76f2813d31f032e65f6f797e3f2f6e4aab95b65015924b1c51370395c28a/matplotlib-3.10.8-cp314-cp314t-win_amd64.whl", hash = "sha256:25d380fe8b1dc32cf8f0b1b448470a77afb195438bafdf1d858bfb876f3edf7b", size = 8362801, upload-time = "2025-12-10T22:56:36.107Z" },
     { url = "https://files.pythonhosted.org/packages/5d/49/d651878698a0b67f23aa28e17f45a6d6dd3d3f933fa29087fa4ce5947b5a/matplotlib-3.10.8-cp314-cp314t-win_arm64.whl", hash = "sha256:113bb52413ea508ce954a02c10ffd0d565f9c3bc7f2eddc27dfe1731e71c7b5f", size = 8192560, upload-time = "2025-12-10T22:56:38.008Z" },
 ]
+
+[[package]]
+name = "model-prices"
+version = "0.0.1"
+source = { editable = "../model-prices" }
 
 [[package]]
 name = "numpy"
