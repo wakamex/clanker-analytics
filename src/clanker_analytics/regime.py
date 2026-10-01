@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 
-FONT_PATH = Path(__file__).parent / "D2CodingLigature.ttf"
+FONT_PATH = Path(__file__).parent / "ClankerMono.ttf"
 OUTPUT = Path.home() / ".cache" / "clanker-analytics" / "regime.png"
 
 BG = "#040506"
