@@ -933,6 +933,29 @@ class TestZcodeSourceLoader:
 # fmt() tests
 # ===========================================================================
 
+class TestOneHourCachePricing:
+    def test_one_hour_cache_writes_cost_more_than_five_minute_ones(self):
+        db = duckdb.connect()
+        db.execute(f"CREATE TABLE tokens ({main_mod.TOKEN_SCHEMA})")
+        # Two Claude Opus 5.5 requests that each write 1M cache tokens: one to the
+        # five-minute cache ($5/M), one to the one-hour cache (2x the $4/M input).
+        db.execute("""
+            INSERT INTO tokens (tool, project, session, date, model, input_tokens,
+                output_tokens, cache_write_tokens, cache_read_tokens, cache_write_1h_tokens,
+                total_tokens, execution_type, source_kind, timestamp)
+            VALUES
+                ('Claude Code', 'p', 's', '2026-10-01', 'claude-opus-5-5', 0, 0, 1000000, 0, 0,
+                 1000000, 'subagent', 'native', '2026-10-01T12:00:00Z'),
+                ('Claude Code', 'p', 's', '2026-10-01', 'claude-opus-5-5', 0, 0, 1000000, 0,
+                 1000000, 1000000, 'interactive', 'native', '2026-10-01T12:00:00Z')
+        """)
+
+        price_tokens(db, all_rows=True)
+
+        costs = db.sql("SELECT execution_type, api_cost_usd FROM tokens ORDER BY 1").fetchall()
+        assert costs == [("interactive", pytest.approx(8.0)), ("subagent", pytest.approx(5.0))]
+
+
 class TestFmt:
     def test_billions(self):
         assert fmt(1_500_000_000) == "1.5B"

@@ -88,13 +88,16 @@ def configured_plans(path: Path = CONFIG_PATH) -> dict[str, tuple[str, float]]:
 
 def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
     """Yield (rowid, cost when run, cost at today's prices) for each fetched row."""
-    for rowid, tool, model, timestamp, date, uncached, output, written, read in rows:
+    for rowid, tool, model, timestamp, date, uncached, output, written, read, written_1h in rows:
         at = timestamp or date
         historical = current = None
         if model and at:
+            # cache_write_tokens counts both cache lifetimes; the one-hour part is priced apart.
+            written_1h = written_1h or 0
             usage = {
                 "input_tokens": uncached or 0, "output_tokens": output or 0,
-                "cache_write_tokens": written or 0, "cache_read_tokens": read or 0,
+                "cache_write_tokens": max((written or 0) - written_1h, 0),
+                "cache_write_1h_tokens": written_1h, "cache_read_tokens": read or 0,
             }
             try:
                 historical = model_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
@@ -114,13 +117,13 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     """
     columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     for column, kind in (("api_cost_usd", "DOUBLE"), ("current_api_cost_usd", "DOUBLE"),
-                         ("pricing", "VARCHAR")):
+                         ("pricing", "VARCHAR"), ("cache_write_1h_tokens", "INT")):
         if column not in columns:
             db.execute(f"ALTER TABLE tokens ADD COLUMN {column} {kind}")
     selected = "true" if all_rows else "pricing IS NULL"
     rows = db.execute(f"""
         SELECT rowid, tool, model, timestamp::VARCHAR, date::VARCHAR, input_tokens,
-               output_tokens, cache_write_tokens, cache_read_tokens
+               output_tokens, cache_write_tokens, cache_read_tokens, cache_write_1h_tokens
         FROM tokens WHERE {selected}
     """).fetchall()
     # Pricing in Python and loading the results as CSV is far faster than a per-row

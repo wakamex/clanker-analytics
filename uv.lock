@@ -48,7 +48,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.0" },
     { name = "gemini-cli-usage", specifier = ">=0.1.5" },
     { name = "matplotlib", specifier = ">=3.9" },
-    { name = "model-prices", specifier = ">=0.0.1" },
+    { name = "model-prices", specifier = ">=0.0.2" },
     { name = "zcode-cli-usage", specifier = ">=0.1.0" },
 ]
 
@@ -326,11 +326,11 @@ wheels = [
 
 [[package]]
 name = "model-prices"
-version = "0.0.1"
+version = "0.0.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/af/3a/94d407acaad8501ea7b719591b1e9b0cb03e8d379b8a96b7f91c40265f4f/model_prices-0.0.1.tar.gz", hash = "sha256:9fe173a05b2d0aca1ef2a6eb0b23328a492901ce4e0a5eb6eebb2560505975b5", size = 60016, upload-time = "2026-10-01T20:06:22.879Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/40/0f/94c2043807170cec6d4dbb7ba1f2cf8c3aca6452096cf53067810271c55e/model_prices-0.0.2.tar.gz", hash = "sha256:3aa3a177dbc19695be3f11798946b84255addb4c753adf4adc4cbe3c566ea180", size = 60796, upload-time = "2026-10-03T20:07:51.015Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/e0/dca85d588773471ce59c01bcfc01e7dbe6758f8ba88af490ca2ea61a1f36/model_prices-0.0.1-py3-none-any.whl", hash = "sha256:ca01abd995f80cb004e760bb09423a196ce967e3e9fa0dded22f139d63951ad3", size = 51986, upload-time = "2026-10-01T20:06:21.867Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/6a/dce77c07ec710ca84083e8df57353423427ecadc743e16242d53d4107472/model_prices-0.0.2-py3-none-any.whl", hash = "sha256:330fdeda763f17619918e0d9a34b4466d10da9ee45346c10b4521ef9f165b3cc", size = 52483, upload-time = "2026-10-03T20:07:49.878Z" },
 ]
 
 [[package]]
