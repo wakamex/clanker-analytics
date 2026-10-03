@@ -79,7 +79,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 20
+CACHE_SCHEMA_VERSION = 21
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -108,6 +108,7 @@ TOKEN_SCHEMA = """
     output_tokens INT,
     cache_write_tokens INT,
     cache_read_tokens INT,
+    cache_write_1h_tokens INT,
     total_tokens BIGINT,
     execution_type VARCHAR,
     project_path VARCHAR,
@@ -171,6 +172,10 @@ SELECT
     coalesce(cast(message.usage.output_tokens as INTEGER), 0) as output_tokens,
     coalesce(cast(message.usage.cache_creation_input_tokens as INTEGER), 0) as cache_write_tokens,
     coalesce(cast(message.usage.cache_read_input_tokens as INTEGER), 0) as cache_read_tokens,
+    -- The part of cache_write_tokens written to the one-hour cache, which main threads use;
+    -- absent from transcripts older than the split.
+    coalesce(try_cast(json_extract_string(to_json(message.usage),
+        '$.cache_creation.ephemeral_1h_input_tokens') as INTEGER), 0) as cache_write_1h_tokens,
     coalesce(cast(message.usage.input_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.output_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.cache_creation_input_tokens as INTEGER), 0)
@@ -1403,7 +1408,10 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
     parts = _build_source_sql(db, _group_files_by_tool(files))
     if parts:
         with timer.span("build tokens table", f"{len(parts)} sources"):
-            db.execute("CREATE TABLE tokens AS " + " UNION ALL ".join(f"({part})" for part in parts))
+            # By name: only some sources report columns such as cache_write_1h_tokens.
+            db.execute("CREATE TABLE tokens AS "
+                       + " UNION ALL BY NAME ".join(f"({part})" for part in parts))
+            db.execute("ALTER TABLE tokens ADD COLUMN IF NOT EXISTS cache_write_1h_tokens INT")
     else:
         _empty_tokens_table(db)
     _deduplicate_aop(db, timer)
@@ -1456,7 +1464,7 @@ def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceS
     with timer.span("append changed files", f"{len(files)} files"):
         db.execute(
             "INSERT INTO tokens BY NAME "
-            + " UNION ALL ".join(f"SELECT * FROM ({part})" for part in parts)
+            + " UNION ALL BY NAME ".join(f"SELECT * FROM ({part})" for part in parts)
         )
 
 

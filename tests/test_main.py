@@ -337,7 +337,30 @@ class TestSourceLoaders:
         source = main_mod._sql_file_list([p.as_posix() for p in (root, subagent, compact)])
         rows = duckdb.sql(main_mod._claude_sql(source)).fetchall()
 
-        assert sorted(row[10] for row in rows) == ["interactive", "subagent"]
+        assert sorted(row[11] for row in rows) == ["interactive", "subagent"]
+
+    def test_claude_reads_one_hour_cache_writes(self, tmp_path):
+        def assistant(uuid, usage):
+            return {"type": "assistant", "uuid": uuid, "sessionId": "s", "cwd": "/code/demo",
+                    "isSidechain": False,
+                    "timestamp": "2026-10-03T12:00:00Z",
+                    "message": {"model": "claude-opus-5-5", "usage": usage}}
+
+        path = tmp_path / "s.jsonl"
+        path.write_text("\n".join(json.dumps(line) for line in (
+            assistant("split", {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0,
+                                "cache_creation_input_tokens": 500,
+                                "cache_creation": {"ephemeral_5m_input_tokens": 200,
+                                                   "ephemeral_1h_input_tokens": 300}}),
+            assistant("older", {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0,
+                                "cache_creation_input_tokens": 400}),
+        )) + "\n")
+
+        source = main_mod._sql_file_list([path.as_posix()])
+        rows = duckdb.sql(f"SELECT cache_write_tokens, cache_write_1h_tokens FROM "
+                          f"({main_mod._claude_sql(source)}) ORDER BY 1").fetchall()
+
+        assert rows == [(400, 0), (500, 300)]
 
     def test_agy_uses_exact_retained_usage_and_attributes_project(self, tmp_path):
         session = "11111111-2222-3333-4444-555555555555"
