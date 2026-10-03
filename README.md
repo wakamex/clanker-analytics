@@ -285,6 +285,16 @@ Brand colors used in `--chart` / `--share` output:
 
 ## Requirements
 
-Python 3.13+, DuckDB 1.5+, matplotlib 3.9+, model-prices 0.1+.
+Python 3.13+, DuckDB 1.5+, matplotlib 3.9+, model-prices 0.0.2+.
 
 Tested on Linux, macOS, and Windows (including WSL data auto-discovery).
+
+## Development
+
+```bash
+uv run --locked python -m unittest discover -s tests
+```
+
+## License
+
+The code is MIT licensed, in [LICENSE](LICENSE). The bundled Clanker Mono font is a modified version of D2Coding, copyright (c) 2015 NAVER Corporation, licensed under the SIL Open Font License 1.1 in `src/clanker_analytics/OFL-ClankerMono.txt`. The emoji images in `src/clanker_analytics/emoji/` are [Twemoji](https://github.com/jdecked/twemoji) graphics, copyright Twitter, Inc. and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) in `src/clanker_analytics/emoji/LICENSE-CC-BY-4.0.txt`.
