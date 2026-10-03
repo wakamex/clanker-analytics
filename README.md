@@ -45,6 +45,7 @@ clanker-analytics value --plan codex=pro_500     # what-if with a different plan
 clanker-analytics diagnose                 # what changed in the last 3 days vs the 7 before
 clanker-analytics diagnose --since 2d --vs 5d    # choose both periods
 clanker-analytics cache                    # prompt-cache health over the last 7 days
+clanker-analytics throughput               # output tokens per second by day, with parallel streams
 clanker-analytics --quota-history --quota-json
 clanker-analytics --prices current       # reprice all usage at today's API rates
 clanker-analytics --refresh              # force cache rebuild
@@ -197,6 +198,8 @@ The included service expects the executable at `~/.local/bin/clanker-analytics`,
 - Cold starts: requests that wrote nearly their whole prompt to the cache, split into a transcript's first request, those that came after idling longer than the cache lifetime, and the rest, with the cost of the ones after idling.
 
 It ends with an estimate of what Claude Code subagents would have paid for prompt tokens on the one-hour cache, which turns their cold starts after five minutes to an hour of idling into cache reads at a higher write price.
+
+`throughput` reports, for each UTC day of `--since` (default 7 days), the output tokens and output tokens per second averaged over the whole day including idle time, the busiest hour's rate, the hours with any output, and how many transcripts (main conversations or subagents) made requests in the same hour: the median over active hours and the peak. It shows whether parallel agents added output or mostly waited. AOP runs are recorded as one summary at completion, so they are counted as finished runs rather than streams.
 
 ## Columns
 

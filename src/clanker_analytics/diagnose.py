@@ -269,3 +269,60 @@ def print_cache_health(report: dict[str, Any]) -> None:
               f"With the one-hour cache (subagentPromptCacheTtl \"1h\") they would have paid about "
               f"{_money(simulation['one_hour'])}, {'saving' if saved >= 0 else 'costing'} "
               f"{_money(abs(saved))} ({abs(saved) / simulation['actual']:.0%}).")
+
+
+def build_throughput(db: duckdb.DuckDBPyConnection, since: datetime,
+                     now: datetime | None = None) -> dict[str, Any]:
+    """Output tokens per second by UTC day, with how many transcripts produced them at once.
+
+    Each transcript, a main conversation or a subagent, counts as one stream while it
+    makes requests within an hour. AOP runs are recorded as one summary at completion, so
+    they are counted as finished runs rather than streams.
+    """
+    now = now or datetime.now(timezone.utc)
+    db.execute(f"""
+        CREATE OR REPLACE TEMP VIEW hourly AS
+        SELECT date_trunc('hour', timezone('UTC', ts)) AS hour, sum(output_tokens) AS output,
+               count(DISTINCT source_file) FILTER (WHERE source_kind = 'native') AS streams,
+               count(DISTINCT source_file) FILTER (WHERE source_kind = 'aop') AS aop_runs,
+               sum(output_tokens) FILTER (WHERE execution_type = 'subagent') AS subagent_output
+        FROM (SELECT *, try_cast(timestamp AS TIMESTAMPTZ) AS ts FROM tokens)
+        WHERE ts >= '{since.isoformat()}' AND ts < '{now.isoformat()}'
+        GROUP BY 1
+    """)
+    days = []
+    for day, output, subagent, busiest, active, median_streams, peak, aop_runs in db.execute("""
+        SELECT date_trunc('day', hour)::DATE, sum(output), coalesce(sum(subagent_output), 0),
+               max(output), count(*) FILTER (WHERE output > 0),
+               median(streams) FILTER (WHERE output > 0), max(streams), sum(aop_runs)
+        FROM hourly GROUP BY 1 ORDER BY 1
+    """).fetchall():
+        start = max(datetime(day.year, day.month, day.day, tzinfo=timezone.utc), since)
+        end = min(datetime(day.year, day.month, day.day, tzinfo=timezone.utc) + timedelta(days=1), now)
+        seconds = max((end - start).total_seconds(), 1)
+        days.append({
+            "date": day.isoformat(), "output_tokens": output,
+            "tokens_per_second": output / seconds, "busiest_hour_tokens_per_second": busiest / 3600,
+            "active_hours": active, "typical_streams": median_streams, "peak_streams": peak,
+            "subagent_output_share": subagent / output if output else None,
+            "aop_runs": aop_runs,
+            "covered_hours": seconds / 3600,
+        })
+    return {"since": since.isoformat(), "days": days}
+
+
+def print_throughput(report: dict[str, Any]) -> None:
+    print("Output tokens per second by UTC day, averaged over the whole day including idle "
+          "time. Streams are transcripts, main conversations or subagents, making requests "
+          "in the same hour.\n")
+    rows = []
+    for day in report["days"]:
+        partial = "" if day["covered_hours"] >= 23.99 else f" ({day['covered_hours']:.0f}h)"
+        rows.append([
+            day["date"] + partial, f"{day['output_tokens'] / 1e6:,.2f}M",
+            f"{day['tokens_per_second']:,.0f}", f"{day['busiest_hour_tokens_per_second']:,.0f}",
+            f"{day['active_hours']}", f"{day['typical_streams'] or 0:.0f}", f"{day['peak_streams']}",
+            _share(day["subagent_output_share"]), f"{day['aop_runs']:,}",
+        ])
+    _table(["Day", "Output", "Tokens/s", "Busiest hour", "Active hours", "Typical streams",
+            "Peak streams", "From subagents", "AOP runs"], rows)

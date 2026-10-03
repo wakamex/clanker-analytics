@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import duckdb
 import pytest
 
-from clanker_analytics.diagnose import build_cache_health, build_diagnosis
+from clanker_analytics.diagnose import build_cache_health, build_diagnosis, build_throughput
 from clanker_analytics.main import TOKEN_SCHEMA
 from clanker_analytics.pricing import price_tokens
 
@@ -87,3 +87,24 @@ def test_diagnosis_compares_periods_per_day_and_ranks_the_largest_change():
     token_types = {item["key"]: item["change_per_day"] for item in report["changes"]["token type"]}
     assert token_types["cache write"] == pytest.approx(5.0)
     assert token_types["cache read"] == pytest.approx(-0.2)
+
+
+def test_throughput_counts_concurrent_transcripts_and_aop_runs_separately():
+    db = _db([
+        (90, "main", "interactive", 0, 0, 0, 0, 3_600),
+        (80, "sub", "subagent", 0, 0, 0, 0, 3_600),
+    ])
+    db.execute("""
+        INSERT INTO tokens (tool, session, date, model, output_tokens, execution_type,
+            source_kind, source_file, timestamp)
+        VALUES ('OpenCode', 'run', '2026-10-03', 'opencode/glm-5.3', 0, 'subagent', 'aop',
+                '/runs/one/result.json', '2026-10-03T10:40:00+00:00')
+    """)
+
+    report = build_throughput(db, NOW - timedelta(hours=12), NOW)
+
+    (day,) = report["days"]
+    assert day["covered_hours"] == 12
+    assert day["tokens_per_second"] == pytest.approx(7_200 / (12 * 3600))
+    assert (day["peak_streams"], day["aop_runs"]) == (2, 1)
+    assert day["subagent_output_share"] == 0.5

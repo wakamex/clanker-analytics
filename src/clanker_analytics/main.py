@@ -1675,9 +1675,10 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             else:
                 db.execute(f"DELETE FROM tokens WHERE tool != {_sql_literal(tool_name)}")
 
-    if args.command in ("diagnose", "cache"):
+    if args.command in ("diagnose", "cache", "throughput"):
         from clanker_analytics.diagnose import (
-            build_cache_health, build_diagnosis, print_cache_health, print_diagnosis,
+            build_cache_health, build_diagnosis, build_throughput, print_cache_health,
+            print_diagnosis, print_throughput,
         )
         now = datetime.now(timezone.utc)
         recent = _since_delta(args.since, now, default="3d" if args.command == "diagnose" else "7d")
@@ -1687,6 +1688,11 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             print(json.dumps(report, indent=2) if args.quota_json else "", end="")
             if not args.quota_json:
                 print_diagnosis(report)
+        elif args.command == "throughput":
+            report = build_throughput(db, now - recent, now)
+            print(json.dumps(report, indent=2) if args.quota_json else "", end="")
+            if not args.quota_json:
+                print_throughput(report)
         else:
             report = build_cache_health(db, now - recent, limit=min(args.limit, 10))
             print(json.dumps(report, indent=2, default=str) if args.quota_json else "", end="")
@@ -1778,10 +1784,11 @@ def main(argv: list[str] | None = None):
 
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
     parser.add_argument(
-        "command", nargs="?", choices=["pace", "value", "diagnose", "cache"],
+        "command", nargs="?", choices=["pace", "value", "diagnose", "cache", "throughput"],
         help="Run a report command: pace (accepts optional duration arguments), value, "
              "diagnose (what changed in the --since period against the --vs period before "
-             "it), or cache (prompt-cache health over --since)",
+             "it), cache (prompt-cache health over --since), or throughput (output tokens "
+             "per second by day over --since)",
     )
     parser.add_argument(
         "periods", nargs="*", type=duration, metavar="PERIOD",
@@ -1855,7 +1862,7 @@ def main(argv: list[str] | None = None):
         args.pace = True
         if args.periods:
             args.lookback = args.periods
-    if args.command in ("value", "diagnose", "cache") and args.periods:
+    if args.command in ("value", "diagnose", "cache", "throughput") and args.periods:
         parser.error(f"{args.command} does not accept periods")
     if args.vs and args.command != "diagnose":
         parser.error("--vs requires diagnose")
@@ -1863,8 +1870,9 @@ def main(argv: list[str] | None = None):
     if args.lookback and not args.pace:
         parser.error("--lookback requires --pace")
     if args.quota_json and not (args.pace or args.quota_history or args.value
-                                or args.command in ("diagnose", "cache")):
-        parser.error("--quota-json requires pace, value, diagnose, cache, or --quota-history")
+                                or args.command in ("diagnose", "cache", "throughput")):
+        parser.error("--quota-json requires pace, value, diagnose, cache, throughput, "
+                     "or --quota-history")
     if args.all_buckets and not args.pace:
         parser.error("--all-buckets requires --pace")
     if args.model_mix and not args.pace:
