@@ -22,9 +22,6 @@ Source = "https://github.com/wakamex/clanker-analytics"
 [project.scripts]
 clanker-analytics = "clanker_analytics.main:main"
 
-[dependency-groups]
-dev = ["pytest"]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -9,12 +9,13 @@ from pathlib import Path
 from unittest import mock
 
 import duckdb
-import pytest
 
 import clanker_analytics.main as main_mod
 from clanker_analytics.main import COST_PER_ROW, fmt, register_macros, detect_plans
 from clanker_analytics.pricing import TOOL_PROVIDERS, price_tokens
 import model_prices
+
+from support import Case, approx, raises
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +132,9 @@ def _write_aop_result(
 # Source loader tests
 # ===========================================================================
 
-class TestSourceLoaders:
-    def test_codex_uses_own_session_metadata_once(self, tmp_path):
+class TestSourceLoaders(Case):
+    def test_codex_uses_own_session_metadata_once(self):
+        tmp_path = self.tmp_path
         session_id = "019fceda-3070-71e2-b533-349e787d37ac"
         path = tmp_path / f"rollout-2026-08-04T18-17-13-{session_id}.jsonl"
         rows = [
@@ -198,9 +200,9 @@ class TestSourceLoaders:
         assert result[0][18] == "2026-08-04T22:17:14.000Z"
         assert result[0][19] == "default"
 
-    @pytest.mark.parametrize(
-        ("metadata", "expected"),
-        [
+    def test_codex_execution_type(self):
+        tmp_path = self.tmp_path
+        for metadata, expected in [
             ({"thread_source": "user", "originator": "codex-tui", "source": "cli"},
              "interactive"),
             ({"originator": "codex_exec", "source": "exec"}, "exec"),
@@ -210,43 +212,43 @@ class TestSourceLoaders:
                 "originator": "codex_exec",
                 "source": "exec",
             }, "subagent"),
-        ],
-    )
-    def test_codex_execution_type(self, tmp_path, metadata, expected):
-        path = tmp_path / f"{expected}.jsonl"
-        rows = [
-            {
-                "timestamp": "2026-08-04T22:17:13.971Z",
-                "type": "session_meta",
-                "payload": {"id": expected, "cwd": "/code/project", **metadata},
-            },
-            {
-                "timestamp": "2026-08-04T22:17:14.000Z",
-                "type": "event_msg",
-                "payload": {
-                    "type": "token_count",
-                    "info": {
-                        "total_token_usage": {"total_tokens": 100},
-                        "last_token_usage": {
-                            "total_tokens": 100,
-                            "input_tokens": 70,
-                            "output_tokens": 10,
-                            "cached_input_tokens": 20,
+        ]:
+            with self.subTest(metadata=metadata, expected=expected):
+                path = tmp_path / f"{expected}.jsonl"
+                rows = [
+                    {
+                        "timestamp": "2026-08-04T22:17:13.971Z",
+                        "type": "session_meta",
+                        "payload": {"id": expected, "cwd": "/code/project", **metadata},
+                    },
+                    {
+                        "timestamp": "2026-08-04T22:17:14.000Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {"total_tokens": 100},
+                                "last_token_usage": {
+                                    "total_tokens": 100,
+                                    "input_tokens": 70,
+                                    "output_tokens": 10,
+                                    "cached_input_tokens": 20,
+                                },
+                            },
                         },
                     },
-                },
-            },
-        ]
-        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                ]
+                path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-        result = duckdb.sql(
-            main_mod._codex_sql(main_mod._sql_literal(path.as_posix()))
-        ).fetchone()
+                result = duckdb.sql(
+                    main_mod._codex_sql(main_mod._sql_literal(path.as_posix()))
+                ).fetchone()
 
-        assert result[10] == expected
-        assert result[11] == metadata.get("cwd", "/code/project")
+                assert result[10] == expected
+                assert result[11] == metadata.get("cwd", "/code/project")
 
-    def test_codex_excludes_fork_replay_and_keeps_weekly_quota(self, tmp_path):
+    def test_codex_excludes_fork_replay_and_keeps_weekly_quota(self):
+        tmp_path = self.tmp_path
         session_id = "019ffa59-948d-72f0-bc73-2e1b6b4880cd"
         path = tmp_path / f"rollout-{session_id}.jsonl"
         rows = [{
@@ -304,7 +306,8 @@ class TestSourceLoaders:
         assert result[0][18] == "2026-08-13T05:00:12.000Z"
         assert result[0][20:] == (41.0, 1787200000, 10080, "codex")
 
-    def test_claude_includes_subagents_but_not_compaction_duplicates(self, tmp_path):
+    def test_claude_includes_subagents_but_not_compaction_duplicates(self):
+        tmp_path = self.tmp_path
         root = tmp_path / "session.jsonl"
         subagents = tmp_path / "subagents"
         subagents.mkdir()
@@ -339,7 +342,8 @@ class TestSourceLoaders:
 
         assert sorted(row[11] for row in rows) == ["interactive", "subagent"]
 
-    def test_claude_reads_one_hour_cache_writes(self, tmp_path):
+    def test_claude_reads_one_hour_cache_writes(self):
+        tmp_path = self.tmp_path
         def assistant(uuid, usage):
             return {"type": "assistant", "uuid": uuid, "sessionId": "s", "cwd": "/code/demo",
                     "isSidechain": False,
@@ -362,7 +366,8 @@ class TestSourceLoaders:
 
         assert rows == [(400, 0), (500, 300)]
 
-    def test_agy_uses_exact_retained_usage_and_attributes_project(self, tmp_path):
+    def test_agy_uses_exact_retained_usage_and_attributes_project(self):
+        tmp_path = self.tmp_path
         session = "11111111-2222-3333-4444-555555555555"
         path = tmp_path / "brain" / session / ".system_generated" / "logs"
         path.mkdir(parents=True)
@@ -435,26 +440,30 @@ class TestSourceLoaders:
     SERVED = b'"\x10465011cf2a4ad107\x9a\x01\x0egemini-default\xa2\x01#\n\nmodel_enum'
     SELECTED = b"\xaa\x01\x17Gemini 3.5 Flash (High)"
 
-    def test_agy_model_is_the_selected_model_recorded_by_each_call(self, tmp_path):
+    def test_agy_model_is_the_selected_model_recorded_by_each_call(self):
+        tmp_path = self.tmp_path
         blobs = [self.SERVED + self.SELECTED, self.SERVED + self.SELECTED, self.SERVED]
 
         assert self._agy_session_model(tmp_path, blobs) == "gemini-3.5-flash-high"
 
-    def test_agy_model_falls_back_to_the_noted_model_selection(self, tmp_path):
+    def test_agy_model_falls_back_to_the_noted_model_selection(self):
+        tmp_path = self.tmp_path
         note = (b"The user changed setting `Model Selection` from None to "
                 b"Gemini 3.7 Flash (High). No need to acknowledge this.")
         served = b'"\x10ed9d840ced35d80d\x9a\x01\x16gemini-3.7-flash-exp-a\xa2\x01'
 
         assert self._agy_session_model(tmp_path, [note + served, served]) == "gemini-3.7-flash-high"
 
-    def test_agy_model_falls_back_to_the_serving_name(self, tmp_path):
+    def test_agy_model_falls_back_to_the_serving_name(self):
+        tmp_path = self.tmp_path
         served = b'"\x10ed9d840ced35d80d\x9a\x01\x10gemini-3.7-flash\xa2\x01#\n\nmodel_enum'
         # The same tag inside message content, without the request hash, does not count.
         mention = b"content listing \x9a\x01\x0egpt-transcribe as a text mention"
 
         assert self._agy_session_model(tmp_path, [served, mention, mention]) == "gemini-3.7-flash"
 
-    def test_agy_estimates_cumulative_turns_and_classifies_tool_results(self, tmp_path):
+    def test_agy_estimates_cumulative_turns_and_classifies_tool_results(self):
+        tmp_path = self.tmp_path
         session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         transcript = tmp_path / "brain" / session / ".system_generated" / "logs" / "transcript_full.jsonl"
         transcript.parent.mkdir(parents=True)
@@ -518,7 +527,8 @@ class TestSourceLoaders:
             "2026-08-14T12:00:04Z",
         ]
 
-    def test_agy_metadata_filters_internal_trajectories(self, tmp_path):
+    def test_agy_metadata_filters_internal_trajectories(self):
+        tmp_path = self.tmp_path
         brain = tmp_path / "brain"
         kept = "11111111-1111-1111-1111-111111111111"
         internal = "22222222-2222-2222-2222-222222222222"
@@ -547,7 +557,8 @@ class TestSourceLoaders:
 
         assert [row[2] for row in rows] == [kept]
 
-    def test_gemini_timestamp_schema_shape_is_cast_before_slicing(self, tmp_path):
+    def test_gemini_timestamp_schema_shape_is_cast_before_slicing(self):
+        tmp_path = self.tmp_path
         chat = tmp_path / "tmp" / ("a" * 64) / "chats" / "session.json"
         chat.parent.mkdir(parents=True)
         chat.write_text(json.dumps({
@@ -564,8 +575,10 @@ class TestSourceLoaders:
         assert row[2:4] == ("session", "2026-08-14")
 
 
-class TestAOPSourceLoader:
-    def test_discovers_neighboring_and_nested_repositories(self, tmp_path, monkeypatch):
+class TestAOPSourceLoader(Case):
+    def test_discovers_neighboring_and_nested_repositories(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         current = tmp_path / "workspace" / "current"
         (current / ".git").mkdir(parents=True)
         nearby = tmp_path / "workspace" / "nearby" / ".aop" / "runs" / "one" / "result.json"
@@ -587,9 +600,9 @@ class TestAOPSourceLoader:
         assert all(item.tool == main_mod.AOP_RESULT_TOOL for item in files.values())
         assert dir_count == 2
 
-    @pytest.mark.parametrize(
-        ("provider", "inference_provider", "tool", "expected"),
-        [
+    def test_uses_provider_independent_token_semantics(self):
+        tmp_path = self.tmp_path
+        for provider, inference_provider, tool, expected in [
             ("agy", None, "Agy", (70, 10, 30, 110)),
             ("claude", None, "Claude Code", (70, 10, 30, 110)),
             ("codex", None, "Codex", (70, 10, 30, 110)),
@@ -601,39 +614,36 @@ class TestAOPSourceLoader:
             ("hermes", None, "Hermes", (70, 10, 30, 110)),
             ("zcode", None, "Zcode", (70, 10, 30, 110)),
             ("dsh", "anthropic", "DeepSeek Harness", (70, 10, 30, 110)),
-        ],
-    )
-    def test_uses_provider_independent_token_semantics(
-        self, tmp_path, provider, inference_provider, tool, expected
-    ):
-        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(
-            result_path,
-            provider=provider,
-            inference_provider=inference_provider,
-        )
+        ]:
+            with self.subTest(provider=provider, inference_provider=inference_provider, tool=tool, expected=expected):
+                result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+                _write_aop_result(
+                    result_path,
+                    provider=provider,
+                    inference_provider=inference_provider,
+                )
 
-        relation = duckdb.sql(main_mod._aop_sql(
-            main_mod._sql_literal(result_path.as_posix())
-        ))
-        columns = [item[0] for item in relation.description]
-        row = dict(zip(columns, relation.fetchone()))
+                relation = duckdb.sql(main_mod._aop_sql(
+                    main_mod._sql_literal(result_path.as_posix())
+                ))
+                columns = [item[0] for item in relation.description]
+                row = dict(zip(columns, relation.fetchone()))
 
-        assert row["tool"] == tool
-        assert (
-            row["input_tokens"], row["output_tokens"],
-            row["cache_read_tokens"], row["total_tokens"],
-        ) == expected
-        assert row["project"] == "project"
-        assert row["project_path"] == result_path.parents[3].as_posix() + "/.aop/worktrees/task-1"
-        assert row["execution_type"] == "subagent"
-        assert row["token_count_type"] == "exact"
-        assert row["source_kind"] == "aop"
-        assert row["cost_usd"] == 0.25
+                assert row["tool"] == tool
+                assert (
+                    row["input_tokens"], row["output_tokens"],
+                    row["cache_read_tokens"], row["total_tokens"],
+                ) == expected
+                assert row["project"] == "project"
+                assert row["project_path"] == result_path.parents[3].as_posix() + "/.aop/worktrees/task-1"
+                assert row["execution_type"] == "subagent"
+                assert row["token_count_type"] == "exact"
+                assert row["source_kind"] == "aop"
+                assert row["cost_usd"] == 0.25
 
-    @pytest.mark.parametrize(
-        ("provider", "expected"),
-        [
+    def test_normalizes_unversioned_aop_usage(self):
+        tmp_path = self.tmp_path
+        for provider, expected in [
             ("agy", (100, 10, 30, 140)),
             ("claude", (70, 10, 30, 110)),
             ("codex", (70, 10, 30, 110)),
@@ -643,35 +653,36 @@ class TestAOPSourceLoader:
             ("grok", (70, 10, 30, 110)),
             ("hermes", (70, 10, 30, 110)),
             ("opencode", (70, 15, 30, 115)),
-        ],
-    )
-    def test_normalizes_unversioned_aop_usage(self, tmp_path, provider, expected):
-        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(result_path, provider=provider)
-        value = json.loads(result_path.read_text())
-        value.pop("usage_schema")
-        value.pop("accounting_status")
-        result_path.write_text(json.dumps(value))
+        ]:
+            with self.subTest(provider=provider, expected=expected):
+                result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+                _write_aop_result(result_path, provider=provider)
+                value = json.loads(result_path.read_text())
+                value.pop("usage_schema")
+                value.pop("accounting_status")
+                result_path.write_text(json.dumps(value))
 
-        row = duckdb.sql(main_mod._aop_sql(
-            main_mod._sql_literal(result_path.as_posix())
-        )).fetchone()
+                row = duckdb.sql(main_mod._aop_sql(
+                    main_mod._sql_literal(result_path.as_posix())
+                )).fetchone()
 
-        assert (row[5], row[6], row[8], row[9]) == expected
+                assert (row[5], row[6], row[8], row[9]) == expected
 
-    def test_rejects_unknown_aop_usage_schema(self, tmp_path):
+    def test_rejects_unknown_aop_usage_schema(self):
+        tmp_path = self.tmp_path
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(result_path)
         value = json.loads(result_path.read_text())
         value["usage_schema"] = "aop-token-usage-v3"
         result_path.write_text(json.dumps(value))
 
-        with pytest.raises(duckdb.Error, match="unsupported AOP token usage schema"):
+        with raises(duckdb.Error, match="unsupported AOP token usage schema"):
             duckdb.sql(main_mod._aop_sql(
                 main_mod._sql_literal(result_path.as_posix())
             )).fetchall()
 
-    def test_accepts_legacy_v1_aop_usage(self, tmp_path):
+    def test_accepts_legacy_v1_aop_usage(self):
+        tmp_path = self.tmp_path
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(
             result_path,
@@ -685,7 +696,8 @@ class TestAOPSourceLoader:
 
         assert (row[5], row[6], row[8], row[9]) == (70, 10, 30, 110)
 
-    def test_accepts_usage_bearing_partial_v2_accounting(self, tmp_path):
+    def test_accepts_usage_bearing_partial_v2_accounting(self):
+        tmp_path = self.tmp_path
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(result_path, accounting_status="partial")
 
@@ -695,64 +707,64 @@ class TestAOPSourceLoader:
 
         assert (row[5], row[6], row[8], row[9]) == (70, 10, 30, 110)
 
-    @pytest.mark.parametrize("accounting_status", ["partial", "unavailable"])
-    def test_ignores_v2_accounting_without_usage(
-        self, tmp_path, accounting_status
-    ):
-        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(result_path)
-        value = json.loads(result_path.read_text())
-        value["accounting_status"] = accounting_status
-        value["usage"] = None
-        value["calculated_cost"] = None
-        if accounting_status == "partial":
-            value["provider_reported_cost"] = {
-                "amount_usd": 0.25,
-                "currency": "USD",
-                "source": "provider",
-            }
-        result_path.write_text(json.dumps(value))
+    def test_ignores_v2_accounting_without_usage(self):
+        tmp_path = self.tmp_path
+        for accounting_status in ["partial", "unavailable"]:
+            with self.subTest(accounting_status=accounting_status):
+                result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+                _write_aop_result(result_path)
+                value = json.loads(result_path.read_text())
+                value["accounting_status"] = accounting_status
+                value["usage"] = None
+                value["calculated_cost"] = None
+                if accounting_status == "partial":
+                    value["provider_reported_cost"] = {
+                        "amount_usd": 0.25,
+                        "currency": "USD",
+                        "source": "provider",
+                    }
+                result_path.write_text(json.dumps(value))
 
-        rows = duckdb.sql(main_mod._aop_sql(
-            main_mod._sql_literal(result_path.as_posix())
-        )).fetchall()
+                rows = duckdb.sql(main_mod._aop_sql(
+                    main_mod._sql_literal(result_path.as_posix())
+                )).fetchall()
 
-        assert rows == []
+                assert rows == []
 
-    @pytest.mark.parametrize("accounting_status", [None, "future"])
-    def test_rejects_invalid_v2_accounting_status(
-        self, tmp_path, accounting_status
-    ):
-        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(result_path)
-        value = json.loads(result_path.read_text())
-        if accounting_status is None:
-            value.pop("accounting_status")
-        else:
-            value["accounting_status"] = accounting_status
-        result_path.write_text(json.dumps(value))
+    def test_rejects_invalid_v2_accounting_status(self):
+        tmp_path = self.tmp_path
+        for accounting_status in [None, "future"]:
+            with self.subTest(accounting_status=accounting_status):
+                result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+                _write_aop_result(result_path)
+                value = json.loads(result_path.read_text())
+                if accounting_status is None:
+                    value.pop("accounting_status")
+                else:
+                    value["accounting_status"] = accounting_status
+                result_path.write_text(json.dumps(value))
 
-        with pytest.raises(duckdb.Error, match="unsupported AOP accounting status"):
-            duckdb.sql(main_mod._aop_sql(
-                main_mod._sql_literal(result_path.as_posix())
-            )).fetchall()
+                with raises(duckdb.Error, match="unsupported AOP accounting status"):
+                    duckdb.sql(main_mod._aop_sql(
+                        main_mod._sql_literal(result_path.as_posix())
+                    )).fetchall()
 
-    @pytest.mark.parametrize(
-        ("overrides", "message"),
-        [
+    def test_aop_fixture_rejects_invalid_contract(self):
+        tmp_path = self.tmp_path
+        for overrides, message in [
             ({"input_tokens": -1}, "cannot be negative"),
             ({"cached_input_tokens": 101}, "cached input cannot exceed input"),
             ({"reasoning_output_tokens": 11}, "reasoning output cannot exceed output"),
             ({"accounting_status": "unavailable"}, "requires complete or partial"),
-        ],
-    )
-    def test_aop_fixture_rejects_invalid_contract(self, tmp_path, overrides, message):
-        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        ]:
+            with self.subTest(overrides=overrides, message=message):
+                result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
 
-        with pytest.raises(ValueError, match=message):
-            _write_aop_result(result_path, **overrides)
+                with raises(ValueError, match=message):
+                    _write_aop_result(result_path, **overrides)
 
-    def test_resume_runs_aggregate_without_native_double_counting(self, tmp_path):
+    def test_resume_runs_aggregate_without_native_double_counting(self):
+        tmp_path = self.tmp_path
         first = tmp_path / "project" / ".aop" / "runs" / "one" / "result.json"
         second = tmp_path / "project" / ".aop" / "runs" / "two" / "result.json"
         _write_aop_result(first, run_id="run-1", session_id="resumed", cost_usd=0.25)
@@ -828,7 +840,7 @@ def add_zcode_requests(connection: sqlite3.Connection, requests: list[tuple]) ->
     connection.commit()
 
 
-class TestZcodeSourceLoader:
+class TestZcodeSourceLoader(Case):
     def _configure(self, tmp_path, monkeypatch):
         cache_dir = tmp_path / "cache"
         monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
@@ -849,7 +861,9 @@ class TestZcodeSourceLoader:
         main_mod.load_tokens(db, refresh=False)
         return db
 
-    def test_normalizes_requests_with_inclusive_input_counts(self, tmp_path, monkeypatch):
+    def test_normalizes_requests_with_inclusive_input_counts(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         path = self._configure(tmp_path, monkeypatch)
         # 2026-09-27T14:11:47.654Z
         connection = _write_zcode_db(path, [
@@ -873,11 +887,13 @@ class TestZcodeSourceLoader:
              "subagent", "2026-09-27T14:11:47.654Z"),
         ]
         cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
-        assert cost == pytest.approx(
+        assert cost == approx(
             (100 * 1.40 + 900 * 0.26 + 50 * 4.40 + 100 * 0.15 + 10 * 0.50) / 1e6
         )
 
-    def test_requests_are_timed_at_completion(self, tmp_path, monkeypatch):
+    def test_requests_are_timed_at_completion(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         path = self._configure(tmp_path, monkeypatch)
         connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790522685219, 10, 1, 0, 0)])
         connection.execute("UPDATE model_usage SET completed_at = 1790522692694")
@@ -888,7 +904,9 @@ class TestZcodeSourceLoader:
 
         assert db.sql("SELECT timestamp FROM tokens").fetchone()[0] == "2026-09-27T15:24:52.694Z"
 
-    def test_usage_limit_errors_become_full_quota_observations(self, tmp_path, monkeypatch):
+    def test_usage_limit_errors_become_full_quota_observations(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         path = self._configure(tmp_path, monkeypatch)
         connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790518307654, 10, 1, 0, 0)])
         connection.executemany(
@@ -918,7 +936,9 @@ class TestZcodeSourceLoader:
             (0, 0, 100.0, 1790536317, 300, "5h"),
         ]
 
-    def test_cache_refreshes_when_only_the_write_ahead_log_changes(self, tmp_path, monkeypatch):
+    def test_cache_refreshes_when_only_the_write_ahead_log_changes(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         path = self._configure(tmp_path, monkeypatch)
         connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790518307654, 10, 1, 0, 0)])
         assert self._load().sql("SELECT count(*) FROM tokens").fetchone()[0] == 1
@@ -933,7 +953,7 @@ class TestZcodeSourceLoader:
 # fmt() tests
 # ===========================================================================
 
-class TestOneHourCachePricing:
+class TestOneHourCachePricing(Case):
     def test_one_hour_cache_writes_cost_more_than_five_minute_ones(self):
         db = duckdb.connect()
         db.execute(f"CREATE TABLE tokens ({main_mod.TOKEN_SCHEMA})")
@@ -953,10 +973,10 @@ class TestOneHourCachePricing:
         price_tokens(db, all_rows=True)
 
         costs = db.sql("SELECT execution_type, api_cost_usd FROM tokens ORDER BY 1").fetchall()
-        assert costs == [("interactive", pytest.approx(8.0)), ("subagent", pytest.approx(5.0))]
+        assert costs == [("interactive", approx(8.0)), ("subagent", approx(5.0))]
 
 
-class TestFmt:
+class TestFmt(Case):
     def test_billions(self):
         assert fmt(1_500_000_000) == "1.5B"
 
@@ -986,7 +1006,7 @@ class TestFmt:
 # share.py formatter tests
 # ===========================================================================
 
-class TestShareFormatters:
+class TestShareFormatters(Case):
     def test_fmt_cost_large(self):
         from clanker_analytics.share import _fmt_cost
         assert _fmt_cost(3841.5) == "$3,842"
@@ -1069,7 +1089,7 @@ class TestShareFormatters:
 # Token counting / data shape tests
 # ===========================================================================
 
-class TestTokenCounting:
+class TestTokenCounting(Case):
     def test_all_tools_present(self):
         db = _make_db(*ALL_ROWS)
         tools = sorted(r[0] for r in db.sql("SELECT DISTINCT tool FROM tokens").fetchall())
@@ -1126,27 +1146,28 @@ class TestTokenCounting:
 # Cost calculation tests
 # ===========================================================================
 
-class TestCostCalculation:
+class TestCostCalculation(Case):
     @staticmethod
     def _cost(*rows):
         return _make_db(*rows).sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
 
-    @pytest.mark.parametrize("row", [SONNET_ROW, OPUS_ROW, HAIKU_ROW, GEMINI_ROW])
-    def test_rows_are_priced_by_model_prices_at_their_date(self, row):
-        tool, _, _, date, model, uncached, output, written, read, _ = row
-        expected = model_prices.cost(
-            model, provider=TOOL_PROVIDERS[tool], at=date, input_tokens=uncached,
-            output_tokens=output, cache_write_tokens=written, cache_read_tokens=read,
-        )
+    def test_rows_are_priced_by_model_prices_at_their_date(self):
+        for row in [SONNET_ROW, OPUS_ROW, HAIKU_ROW, GEMINI_ROW]:
+            with self.subTest(row=row):
+                tool, _, _, date, model, uncached, output, written, read, _ = row
+                expected = model_prices.cost(
+                    model, provider=TOOL_PROVIDERS[tool], at=date, input_tokens=uncached,
+                    output_tokens=output, cache_write_tokens=written, cache_read_tokens=read,
+                )
 
-        assert expected is not None
-        assert self._cost(row) == pytest.approx(expected)
+                assert expected is not None
+                assert self._cost(row) == approx(expected)
 
     def test_opus_5_5_uses_its_own_rates(self):
         row = ("Claude Code", "p", "s", "2026-09-25", "claude-opus-5-5",
                1000, 100, 200, 10000, 11300)
 
-        assert self._cost(row) == pytest.approx(
+        assert self._cost(row) == approx(
             (1000 * 4 + 100 * 20 + 200 * 5 + 10000 * 0.20) / 1e6
         )
 
@@ -1154,35 +1175,36 @@ class TestCostCalculation:
         before = ("Codex", "p", "s", "2026-08-20", "gpt-5.6-sol", 1000, 100, 0, 0, 1100)
         after = ("Codex", "p", "s", "2026-09-01", "gpt-5.6-sol", 1000, 100, 0, 0, 1100)
 
-        assert self._cost(before) == pytest.approx((1000 * 5 + 100 * 30) / 1e6)
-        assert self._cost(after) == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
+        assert self._cost(before) == approx((1000 * 5 + 100 * 30) / 1e6)
+        assert self._cost(after) == approx((1000 * 4 + 100 * 20) / 1e6)
 
     def test_current_prices_reprice_every_row(self):
         db = _make_db(("Codex", "p", "s", "2026-08-20", "gpt-5.6-sol", 1000, 100, 0, 0, 1100))
 
         current = db.sql("SELECT sum(current_api_cost_usd) FROM tokens").fetchone()[0]
-        assert current == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
+        assert current == approx((1000 * 4 + 100 * 20) / 1e6)
 
     def test_deepseek_peak_hours_use_the_request_time(self):
         peak = ("DeepSeek Harness", "p", "s", "2026-09-30", "deepseek-flash",
                 1000, 0, 0, 0, 1000, "2026-09-30T02:00:00Z")
         off_peak = peak[:10] + ("2026-09-30T12:00:00Z",)
 
-        assert self._cost(peak) == pytest.approx(1000 * 0.30 / 1e6)
-        assert self._cost(off_peak) == pytest.approx(1000 * 0.15 / 1e6)
+        assert self._cost(peak) == approx(1000 * 0.30 / 1e6)
+        assert self._cost(off_peak) == approx(1000 * 0.15 / 1e6)
 
-    @pytest.mark.parametrize("context_tokens", [272000, 272001])
-    def test_long_context_tier_applies_per_request(self, context_tokens):
-        uncached, written = 1000, 500
-        cached = context_tokens - uncached - written
-        row = ("Codex", "proj", "s", "2026-09-20", "gpt-6-astra",
-               uncached, 200, written, cached, context_tokens + 200)
-        rates = (20, 25, 2, 75) if context_tokens > 272000 else (10, 12.5, 1, 50)
-        expected = 2 * (uncached * rates[0] + written * rates[1] + cached * rates[2]
-                        + 200 * rates[3]) / 1e6
+    def test_long_context_tier_applies_per_request(self):
+        for context_tokens in [272000, 272001]:
+            with self.subTest(context_tokens=context_tokens):
+                uncached, written = 1000, 500
+                cached = context_tokens - uncached - written
+                row = ("Codex", "proj", "s", "2026-09-20", "gpt-6-astra",
+                       uncached, 200, written, cached, context_tokens + 200)
+                rates = (20, 25, 2, 75) if context_tokens > 272000 else (10, 12.5, 1, 50)
+                expected = 2 * (uncached * rates[0] + written * rates[1] + cached * rates[2]
+                                + 200 * rates[3]) / 1e6
 
-        # Two standard requests remain standard even when their aggregate exceeds the limit.
-        assert self._cost(row, row) == pytest.approx(expected)
+                # Two standard requests remain standard even when their aggregate exceeds the limit.
+                assert self._cost(row, row) == approx(expected)
 
     def test_unknown_models_stay_unpriced(self):
         db = _make_db(CODEX_ROW)
@@ -1213,7 +1235,7 @@ class TestCostCalculation:
 # DuckDB macro tests
 # ===========================================================================
 
-class TestMacros:
+class TestMacros(Case):
     def test_fmt_macro(self):
         db = _make_db(SONNET_ROW)
         result = db.sql("SELECT fmt(9700)").fetchone()[0]
@@ -1239,7 +1261,7 @@ class TestMacros:
 # Query shape tests (summary rows)
 # ===========================================================================
 
-class TestQueries:
+class TestQueries(Case):
     def test_project_query_has_summary_rows(self):
         from clanker_analytics.main import QUERIES
         db = _make_db(*ALL_ROWS)
@@ -1310,7 +1332,7 @@ class TestQueries:
 # Plan detection tests
 # ===========================================================================
 
-class TestPlanDetection:
+class TestPlanDetection(Case):
     def test_claude_max_20x(self):
         with mock.patch("subprocess.run") as m:
             m.return_value = mock.Mock(returncode=0, stdout='{"plan":"max_20x"}')
@@ -1401,15 +1423,16 @@ class TestPlanDetection:
             return mock.Mock(returncode=0, stdout=outputs.get(module, "{}"))
         with mock.patch("subprocess.run", side_effect=fake_run):
             plans = detect_plans()
-        assert sum(c for _, c in plans.values()) == pytest.approx(419.99)
+        assert sum(c for _, c in plans.values()) == approx(419.99)
 
 
 # ===========================================================================
 # Chart generation tests
 # ===========================================================================
 
-class TestChartGeneration:
-    def test_generate_creates_png(self, tmp_path):
+class TestChartGeneration(Case):
+    def test_generate_creates_png(self):
+        tmp_path = self.tmp_path
         db = _make_db(*ALL_ROWS)
         import clanker_analytics.share as share_mod
         orig = share_mod.OUTPUT
@@ -1422,7 +1445,8 @@ class TestChartGeneration:
         finally:
             share_mod.OUTPUT = orig
 
-    def test_generate_with_plans(self, tmp_path):
+    def test_generate_with_plans(self):
+        tmp_path = self.tmp_path
         db = _make_db(*ALL_ROWS)
         import clanker_analytics.share as share_mod
         orig = share_mod.OUTPUT
@@ -1434,7 +1458,8 @@ class TestChartGeneration:
         finally:
             share_mod.OUTPUT = orig
 
-    def test_generate_empty_data_returns_none(self, tmp_path):
+    def test_generate_empty_data_returns_none(self):
+        tmp_path = self.tmp_path
         db = _make_db()  # empty
         import clanker_analytics.share as share_mod
         orig = share_mod.OUTPUT
@@ -1445,7 +1470,8 @@ class TestChartGeneration:
         finally:
             share_mod.OUTPUT = orig
 
-    def test_bar_chart_for_single_date(self, tmp_path):
+    def test_bar_chart_for_single_date(self):
+        tmp_path = self.tmp_path
         """<=3 dates -> bar chart."""
         rows = [r for r in ALL_ROWS if r[3] == "2026-03-15"]
         db = _make_db(*rows)
@@ -1458,7 +1484,8 @@ class TestChartGeneration:
         finally:
             share_mod.OUTPUT = orig
 
-    def test_area_chart_for_many_dates(self, tmp_path):
+    def test_area_chart_for_many_dates(self):
+        tmp_path = self.tmp_path
         """>3 dates -> area chart."""
         db = _make_db(*ALL_ROWS)
         for i in range(10, 15):
@@ -1482,7 +1509,7 @@ class TestChartGeneration:
 # Empty / edge case tests
 # ===========================================================================
 
-class TestEdgeCases:
+class TestEdgeCases(Case):
     def test_empty_table_returns_no_data(self):
         db = _make_db()
         count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
@@ -1517,7 +1544,7 @@ class TestEdgeCases:
 # Windows path tests
 # ===========================================================================
 
-class TestWindowsPaths:
+class TestWindowsPaths(Case):
     def test_home_backslash_replaced(self):
         home = "C:\\Users\\Test".replace("\\", "/")
         assert home == "C:/Users/Test"
@@ -1531,8 +1558,10 @@ class TestWindowsPaths:
 # Debug / profiling tests
 # ===========================================================================
 
-class TestDebugHooks:
-    def test_source_scan_discovers_only_canonical_agy_transcript(self, tmp_path, monkeypatch):
+class TestDebugHooks(Case):
+    def test_source_scan_discovers_only_canonical_agy_transcript(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         brain = tmp_path / "antigravity-cli" / "brain"
         logs = brain / "session" / ".system_generated" / "logs"
         chunks = logs / "chunks" / "transcript_full"
@@ -1556,7 +1585,9 @@ class TestDebugHooks:
         assert files[canonical.as_posix()].tool == "Agy"
         assert dir_count == 1
 
-    def test_sources_mtime_includes_gemini_json(self, tmp_path, monkeypatch):
+    def test_sources_mtime_includes_gemini_json(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         claude_dir = tmp_path / "claude"
         claude_dir.mkdir()
         (claude_dir / "session.jsonl").write_text("{}")
@@ -1581,7 +1612,9 @@ class TestDebugHooks:
         assert dir_count == 2
         assert scan_seconds >= 0
 
-    def test_incremental_cache_updates_only_changed_files(self, tmp_path, monkeypatch):
+    def test_incremental_cache_updates_only_changed_files(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         src_dir = tmp_path / "src"
         src_dir.mkdir()
         file_a = src_dir / "a.jsonl"
@@ -1654,7 +1687,9 @@ class TestDebugHooks:
         assert any(sample.label == "append changed files" for sample in timer.samples)
         assert not any(sample.label.startswith("probe ") for sample in timer.samples)
 
-    def test_incremental_cache_removes_deleted_files(self, tmp_path, monkeypatch):
+    def test_incremental_cache_removes_deleted_files(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         src_dir = tmp_path / "src"
         src_dir.mkdir()
         file_a = src_dir / "a.jsonl"
@@ -1721,8 +1756,9 @@ class TestDebugHooks:
         assert any(sample.label == "drop changed rows" for sample in timer.samples)
         assert not any(sample.label == "append changed files" for sample in timer.samples)
 
-    def test_agy_resume_replaces_cached_session_without_double_counting(
-            self, tmp_path, monkeypatch):
+    def test_agy_resume_replaces_cached_session_without_double_counting(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         brain = tmp_path / "brain"
         transcript = brain / "session" / ".system_generated" / "logs" / "transcript_full.jsonl"
         transcript.parent.mkdir(parents=True)
@@ -1777,7 +1813,9 @@ class TestDebugHooks:
         assert any(sample.label == "drop changed rows" for sample in timer.samples)
         assert any(sample.label == "append changed files" for sample in timer.samples)
 
-    def test_agy_metadata_change_reattributes_cached_session(self, tmp_path, monkeypatch):
+    def test_agy_metadata_change_reattributes_cached_session(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         session = "11111111-2222-3333-4444-555555555555"
         brain = tmp_path / "brain"
         transcript = brain / session / ".system_generated" / "logs" / "transcript_full.jsonl"
@@ -1831,7 +1869,9 @@ class TestDebugHooks:
         assert db2.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/two"
         assert any(sample.label == "append changed files" for sample in timer.samples)
 
-    def test_aop_cache_appends_new_resume_result(self, tmp_path, monkeypatch):
+    def test_aop_cache_appends_new_resume_result(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         project = tmp_path / "project"
         (project / ".git").mkdir(parents=True)
         first = project / ".aop" / "runs" / "one" / "result.json"
@@ -1877,7 +1917,8 @@ class TestDebugHooks:
         metadata = json.loads((cache_dir / "tokens-meta.json").read_text())
         assert set(metadata["files"]) == {first.as_posix(), second.as_posix()}
 
-    def test_debug_timing_flag_prints_summary(self, capsys):
+    def test_debug_timing_flag_prints_summary(self):
+        capsys = self.capsys
         def fake_run(args, timer):
             timer.note("cache hit")
             timer.record("load tokens", 0.01, "cached")
@@ -1892,7 +1933,8 @@ class TestDebugHooks:
         assert "cache hit" in captured.err
         assert "load tokens" in captured.err
 
-    def test_profile_flag_prints_summary(self, capsys):
+    def test_profile_flag_prints_summary(self):
+        capsys = self.capsys
         def fake_run(args, timer):
             return 0
 
@@ -1937,7 +1979,7 @@ class TestDebugHooks:
 # CLI integration tests
 # ===========================================================================
 
-class TestCLI:
+class TestCLI(Case):
     def test_console_entrypoint(self):
         executable = Path(sys.executable).with_name("clanker-analytics")
         if sys.platform == "win32":
@@ -1966,11 +2008,12 @@ class TestCLI:
         assert "0." in result.stdout  # version number present
 
 
-class TestPlanSettings:
-    @pytest.mark.parametrize("value", ["zcode", "nope=18", "agy=18", "zcode=0", "codex=pro_999"])
-    def test_plan_rejects_invalid_values(self, value):
-        with pytest.raises(SystemExit):
-            main_mod.main(["value", "--plan", value])
+class TestPlanSettings(Case):
+    def test_plan_rejects_invalid_values(self):
+        for value in ["zcode", "nope=18", "agy=18", "zcode=0", "codex=pro_999"]:
+            with self.subTest(value=value):
+                with raises(SystemExit):
+                    main_mod.main(["value", "--plan", value])
 
     def test_plan_accepts_plan_ids_and_prices(self):
         captured = {}
@@ -1985,7 +2028,8 @@ class TestPlanSettings:
             ("Claude Code", ("custom", 100.0)), ("Codex", ("pro_500", 500)),
         ]
 
-    def test_config_file_names_plans(self, tmp_path):
+    def test_config_file_names_plans(self):
+        tmp_path = self.tmp_path
         from clanker_analytics.pricing import configured_plans
         config = tmp_path / "config.toml"
         config.write_text('[plans]\ncodex = "pro_100"\ngemini = 199.99\n')
@@ -1994,10 +2038,12 @@ class TestPlanSettings:
             "Codex": ("pro_100", 100), "Gemini": ("custom", 199.99),
         }
         config.write_text('[plans]\ngemini = "ultra"\n')
-        with pytest.raises(ValueError, match="ultra_100, ultra_200"):
+        with raises(ValueError, match="ultra_100, ultra_200"):
             configured_plans(config)
 
-    def test_command_line_overrides_config_and_detection(self, tmp_path, monkeypatch):
+    def test_command_line_overrides_config_and_detection(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
         from clanker_analytics.pricing import configured_plans
         config = tmp_path / "config.toml"
         config.write_text('[plans]\ncodex = "pro_100"\nclaude = "max_5x"\n')

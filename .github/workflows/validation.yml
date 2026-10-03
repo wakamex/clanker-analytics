@@ -16,5 +16,5 @@ jobs:
         with:
           version: "0.11.29"
       - run: uv --no-config lock --check
-      - run: uv --no-config run --locked pytest
+      - run: uv --no-config run --locked python -m unittest discover -s tests
       - run: uv --no-config build --no-sources
