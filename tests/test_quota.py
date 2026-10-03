@@ -2,10 +2,13 @@
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
+import subprocess
 
 import duckdb
 import pytest
 
+from clanker_analytics import quota
 from clanker_analytics.quota import (
     QuotaSample,
     build_quota_history,
@@ -97,6 +100,28 @@ def test_anthropic_adapter_classifies_windows_by_plan(plan, expected):
 
     assert samples[0].window_kind == expected
     assert samples[0].resets_at == "2026-08-25T13:00:00Z"
+
+
+def test_claude_snapshots_record_the_logged_in_organization(tmp_path, monkeypatch):
+    config = tmp_path / "claude"
+    config.mkdir()
+    (config / ".claude.json").write_text(json.dumps(
+        {"oauthAccount": {"organizationUuid": "org-second", "emailAddress": "x@example.com"}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    output = json.dumps({"plan": "max_20x", "updated_at": "2026-10-03T01:14:00Z",
+                         "7d": {"pct": 1, "resets_at": "2026-10-09T14:00:00Z"}})
+    monkeypatch.setattr(quota.subprocess, "run",
+                        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, output, ""))
+
+    samples = quota.collect_provider("anthropic")
+
+    assert {sample.account_key for sample in samples} == {"org-second"}
+
+
+def test_claude_snapshots_without_an_account_file_keep_the_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    assert quota.claude_account_key() is None
 
 
 def test_zai_adapter_maps_credit_windows_and_keeps_fractional_usage():

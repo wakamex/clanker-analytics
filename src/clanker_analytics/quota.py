@@ -319,6 +319,22 @@ NORMALIZERS = {
 }
 
 
+def claude_account_key() -> str | None:
+    """The organization of the Claude login in use, from Claude Code's .claude.json.
+
+    ccusage reports quota for whichever login holds Claude Code's credentials but not
+    which one it is, so snapshots from two logins would otherwise share one account.
+    Claude Code keeps .claude.json in CLAUDE_CONFIG_DIR when that is set, else in home.
+    """
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = Path(override) / ".claude.json" if override else Path.home() / ".claude.json"
+    try:
+        account = json.loads(path.read_text()).get("oauthAccount") or {}
+    except (OSError, ValueError):
+        return None
+    return account.get("organizationUuid") or None
+
+
 def _collector_command(provider: str) -> list[str] | None:
     if provider == "anthropic":
         return [sys.executable, "-m", "ccusage", "json"]
@@ -344,6 +360,8 @@ def collect_provider(provider: str, timeout: int = 30) -> list[QuotaSample]:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"{provider}: collector returned invalid JSON") from error
+    if provider == "anthropic" and not data.get("account_key"):
+        data["account_key"] = claude_account_key()
     return NORMALIZERS[provider](data, collected_at)
 
 
