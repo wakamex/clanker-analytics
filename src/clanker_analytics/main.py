@@ -6,7 +6,7 @@ import cProfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -79,7 +79,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 21
+CACHE_SCHEMA_VERSION = 22
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -1675,6 +1675,25 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             else:
                 db.execute(f"DELETE FROM tokens WHERE tool != {_sql_literal(tool_name)}")
 
+    if args.command in ("diagnose", "cache"):
+        from clanker_analytics.diagnose import (
+            build_cache_health, build_diagnosis, print_cache_health, print_diagnosis,
+        )
+        now = datetime.now(timezone.utc)
+        recent = _since_delta(args.since, now, default="3d" if args.command == "diagnose" else "7d")
+        if args.command == "diagnose":
+            report = build_diagnosis(db, recent, timedelta(seconds=args.vs or 7 * 86400), now,
+                                     limit=min(args.limit, 10))
+            print(json.dumps(report, indent=2) if args.quota_json else "", end="")
+            if not args.quota_json:
+                print_diagnosis(report)
+        else:
+            report = build_cache_health(db, now - recent, limit=min(args.limit, 10))
+            print(json.dumps(report, indent=2, default=str) if args.quota_json else "", end="")
+            if not args.quota_json:
+                print_cache_health(report)
+        return 0
+
     # Apply --since filter
     if args.since:
         with timer.span("filter since", args.since):
@@ -1728,6 +1747,17 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     return 0
 
 
+def _since_delta(since: str | None, now: datetime, default: str) -> timedelta:
+    """A --since value, either a duration such as 3d or a start date, as a span ending now."""
+    from clanker_analytics.quota import parse_duration
+    value = since or default
+    try:
+        return timedelta(seconds=parse_duration(value))
+    except ValueError:
+        start = datetime.fromisoformat(value)
+        return now - (start if start.tzinfo else start.replace(tzinfo=timezone.utc))
+
+
 def main(argv: list[str] | None = None):
     from clanker_analytics.quota import DEFAULT_DB_PATH, parse_duration
 
@@ -1748,8 +1778,10 @@ def main(argv: list[str] | None = None):
 
     parser = argparse.ArgumentParser(description="AI coding tool token analytics")
     parser.add_argument(
-        "command", nargs="?", choices=["pace", "value"],
-        help="Run a report command: pace (accepts optional duration arguments) or value",
+        "command", nargs="?", choices=["pace", "value", "diagnose", "cache"],
+        help="Run a report command: pace (accepts optional duration arguments), value, "
+             "diagnose (what changed in the --since period against the --vs period before "
+             "it), or cache (prompt-cache health over --since)",
     )
     parser.add_argument(
         "periods", nargs="*", type=duration, metavar="PERIOD",
@@ -1764,6 +1796,8 @@ def main(argv: list[str] | None = None):
                         help="Max rows to display (default: 50)")
     parser.add_argument("--sql", type=str,
                         help="Run custom SQL against the 'tokens' table")
+    parser.add_argument("--vs", type=duration, metavar="DURATION",
+                        help="For diagnose: the baseline period before --since (default: 7d)")
     parser.add_argument("--since", type=str,
                         help="Only include data since date (e.g. 24h, 7d, 2026-03-01)")
     parser.add_argument("--chart", action="store_true", default=True,
@@ -1821,13 +1855,16 @@ def main(argv: list[str] | None = None):
         args.pace = True
         if args.periods:
             args.lookback = args.periods
-    if args.command == "value" and args.periods:
-        parser.error("value does not accept periods")
+    if args.command in ("value", "diagnose", "cache") and args.periods:
+        parser.error(f"{args.command} does not accept periods")
+    if args.vs and args.command != "diagnose":
+        parser.error("--vs requires diagnose")
     args.value = args.command == "value"
     if args.lookback and not args.pace:
         parser.error("--lookback requires --pace")
-    if args.quota_json and not (args.pace or args.quota_history or args.value):
-        parser.error("--quota-json requires pace, value, or --quota-history")
+    if args.quota_json and not (args.pace or args.quota_history or args.value
+                                or args.command in ("diagnose", "cache")):
+        parser.error("--quota-json requires pace, value, diagnose, cache, or --quota-history")
     if args.all_buckets and not args.pace:
         parser.error("--all-buckets requires --pace")
     if args.model_mix and not args.pace:

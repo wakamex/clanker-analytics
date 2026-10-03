@@ -42,6 +42,9 @@ clanker-analytics pace --model-mix       # include the model mix column
 clanker-analytics --quota-history        # implied full-quota API cost for every observed period
 clanker-analytics value                  # API-equivalent value of each subscription vs its price
 clanker-analytics value --plan codex=pro_500     # what-if with a different plan or price
+clanker-analytics diagnose                 # what changed in the last 3 days vs the 7 before
+clanker-analytics diagnose --since 2d --vs 5d    # choose both periods
+clanker-analytics cache                    # prompt-cache health over the last 7 days
 clanker-analytics --quota-history --quota-json
 clanker-analytics --prices current       # reprice all usage at today's API rates
 clanker-analytics --refresh              # force cache rebuild
@@ -177,6 +180,21 @@ The included service expects the executable at `~/.local/bin/clanker-analytics`,
 `uv tool install clanker-analytics` installs it by default.
 
 `--debug-timing` prints cache decisions and per-stage timings. `--profile` adds a Python `cProfile` summary; it is mainly useful for filesystem scanning and Python-side overhead, not DuckDB query execution time.
+
+## Diagnosing a jump in usage
+
+`diagnose` compares the `--since` period (default 3 days) with the `--vs` period before it (default 7 days), per day so periods of different length compare. It reports API-equivalent cost, output tokens, cost per million output tokens, requests, the share of prompt tokens read from cache, cache writes, and cold starts, then breaks the change in cost down by tool, project, thread (main conversation or subagent), session, and token type, largest first.
+
+`cache` reports how well prompt caching worked over `--since` (default 7 days), by tool and thread and for the sessions whose cache misses cost most:
+
+- Read from cache: the share of prompt tokens served from the cache.
+- Discount: what caching saved on prompt tokens compared with sending them uncached, next to the best a fully warm cache could achieve. Each model's own cache price sets the best case, such as 95% off for Claude Opus 5.5 and 90% for most others.
+- Miss cost: what was paid beyond a fully warm cache.
+- 1h writes: the share of cache writes that went to Anthropic's one-hour cache, which Claude Code uses for the main conversation; subagents use the five-minute cache unless `subagentPromptCacheTtl` is set.
+- Reads per write: how many times each cached token was read. A five-minute write pays off after one read and a one-hour write after two.
+- Cold starts: requests that wrote nearly their whole prompt to the cache, split into a transcript's first request, those that came after idling longer than the cache lifetime, and the rest, with the cost of the ones after idling.
+
+It ends with an estimate of what Claude Code subagents would have paid for prompt tokens on the one-hour cache, which turns their cold starts after five minutes to an hour of idling into cache reads at a higher write price.
 
 ## Columns
 

@@ -86,11 +86,19 @@ def configured_plans(path: Path = CONFIG_PATH) -> dict[str, tuple[str, float]]:
         raise ValueError(f"{path}: {error}") from None
 
 
+# Columns holding each row's cost when it ran, split by token type, then the row's whole
+# prompt priced as uncached input and as cache reads, which bound what caching achieved.
+COST_PARTS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
+PROMPT_BOUNDS = ("prompt_uncached", "prompt_read")
+
+
 def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
-    """Yield (rowid, cost when run, cost at today's prices) for each fetched row."""
+    """Yield (rowid, cost when run, cost at today's prices, the cost when run split into
+    COST_PARTS, then PROMPT_BOUNDS) for each fetched row."""
     for rowid, tool, model, timestamp, date, uncached, output, written, read, written_1h in rows:
         at = timestamp or date
         historical = current = None
+        parts: tuple = (None,) * (len(COST_PARTS) + len(PROMPT_BOUNDS))
         if model and at:
             # cache_write_tokens counts both cache lifetimes; the one-hour part is priced apart.
             written_1h = written_1h or 0
@@ -100,13 +108,21 @@ def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
                 "cache_write_1h_tokens": written_1h, "cache_read_tokens": read or 0,
             }
             try:
-                historical = model_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
-                                             at=at, **usage)
+                found = model_prices.rates(model, provider=TOOL_PROVIDERS.get(tool), at=at)
+                if found is not None:
+                    breakdown = found.breakdown(**usage)
+                    historical = breakdown.total
+                    prompt = sum(usage[key] for key in (
+                        "input_tokens", "cache_read_tokens", "cache_write_tokens",
+                        "cache_write_1h_tokens"))
+                    parts = (*(getattr(breakdown, part) for part in COST_PARTS),
+                             found.breakdown(input_tokens=prompt).input,
+                             found.breakdown(cache_read_tokens=prompt).cache_read)
                 current = model_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
                                           at=at, prices_at=today, **usage)
             except ValueError:
                 pass
-        yield rowid, historical, current
+        yield rowid, historical, current, *parts
 
 
 def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
@@ -117,7 +133,9 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     """
     columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     for column, kind in (("api_cost_usd", "DOUBLE"), ("current_api_cost_usd", "DOUBLE"),
-                         ("pricing", "VARCHAR"), ("cache_write_1h_tokens", "INT")):
+                         ("pricing", "VARCHAR"), ("cache_write_1h_tokens", "INT"),
+                         *((f"api_{part}_usd", "DOUBLE")
+                           for part in (*COST_PARTS, *PROMPT_BOUNDS))):
         if column not in columns:
             db.execute(f"ALTER TABLE tokens ADD COLUMN {column} {kind}")
     selected = "true" if all_rows else "pricing IS NULL"
@@ -136,10 +154,13 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
             csv.writer(stream).writerows(_price_rows(rows, datetime.now(timezone.utc)))
         db.execute(f"""
             UPDATE tokens SET api_cost_usd = prices.historical,
-                              current_api_cost_usd = prices.current
+                              current_api_cost_usd = prices.current,
+                              {", ".join(f"api_{part}_usd = prices.{part}"
+                                         for part in (*COST_PARTS, *PROMPT_BOUNDS))}
             FROM read_csv('{path.as_posix()}', header = false, auto_detect = false,
                           delim = ',', columns = {{
-                'id': 'BIGINT', 'historical': 'DOUBLE', 'current': 'DOUBLE'}}) prices
+                'id': 'BIGINT', 'historical': 'DOUBLE', 'current': 'DOUBLE',
+                {", ".join(f"'{part}': 'DOUBLE'" for part in (*COST_PARTS, *PROMPT_BOUNDS))}}}) prices
             WHERE tokens.rowid = prices.id
         """)
     db.execute(f"""
