@@ -134,7 +134,9 @@ For each period it uses the chronologically last nonzero quota observation, tota
 
 Model-scoped buckets, such as Claude's per-model weekly limits or Antigravity's Gemini group, count only matching models. Reset timestamps are rounded to a five-minute anchor when grouping observations, because Codex emits slightly different reset timestamps into concurrent sessions and recorded snapshots can differ from log observations by a few seconds. Zero-percent fragments are skipped. AOP runs count toward the tool that executed them, at their start time, because they draw on the same subscription. An AOP run that neither model-prices nor AOP could price adds tokens but no cost and flags the period `unpriced_models`.
 
-`value` summarizes what each subscription is worth at API prices. For each tool it takes the latest weekly period from the quota history that is more than 15 percent used, since extrapolating a barely used week to a full quota is too noisy. Tools without such a week are omitted. It reports:
+Claude quota snapshots record which login they came from, using the organization in Claude Code's `.claude.json`, so switching between two Claude logins keeps their quota periods apart. Snapshots recorded before this were all filed under one account; each is reassigned to a labeled login whose weekly quota resets at the same time of week, since every account keeps its own reset time, and the rest stay under `default`. A period's usage starts no earlier than the last snapshot of another login of the same tool, which marks the switch.
+
+`value` summarizes what each subscription is worth at API prices. Each login of a tool is reported as its own subscription. For each tool it takes the latest weekly period from the quota history that is more than 15 percent used, since extrapolating a barely used week to a full quota is too noisy. Tools without such a week are omitted. It reports:
 
 - The implied full-week and monthly API-equivalent value, using 365.25 / 12 / 7 weeks per month.
 - The monthly plan price and the value as a multiple of it.

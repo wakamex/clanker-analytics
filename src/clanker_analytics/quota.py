@@ -554,6 +554,7 @@ def _token_window(db: Any, tool: str, start: datetime, end: datetime,
 def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Iterable[int],
                  cost_expression: str, include_inactive: bool = False,
                  pricing_basis: str = "") -> dict[str, Any]:
+    assign_claude_accounts(connection)
     requested = sorted(set(lookbacks))
     buckets = []
     hidden_bucket_count = 0
@@ -776,7 +777,8 @@ QUOTA_OBSERVATION_COLUMNS = """
     resets_at BIGINT,
     observed_at TIMESTAMPTZ,
     used_pct DOUBLE,
-    model_patterns VARCHAR[]
+    model_patterns VARCHAR[],
+    account VARCHAR
 """
 
 
@@ -808,8 +810,48 @@ def _recorder_observations(connection: sqlite3.Connection) -> list[tuple]:
             observed,
             sample["used_pct"],
             _model_patterns(sample),
+            sample["account_key"],
         ))
     return observations
+
+
+def _weekly_anchor(resets_at: str | None) -> int | None:
+    """A weekly reset's position within the week, in five-minute steps, which stays the
+    same for one account from week to week."""
+    reset = _parse_time(resets_at)
+    return None if reset is None else round(reset.timestamp() % 604800 / 300) % 2016
+
+
+def assign_claude_accounts(connection: sqlite3.Connection) -> int:
+    """Label older Claude snapshots recorded before snapshots named their login.
+
+    A snapshot without an account gets the account of labeled snapshots whose weekly quota
+    resets at the same time of week, since each account keeps its own reset time. Snapshots
+    matching no labeled account stay "default". Returns the number of snapshots relabeled.
+    """
+    labeled: dict[int, str] = {}
+    for account, resets_at in connection.execute("""
+        SELECT account_key, resets_at FROM quota_samples
+        WHERE provider = 'anthropic' AND bucket_id = '7d' AND account_key != 'default'
+    """).fetchall():
+        anchor = _weekly_anchor(resets_at)
+        if anchor is not None:
+            labeled[anchor] = account
+    if not labeled:
+        return 0
+    changed = 0
+    for effective_at, resets_at in connection.execute("""
+        SELECT DISTINCT effective_at, resets_at FROM quota_samples
+        WHERE provider = 'anthropic' AND bucket_id = '7d' AND account_key = 'default'
+    """).fetchall():
+        account = labeled.get(_weekly_anchor(resets_at))
+        if account:
+            changed += connection.execute("""
+                UPDATE quota_samples SET account_key = ?
+                WHERE provider = 'anthropic' AND account_key = 'default' AND effective_at = ?
+            """, (account, effective_at)).rowcount
+    connection.commit()
+    return changed
 
 
 def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
@@ -831,7 +873,8 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             quota_resets_at,
             try_cast(timestamp AS TIMESTAMPTZ),
             quota_used_pct,
-            []::VARCHAR[]
+            []::VARCHAR[],
+            'default'
         FROM tokens
         WHERE source_kind = 'native'
           AND quota_used_pct IS NOT NULL
@@ -840,10 +883,11 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
           AND quota_window_minutes IS NOT NULL
     """)
     if quota_connection is not None:
+        assign_claude_accounts(quota_connection)
         recorded = _recorder_observations(quota_connection)
         if recorded:
             token_db.executemany(
-                "INSERT INTO quota_observations VALUES (?, ?, ?, ?, ?, ?, ?)", recorded
+                "INSERT INTO quota_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?)", recorded
             )
     rows = token_db.execute(f"""
         WITH observations AS (
@@ -858,10 +902,20 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
                 min(observed_at) as first_observed_at,
                 max(observed_at) as observed_at,
                 count(*)::BIGINT as observation_count,
-                any_value(model_patterns) as model_patterns
+                any_value(model_patterns) as model_patterns,
+                account
             FROM quota_observations
             WHERE observed_at IS NOT NULL
-            GROUP BY quota_tool, canonical_resets_at, window_minutes, limit_id
+            GROUP BY quota_tool, canonical_resets_at, window_minutes, limit_id, account
+        ), active AS (
+            -- A period's usage starts no earlier than the last snapshot of another account
+            -- of the same tool before it, which marks a switch between logins.
+            SELECT o.*, (
+                SELECT max(q.observed_at) FROM quota_observations q
+                WHERE q.tool = o.quota_tool AND q.account != o.account
+                  AND q.observed_at < o.first_observed_at
+            ) as other_account_seen
+            FROM observations o
         )
         SELECT
             o.quota_tool,
@@ -873,6 +927,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             cast(o.first_observed_at AS VARCHAR) as first_observed_at,
             cast(o.observed_at AS VARCHAR) as observed_at,
             o.observation_count,
+            o.account,
             coalesce(nullif(t.model, ''), 'unknown') as model,
             coalesce(nullif(t.rate_mode, ''), 'default') as rate_mode,
             coalesce(t.source_kind, 'native') as source_kind,
@@ -885,19 +940,21 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             coalesce(sum(t.cache_read_tokens), 0)::BIGINT as cache_read_tokens,
             coalesce(sum(t.total_tokens), 0)::BIGINT as total_tokens,
             coalesce(sum({cost_expression}), 0)::DOUBLE as api_cost_usd
-        FROM observations o
+        FROM active o
         LEFT JOIN tokens t
           ON t.tool = o.quota_tool
          AND try_cast(t.timestamp AS TIMESTAMPTZ)
              >= to_timestamp(o.quota_resets_at)
                 - o.quota_window_minutes * INTERVAL '1 minute'
+         AND try_cast(t.timestamp AS TIMESTAMPTZ)
+             > coalesce(o.other_account_seen, '-infinity'::TIMESTAMPTZ)
          AND try_cast(t.timestamp AS TIMESTAMPTZ) <= o.observed_at
          AND (len(o.model_patterns) = 0
               OR len(list_filter(o.model_patterns, pattern -> lower(t.model) LIKE pattern)) > 0)
         GROUP BY
             o.quota_tool, o.quota_resets_at, o.quota_window_minutes, o.quota_limit_id,
             o.last_used_pct, o.max_used_pct, o.first_observed_at,
-            o.observed_at, o.observation_count,
+            o.observed_at, o.observation_count, o.account,
             coalesce(nullif(t.model, ''), 'unknown'),
             coalesce(nullif(t.rate_mode, ''), 'default'),
             coalesce(t.source_kind, 'native')
@@ -925,6 +982,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             "first_observed_at": _time_text(row["first_observed_at"]),
             "window_minutes": row["quota_window_minutes"],
             "limit_id": row["quota_limit_id"],
+            "account": row["account"],
             "used_pct": float(row["last_used_pct"]),
             "max_used_pct": float(row["max_used_pct"]),
             "observation_count": row["observation_count"],
@@ -1054,19 +1112,21 @@ PLAN_TOOLS = {"Agy": "Gemini"}
 
 def build_value_report(history: dict[str, Any],
                        plans: dict[str, tuple[str, float]]) -> dict[str, Any]:
-    """Compare each tool's latest weekly full-quota API value with its plan price."""
-    latest: dict[str, dict[str, Any]] = {}
+    """Compare each tool's latest weekly full-quota API value with its plan price, for each
+    account the tool was used with."""
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
     for period in history["periods"]:
         if (period["window_minutes"] != 7 * 24 * 60 or period["total_tokens"] <= 0
                 or period["used_pct"] <= VALUE_MIN_USED_PCT):
             continue
-        current = latest.get(period["tool"])
+        key = (period["tool"], period.get("account") or "default")
+        current = latest.get(key)
         rank = (period["resets_at"], period["used_pct"])
         if current is None or rank > current["rank"]:
-            latest[period["tool"]] = {"rank": rank, "period": period}
+            latest[key] = {"rank": rank, "period": period}
 
     tools = []
-    for tool, entry in sorted(latest.items()):
+    for (tool, account), entry in sorted(latest.items()):
         period = entry["period"]
         weekly = period["full_quota_api_equivalent_cost_estimate_usd"]
         monthly = weekly * WEEKS_PER_MONTH
@@ -1078,6 +1138,7 @@ def build_value_report(history: dict[str, Any],
         )
         tools.append({
             "tool": tool,
+            "account": account,
             "plan": plan,
             "plan_usd_per_month": price,
             "limit_id": period["limit_id"],
@@ -1109,8 +1170,10 @@ def print_value_report(report: dict[str, Any]) -> None:
     rows = []
     for item in report["tools"]:
         multiple = item["api_equivalent_multiple"]
+        account = item.get("account") or "default"
         rows.append([
             item["tool"],
+            account if account == "default" else account[:8],
             item["plan"] or "-",
             money(item["plan_usd_per_month"]),
             item["resets_at"][:10],
@@ -1123,16 +1186,17 @@ def print_value_report(report: dict[str, Any]) -> None:
             ",".join(item["pricing_flags"]) or "-",
         ])
     headers = [
-        "tool", "plan", "price/mo", "week ending", "used", "full week", "month",
+        "tool", "account", "plan", "price/mo", "week ending", "used", "full week", "month",
         "multiple", "api $/1M", "effective $/1M", "pricing flags",
     ]
-    for line in _format_table(headers, rows, {2, 4, 5, 6, 7, 8, 9}):
+    for line in _format_table(headers, rows, {3, 5, 6, 7, 8, 9, 10}):
         print(line)
     print(
         "\nFull week: API-equivalent value of 100% of the latest weekly quota period "
         f"more than {VALUE_MIN_USED_PCT}% used. "
         f"Month: full week x {report['weeks_per_month']:.3f}. $/1M uses that week's own "
-        "token mix, counting input, cache, and output tokens."
+        "token mix, counting input, cache, and output tokens. Each account of a tool is a "
+        "separate subscription; the plan shown is the one detected or configured for the tool."
     )
 
 

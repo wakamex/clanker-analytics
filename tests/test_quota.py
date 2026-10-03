@@ -540,6 +540,55 @@ def test_quota_history_combines_recorded_snapshots_and_embedded_limit_hits(tmp_p
     assert [item["model"] for item in fable["model_mix"]] == ["claude-fable-5-1"]
 
 
+def _claude_snapshot(when, used, resets_at, account=None):
+    data = {"plan": "max_20x", "updated_at": when, "7d": {"pct": used, "resets_at": resets_at}}
+    if account:
+        data["account_key"] = account
+    return normalize_anthropic(data, datetime.fromisoformat(when.replace("Z", "+00:00")))
+
+
+def test_two_claude_logins_get_separate_quota_periods_and_value(tmp_path):
+    db = duckdb.connect()
+    db.execute("""
+        CREATE TABLE tokens (
+            tool VARCHAR, model VARCHAR, rate_mode VARCHAR, source_kind VARCHAR,
+            input_tokens BIGINT, output_tokens BIGINT, cache_write_tokens BIGINT,
+            cache_read_tokens BIGINT, total_tokens BIGINT, cost_usd DOUBLE,
+            timestamp VARCHAR, quota_used_pct DOUBLE, quota_resets_at BIGINT,
+            quota_window_minutes INTEGER, quota_limit_id VARCHAR, pricing VARCHAR
+        )
+    """)
+    # $30 of usage on the first login, then $10 after switching to the second login,
+    # whose week began before the switch.
+    db.executemany(
+        "INSERT INTO tokens VALUES ('Claude Code', 'claude-opus-5-5', '', 'native', "
+        "0, 0, 0, 0, 100, ?, ?, NULL, NULL, NULL, NULL, 'model-prices')",
+        [(30.0, "2026-10-02T20:00:00Z"), (10.0, "2026-10-03T05:00:00Z")],
+    )
+    with connect(tmp_path / "quota.sqlite3") as connection:
+        insert_samples(connection, [
+            # The first login, recorded before snapshots named their login.
+            *_claude_snapshot("2026-10-03T01:00:00Z", 60, "2026-10-06T13:00:00Z"),
+            # The second login: one snapshot before labeling, then a labeled one.
+            *_claude_snapshot("2026-10-03T01:20:00Z", 5, "2026-10-09T14:00:00Z"),
+            *_claude_snapshot("2026-10-03T06:00:00Z", 25, "2026-10-09T14:00:00Z", "org-two"),
+        ])
+        report = build_quota_history(db, "cost_usd", "test-rate-card", connection)
+        relabeled = tuple(connection.execute(
+            "SELECT account_key FROM quota_samples WHERE effective_at LIKE '2026-10-03T01:20%'"
+        ).fetchone())
+
+    assert relabeled == ("org-two",)
+    weeks = {item["account"]: item for item in report["periods"] if item["limit_id"].endswith("7d")}
+    assert set(weeks) == {"default", "org-two"}
+    # Each login's week counts only its own usage, split at the first login's last snapshot.
+    assert weeks["default"]["api_equivalent_cost_usd"] == 30
+    assert weeks["org-two"]["api_equivalent_cost_usd"] == 10
+    value = build_value_report(report, {"Claude Code": ("max_20x", 200.0)})
+    assert [(item["account"], item["full_week_api_equivalent_usd"]) for item in value["tools"]] == [
+        ("default", 50.0), ("org-two", 40.0)]
+
+
 def test_quota_history_counts_aop_runs_on_the_same_subscription():
     db = duckdb.connect()
     db.execute("""
