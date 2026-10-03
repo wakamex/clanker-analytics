@@ -560,9 +560,21 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
     hidden_bucket_count = 0
     collecting_bucket_count = 0
     current_samples = latest_samples(connection)
+    # Only the login in use is paced: another account of the same provider with newer
+    # snapshots means this one was switched away from, and local usage is no longer its own.
+    newest = {}
+    for sample in current_samples:
+        newest[sample["provider"]] = max(newest.get(sample["provider"], ""), sample["effective_at"])
     for current in current_samples:
         now = _parse_time(current["effective_at"])
         if now is None:
+            continue
+        if current["effective_at"] < newest[current["provider"]] and any(
+                other["provider"] == current["provider"]
+                and other["account_key"] != current["account_key"]
+                and other["effective_at"] > current["effective_at"]
+                for other in current_samples):
+            hidden_bucket_count += 1
             continue
         tool = PROVIDER_TO_TOOL.get(current["provider"])
         model_patterns = _model_patterns(current)

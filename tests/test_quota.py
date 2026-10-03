@@ -218,6 +218,25 @@ def test_fixed_window_lookback_does_not_cross_reset(tmp_path):
     assert bucket["lookbacks"][0]["quality"] == "collecting_history"
 
 
+def test_pace_skips_a_login_that_was_switched_away_from(tmp_path):
+    with connect(tmp_path / "quota.sqlite3") as quota_db:
+        insert_samples(quota_db, [
+            *_claude_snapshot("2026-10-03T01:00:00Z", 99, "2026-10-06T13:00:00Z", "org-one"),
+            *_claude_snapshot("2026-10-03T06:00:00Z", 25, "2026-10-09T14:00:00Z", "org-two"),
+        ])
+        token_db = duckdb.connect()
+        token_db.execute("""
+            CREATE TABLE tokens (
+                tool VARCHAR, model VARCHAR, rate_mode VARCHAR,
+                total_tokens BIGINT, cost_usd DOUBLE, timestamp VARCHAR
+            )
+        """)
+        report = build_report(quota_db, token_db, [parse_duration("6h")], "cost_usd",
+                              include_inactive=True)
+
+    assert {bucket["account_key"] for bucket in report["buckets"]} == {"org-two"}
+
+
 def test_snapshot_insert_is_idempotent(tmp_path):
     with connect(tmp_path / "quota.sqlite3") as db:
         assert insert_samples(db, [_sample("2026-08-21T06:00:00Z", 14)]) == 1
