@@ -28,7 +28,7 @@ DIMENSIONS = {
     "tool": "tool",
     "project": "project",
     "thread": "execution_type",
-    "session": "project || ' ' || CASE WHEN session LIKE 'rollout-%' THEN right(session, 8) ELSE left(session, 8) END",
+    "session": "project || ' ' || CASE WHEN tool = 'Codex' THEN right(session, 8) ELSE left(session, 8) END",
 }
 
 
@@ -176,7 +176,7 @@ def build_cache_health(db: duckdb.DuckDBPyConnection, since: datetime, limit: in
     return {
         "since": since.isoformat(),
         "by_thread": rows("tool || ' ' || execution_type"),
-        "by_session": rows("project || ' ' || CASE WHEN session LIKE 'rollout-%' THEN right(session, 8) ELSE left(session, 8) END || ' ' || execution_type"),
+        "by_session": rows("project || ' ' || CASE WHEN tool = 'Codex' THEN right(session, 8) ELSE left(session, 8) END || ' ' || execution_type"),
         "one_hour_subagents": _simulate_one_hour_subagents(db),
     }
 

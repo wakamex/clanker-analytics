@@ -191,6 +191,8 @@ class TestSourceLoaders(Case):
 
         assert len(result) == 1
         assert result[0][1] == "child"
+        # Keyed by the thread id, as AOP records it for a run of this session.
+        assert result[0][2] == session_id
         assert result[0][4] == "gpt-5.6-sol"
         assert result[0][5] == 50
         assert result[0][8] == 20
@@ -805,6 +807,27 @@ class TestAOPSourceLoader(Case):
         assert db.sql("SELECT sum(turn_count) FROM tokens").fetchone()[0] == 2
         assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0] == 0.75
 
+
+    def test_aop_run_without_a_model_takes_the_model_its_session_ran(self):
+        tmp_path = self.tmp_path
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path, session_id="resumed", model=None, cost_usd=None)
+        source_expr = main_mod._sql_file_list([result_path.as_posix()])
+        db = duckdb.connect()
+        register_macros(db)
+        db.execute("CREATE TABLE tokens AS " + main_mod._aop_sql(source_expr))
+        db.execute("""
+            INSERT INTO tokens (tool, session, model, total_tokens, source_kind, source_file)
+            VALUES ('Codex', 'resumed', 'gpt-5.6-sol', 900, 'native', '/native/one.jsonl'),
+                   ('Codex', 'resumed', 'gpt-5.5', 100, 'native', '/native/one.jsonl'),
+                   ('Codex', 'other', 'gpt-5.5', 5000, 'native', '/native/two.jsonl')
+        """)
+
+        main_mod._deduplicate_aop(db, main_mod.DebugTimer(False))
+
+        assert db.sql("SELECT session, model, source_kind FROM tokens ORDER BY session").fetchall() == [
+            ("other", "gpt-5.5", "native"), ("resumed", "gpt-5.6-sol", "aop"),
+        ]
 
 def _write_zcode_db(path: Path, requests: list[tuple]) -> sqlite3.Connection:
     """Create a minimal Zcode database; each request is

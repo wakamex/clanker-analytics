@@ -80,7 +80,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 22
+CACHE_SCHEMA_VERSION = 23
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -383,7 +383,9 @@ token_entries AS (
 SELECT
     'Codex' as tool,
     lower(coalesce(p.project, regexp_extract(t.filename, '([^/]+)[.]jsonl', 1))) as project,
-    regexp_extract(t.filename, '([^/]+)[.]jsonl', 1) as session,
+    -- The thread id ending the rollout file name, which AOP also records for the run.
+    coalesce(nullif(regexp_extract(t.filename, '([0-9a-f]{{8}}(-[0-9a-f]{{4}}){{3}}-[0-9a-f]{{12}})[.]jsonl$', 1), ''),
+             regexp_extract(t.filename, '([^/]+)[.]jsonl', 1)) as session,
     left(cast(t.timestamp as VARCHAR), 10) as date,
     coalesce(t.model, '') as model,
     t.input_tokens, t.output_tokens, t.cache_write_tokens, t.cache_read_tokens,
@@ -1426,6 +1428,23 @@ def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
     if "source_kind" not in columns:
         return
     with timer.span("deduplicate AOP sessions"):
+        # A run started without a model records none; take the model the session's
+        # native log says it ran, by most tokens, before those rows are dropped.
+        db.execute("""
+            UPDATE tokens SET model = native.model
+            FROM (
+                SELECT tool, session, arg_max(model, tokens) AS model
+                FROM (
+                    SELECT tool, session, model, sum(total_tokens) AS tokens
+                    FROM tokens
+                    WHERE coalesce(source_kind, 'native') != 'aop' AND coalesce(model, '') != ''
+                    GROUP BY ALL
+                )
+                GROUP BY ALL
+            ) AS native
+            WHERE tokens.source_kind = 'aop' AND coalesce(tokens.model, '') = ''
+              AND tokens.tool = native.tool AND tokens.session = native.session
+        """)
         db.execute("""
             DELETE FROM tokens
             WHERE coalesce(source_kind, 'native') != 'aop'
