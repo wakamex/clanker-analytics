@@ -21,6 +21,7 @@ import duckdb
 
 from clanker_analytics.pricing import (
     configured_plans, plan_choice, plan_price, price_tokens, pricing_basis,
+    refresh_prices,
 )
 
 HOME = os.path.expanduser("~").replace("\\", "/")
@@ -1600,6 +1601,8 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     db = duckdb.connect()
     with timer.span("register macros"):
         register_macros(db)
+    with timer.span("refresh prices"):
+        refresh_prices()
     with timer.span("load tokens"):
         load_tokens(db, args.refresh, timer)
     if args.prices == "current":
@@ -1685,6 +1688,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         if args.command == "diagnose":
             report = build_diagnosis(db, recent, timedelta(seconds=args.vs or 7 * 86400), now,
                                      limit=min(args.limit, 10))
+            report["pricing_basis"] = basis
             print(json.dumps(report, indent=2) if args.quota_json else "", end="")
             if not args.quota_json:
                 print_diagnosis(report)
@@ -1695,6 +1699,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
                 print_throughput(report)
         else:
             report = build_cache_health(db, now - recent, limit=min(args.limit, 10))
+            report["pricing_basis"] = basis
             print(json.dumps(report, indent=2, default=str) if args.quota_json else "", end="")
             if not args.quota_json:
                 print_cache_health(report)
@@ -1726,6 +1731,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     if args.table:
         with timer.span("render table", args.by):
             db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
+        print(f"pricing: {basis}")
         return 0
 
     # Default: chart mode

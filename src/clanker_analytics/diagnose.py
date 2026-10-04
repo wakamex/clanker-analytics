@@ -242,6 +242,8 @@ def print_diagnosis(report: dict[str, Any]) -> None:
                [[item["key"], _money(item["baseline_per_day"]), _money(item["recent_per_day"]),
                  ("+" if item["change_per_day"] >= 0 else "-") + _money(abs(item["change_per_day"]))]
                 for item in items])
+    if "pricing_basis" in report:
+        print(f"\npricing: {report['pricing_basis']}")
 
 
 def print_cache_health(report: dict[str, Any]) -> None:
@@ -269,6 +271,8 @@ def print_cache_health(report: dict[str, Any]) -> None:
               f"With the one-hour cache (subagentPromptCacheTtl \"1h\") they would have paid about "
               f"{_money(simulation['one_hour'])}, {'saving' if saved >= 0 else 'costing'} "
               f"{_money(abs(saved))} ({abs(saved) / simulation['actual']:.0%}).")
+    if "pricing_basis" in report:
+        print(f"\npricing: {report['pricing_basis']}")
 
 
 def build_throughput(db: duckdb.DuckDBPyConnection, since: datetime,

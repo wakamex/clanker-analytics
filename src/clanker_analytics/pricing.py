@@ -39,6 +39,12 @@ def pricing_basis() -> str:
     return model_prices.pricing_basis()
 
 
+def refresh_prices() -> None:
+    """Use the newest published price data, downloading it when the local copy is a day old.
+    A failed download keeps the local copy and warns."""
+    model_prices.refresh()
+
+
 # Tool names accepted in plan settings, for the tools whose usage package reports a plan.
 PLAN_KEYS = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini", "zcode": "Zcode"}
 

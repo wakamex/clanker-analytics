@@ -14,7 +14,7 @@ dependencies = [
     "gemini-cli-usage>=0.1.5",
     "agy-usage>=0.1.6",
     "zcode-cli-usage>=0.1.0",
-    "model-prices>=0.0.2",
+    "model-prices>=0.0.3",
 ]
 
 [project.urls]

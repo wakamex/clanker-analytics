@@ -252,7 +252,7 @@ Every row is priced with [model-prices](https://github.com/wakamex/model-prices)
 
 `--prices current` reprices every request from today's price list instead, while keeping each request's own peak or off-peak hour. Use it to compare usage across periods without price changes showing up as usage changes.
 
-Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). The cache records model-prices' data version and reprices every row when it changes. The `pricing` column says where each row's price came from:
+Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). Each report run fetches model-prices' newest published price data when the local copy is more than a day old; offline, it keeps the local copy and warns. The cache records the data version and reprices every row when it changes. The `--table`, `diagnose`, `cache`, quota history and `value` reports end with a `pricing:` line naming that version, so a cost can be traced to the exact price data behind it. The `pricing` column says where each row's price came from:
 
 - `model-prices`: priced from the model's API price history.
 - `aop`: an AOP run whose model model-prices cannot price, which keeps the API-equivalent cost AOP recorded.
