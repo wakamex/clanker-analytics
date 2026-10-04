@@ -278,9 +278,17 @@ timeline AS (
 enriched AS (
     SELECT
         *,
-        last_value(model_event IGNORE NULLS) OVER (
-            PARTITION BY filename ORDER BY timestamp
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        -- Before a session's first model event, such as a fork replaying its parent's
+        -- history, take the first model the session names.
+        coalesce(
+            last_value(model_event IGNORE NULLS) OVER (
+                PARTITION BY filename ORDER BY timestamp
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ),
+            first_value(model_event IGNORE NULLS) OVER (
+                PARTITION BY filename ORDER BY timestamp
+                ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+            )
         ) as model,
         last_value(rate_mode_event IGNORE NULLS) OVER (
             PARTITION BY filename ORDER BY timestamp

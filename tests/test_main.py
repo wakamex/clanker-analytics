@@ -202,6 +202,26 @@ class TestSourceLoaders(Case):
         assert result[0][18] == "2026-08-04T22:17:14.000Z"
         assert result[0][19] == "default"
 
+    def test_codex_rows_before_the_first_model_event_take_the_sessions_model(self):
+        tmp_path = self.tmp_path
+        session_id = "019fd3f1-91fd-7902-8893-028d79084e33"
+        path = tmp_path / f"rollout-2026-08-05T18-00-52-{session_id}.jsonl"
+        usage = {"total_tokens": 100, "input_tokens": 90, "output_tokens": 10, "cached_input_tokens": 0}
+        token_count = {"type": "token_count", "info": {"total_token_usage": usage, "last_token_usage": usage}}
+        rows = [
+            {"timestamp": "2026-08-05T22:00:52.288Z", "type": "session_meta",
+             "payload": {"id": session_id, "cwd": "/code/stocks"}},
+            {"timestamp": "2026-08-05T22:00:52.289Z", "type": "event_msg", "payload": token_count},
+            {"timestamp": "2026-08-05T22:00:53.601Z", "type": "turn_context",
+             "payload": {"model": "gpt-5.6-sol"}},
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        db = duckdb.connect()
+        result = db.sql(main_mod._codex_sql(main_mod._sql_literal(path.as_posix()))).fetchall()
+
+        assert [row[4] for row in result] == ["gpt-5.6-sol"]
+
     def test_codex_execution_type(self):
         tmp_path = self.tmp_path
         for metadata, expected in [
