@@ -828,6 +828,28 @@ class TestAOPSourceLoader(Case):
         assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0] == 0.75
 
 
+    def test_aop_run_without_a_model_or_native_log_assumes_the_days_model(self):
+        tmp_path = self.tmp_path
+        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path, session_id="probe", model=None, cost_usd=None)
+        source_expr = main_mod._sql_file_list([result_path.as_posix()])
+        db = duckdb.connect()
+        register_macros(db)
+        db.execute("CREATE TABLE tokens AS " + main_mod._aop_sql(source_expr))
+        date = db.sql("SELECT date FROM tokens").fetchone()[0]
+        db.execute("""
+            INSERT INTO tokens (tool, session, date, model, total_tokens, source_kind, source_file)
+            VALUES ('Codex', 'busy', ?, 'gpt-5.6-sol', 900, 'native', '/native/one.jsonl'),
+                   ('Codex', 'quiet', ?, 'gpt-5.5', 100, 'native', '/native/two.jsonl')
+        """, [date, date])
+
+        main_mod._deduplicate_aop(db, main_mod.DebugTimer(False))
+        price_tokens(db, all_rows=True)
+
+        assert db.sql("SELECT model, pricing, api_cost_usd > 0 FROM tokens WHERE session = 'probe'").fetchall() == [
+            ("gpt-5.6-sol", "assumed model", True),
+        ]
+
     def test_aop_run_without_a_model_takes_the_model_its_session_ran(self):
         tmp_path = self.tmp_path
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"

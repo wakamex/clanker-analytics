@@ -140,6 +140,7 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     for column, kind in (("api_cost_usd", "DOUBLE"), ("current_api_cost_usd", "DOUBLE"),
                          ("pricing", "VARCHAR"), ("cache_write_1h_tokens", "INT"),
+                         ("model_assumed", "BOOLEAN"),
                          *((f"api_{part}_usd", "DOUBLE")
                            for part in (*COST_PARTS, *PROMPT_BOUNDS))):
         if column not in columns:
@@ -172,6 +173,7 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     db.execute(f"""
         UPDATE tokens SET
             pricing = CASE
+                WHEN api_cost_usd IS NOT NULL AND model_assumed THEN 'assumed model'
                 WHEN api_cost_usd IS NOT NULL THEN 'model-prices'
                 WHEN source_kind = 'aop' AND cost_usd IS NOT NULL THEN 'aop'
                 ELSE 'unpriced'

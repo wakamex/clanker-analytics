@@ -80,7 +80,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 23
+CACHE_SCHEMA_VERSION = 24
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -1435,6 +1435,8 @@ def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
     columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     if "source_kind" not in columns:
         return
+    if "model_assumed" not in columns:
+        db.execute("ALTER TABLE tokens ADD COLUMN model_assumed BOOLEAN")
     with timer.span("deduplicate AOP sessions"):
         # A run started without a model records none; take the model the session's
         # native log says it ran, by most tokens, before those rows are dropped.
@@ -1452,6 +1454,23 @@ def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
             ) AS native
             WHERE tokens.source_kind = 'aop' AND coalesce(tokens.model, '') = ''
               AND tokens.tool = native.tool AND tokens.session = native.session
+        """)
+        # Without a native log, assume the tool's default was the model it ran most that
+        # day, and mark the model as assumed.
+        db.execute("""
+            UPDATE tokens SET model = daily.model, model_assumed = true
+            FROM (
+                SELECT tool, date, arg_max(model, tokens) AS model
+                FROM (
+                    SELECT tool, date, model, sum(total_tokens) AS tokens
+                    FROM tokens
+                    WHERE coalesce(source_kind, 'native') != 'aop' AND coalesce(model, '') != ''
+                    GROUP BY ALL
+                )
+                GROUP BY ALL
+            ) AS daily
+            WHERE tokens.source_kind = 'aop' AND coalesce(tokens.model, '') = ''
+              AND tokens.tool = daily.tool AND tokens.date = daily.date
         """)
         db.execute("""
             DELETE FROM tokens

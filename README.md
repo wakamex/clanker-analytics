@@ -255,6 +255,7 @@ Every row is priced with [model-prices](https://github.com/wakamex/model-prices)
 Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). Each report run fetches model-prices' newest published price data when the local copy is more than a day old; offline, it keeps the local copy and warns. The cache records the data version and reprices every row when it changes. The `--table`, `diagnose`, `cache`, quota history and `value` reports end with a `pricing:` line naming that version, so a cost can be traced to the exact price data behind it. The `pricing` column says where each row's price came from:
 
 - `model-prices`: priced from the model's API price history.
+- `assumed model`: an AOP run that recorded no model and has no native log of its own. It is priced as the model its tool ran most that day.
 - `aop`: an AOP run whose model model-prices cannot price, which keeps the API-equivalent cost AOP recorded.
 - `unpriced`: no price is known, such as Codex's internal `codex-auto-review`. These rows count as zero in cost totals.
 
