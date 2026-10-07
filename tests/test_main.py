@@ -91,9 +91,9 @@ def _write_aop_result(
         raise ValueError("AOP fixture cached input cannot exceed input")
     if reasoning_output_tokens > output_tokens:
         raise ValueError("AOP fixture reasoning output cannot exceed output")
-    if usage_schema == "aop-token-usage-v2":
+    if usage_schema in {"aop-token-usage-v2", "aop-token-usage-v3"}:
         if accounting_status not in {"complete", "partial"}:
-            raise ValueError("usage-bearing v2 fixture requires complete or partial accounting")
+            raise ValueError("usage-bearing v2 or v3 fixture requires complete or partial accounting")
     elif usage_schema == "aop-token-usage-v1":
         if accounting_status is not None:
             raise ValueError("v1 fixture cannot have v2 accounting status")
@@ -639,10 +639,12 @@ class TestAOPSourceLoader(Case):
         ]:
             with self.subTest(provider=provider, inference_provider=inference_provider, tool=tool, expected=expected):
                 result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+                # Under v3 every provider's usage is its own run's.
                 _write_aop_result(
                     result_path,
                     provider=provider,
                     inference_provider=inference_provider,
+                    usage_schema="aop-token-usage-v3",
                 )
 
                 relation = duckdb.sql(main_mod._aop_sql(
@@ -695,13 +697,66 @@ class TestAOPSourceLoader(Case):
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(result_path)
         value = json.loads(result_path.read_text())
-        value["usage_schema"] = "aop-token-usage-v3"
+        value["usage_schema"] = "aop-token-usage-v4"
         result_path.write_text(json.dumps(value))
 
         with raises(duckdb.Error, match="unsupported AOP token usage schema"):
             duckdb.sql(main_mod._aop_sql(
                 main_mod._sql_literal(result_path.as_posix())
             )).fetchall()
+
+    def _load_aop(self, paths):
+        db = duckdb.connect()
+        register_macros(db)
+        db.execute("CREATE TABLE tokens AS " + "".join(main_mod._build_source_sql(
+            db, {main_mod.AOP_RESULT_TOOL: [path.as_posix() for path in paths]})))
+        return db
+
+    def test_accepts_v3_aop_usage(self):
+        result_path = self.tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path, usage_schema="aop-token-usage-v3")
+
+        db = self._load_aop([result_path])
+
+        assert db.sql("SELECT input_tokens, cache_read_tokens, output_tokens FROM tokens").fetchall() == [
+            (70, 30, 10),
+        ]
+
+    def test_v2_agy_run_takes_its_own_step_usage_and_drops_its_stored_cost(self):
+        run = self.tmp_path / "project" / ".aop" / "runs" / "resumed"
+        # The stored usage is the conversation's running total across earlier runs.
+        _write_aop_result(run / "result.json", provider="agy", input_tokens=150_000_000,
+                          cached_input_tokens=140_000_000, output_tokens=1_600_000,
+                          reasoning_output_tokens=200_000, cost_usd=99.0)
+        events = [
+            {"event": "init", "conversation_id": "c"},
+            {"event": "step_update", "step_update": {"step_index": 1, "state": "DONE",
+                                                     "step_type": "user_input"}},
+            {"event": "step_update", "step_update": {"step_index": 2, "state": "DONE", "usage": {
+                "input_tokens": 4_000, "output_tokens": 1_500, "thinking_tokens": 300,
+                "cache_read_tokens": 120_000, "total_tokens": 5_500}}},
+            {"event": "step_update", "step_update": {"step_index": 3, "state": "DONE", "usage": {
+                "input_tokens": 2_476, "output_tokens": 1_004, "thinking_tokens": 126,
+                "cache_read_tokens": 100_102, "total_tokens": 3_480}}},
+            {"event": "result", "result": {"status": "SUCCESS", "usage": {
+                "input_tokens": 10_000_000, "output_tokens": 1_600_000,
+                "cache_read_tokens": 140_000_000}}},
+        ]
+        (run / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+
+        db = self._load_aop([run / "result.json"])
+
+        assert db.sql("SELECT input_tokens, cache_read_tokens, output_tokens, cost_usd FROM tokens").fetchall() == [
+            (6_476, 220_102, 2_504, None),
+        ]
+
+    def test_v2_agy_run_without_events_is_left_out(self):
+        result_path = self.tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path, provider="agy")
+
+        db = self._load_aop([result_path])
+
+        assert db.sql("SELECT count(*) FROM tokens").fetchone()[0] == 0
 
     def test_accepts_legacy_v1_aop_usage(self):
         tmp_path = self.tmp_path

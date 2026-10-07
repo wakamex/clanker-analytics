@@ -80,7 +80,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 24
+CACHE_SCHEMA_VERSION = 25
 
 AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULT_TOOL = "AOP result"
@@ -776,15 +776,60 @@ WHERE t.total_tokens > 0
 """
 
 
-def _aop_sql(source_expr: str) -> str:
+AOP_AGY_STEP_USAGE_TABLE = "aop_agy_step_usage"
+
+
+def _load_aop_agy_step_usage(db: duckdb.DuckDBPyConnection, result_paths: list[str]) -> None:
+    """Record each v2 Agy run's own usage from the step events in its events.jsonl.
+
+    A v2 Agy result stores the conversation's running total across every run that resumed
+    it; the run's own usage is the sum of its step_update usage. A run with events but no
+    step usage used no tokens. Runs without events are absent and treated as unknown.
+    """
+    db.execute(f"""
+        CREATE OR REPLACE TEMP TABLE {AOP_AGY_STEP_USAGE_TABLE} (
+            result_file VARCHAR, input_tokens BIGINT, cached_input_tokens BIGINT,
+            output_tokens BIGINT, reasoning_output_tokens BIGINT)
+    """)
+    results = [row[0] for row in db.execute(f"""
+        SELECT replace(filename, '\\', '/')
+        FROM read_json_objects({_sql_file_list(result_paths)}, format='auto', filename=true,
+                               ignore_errors=true)
+        WHERE lower(json_extract_string(json, '$.provider')) = 'agy'
+          AND json_extract_string(json, '$.usage_schema') = 'aop-token-usage-v2'
+    """).fetchall()]
+    events = [path for path in (str(Path(result).with_name("events.jsonl")) for result in results)
+              if Path(path).is_file()]
+    if not events:
+        return
+    db.execute(f"""
+        INSERT INTO {AOP_AGY_STEP_USAGE_TABLE}
+        SELECT
+            regexp_replace(replace(filename, '\\', '/'), 'events[.]jsonl$', 'result.json'),
+            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.input_tokens') AS BIGINT)), 0)
+              + coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.cache_read_tokens') AS BIGINT)), 0),
+            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.cache_read_tokens') AS BIGINT)), 0),
+            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.output_tokens') AS BIGINT)), 0),
+            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.thinking_tokens') AS BIGINT)), 0)
+        FROM read_json_objects({_sql_file_list(events)}, format='newline_delimited',
+                               filename=true, ignore_errors=true)
+        GROUP BY filename
+    """)
+
+
+def _aop_sql(source_expr: str, agy_step_usage_table: str | None = None) -> str:
     """Load exact per-run usage normalized by Agent Orchestration Process."""
+    step_usage = agy_step_usage_table or (
+        "(SELECT NULL::VARCHAR AS result_file, NULL::BIGINT AS input_tokens, "
+        "NULL::BIGINT AS cached_input_tokens, NULL::BIGINT AS output_tokens, "
+        "NULL::BIGINT AS reasoning_output_tokens WHERE false)")
     return f"""
 WITH raw AS (
     SELECT replace(filename, '\\', '/') as filename, json as result_json
     FROM read_json_objects({source_expr}, format='auto', filename=true,
                            ignore_errors=true)
 ),
-usage AS (
+stored AS (
     SELECT
         filename,
         json_extract_string(result_json, '$.usage_schema') as usage_schema,
@@ -819,6 +864,23 @@ usage AS (
                        '^(.*)/[.]aop/runs/', 1) as owner_path
     FROM raw
 ),
+-- A v2 Agy result stored the conversation's running total, so its usage comes from the
+-- run's own step events and its stored cost, which priced that total, is dropped.
+usage AS (
+    SELECT
+        stored.* REPLACE (
+            CASE WHEN agy_v2 THEN step.input_tokens ELSE raw_input END AS raw_input,
+            CASE WHEN agy_v2 THEN step.cached_input_tokens ELSE cached_input END AS cached_input,
+            CASE WHEN agy_v2 THEN step.output_tokens ELSE raw_output END AS raw_output,
+            CASE WHEN agy_v2 THEN step.reasoning_output_tokens ELSE reasoning_output END
+                AS reasoning_output,
+            CASE WHEN agy_v2 THEN NULL ELSE cost_usd END AS cost_usd
+        ),
+        agy_v2 AND step.result_file IS NULL AS usage_unknown
+    FROM (SELECT *, provider = 'agy' AND usage_schema = 'aop-token-usage-v2' AS agy_v2
+          FROM stored) stored
+    LEFT JOIN {step_usage} step ON step.result_file = stored.filename
+),
 normalized AS (
     SELECT
         *,
@@ -831,14 +893,15 @@ normalized AS (
                  THEN reasoning_output ELSE 0 END as processed_output
     FROM usage
     WHERE CASE
+        WHEN usage_unknown THEN false
         WHEN usage_schema IS NULL OR usage_schema = 'aop-token-usage-v1' THEN true
-        WHEN usage_schema = 'aop-token-usage-v2'
+        WHEN usage_schema IN ('aop-token-usage-v2', 'aop-token-usage-v3')
              AND accounting_status IN ('complete', 'partial')
              AND has_usage THEN true
-        WHEN usage_schema = 'aop-token-usage-v2'
+        WHEN usage_schema IN ('aop-token-usage-v2', 'aop-token-usage-v3')
              AND accounting_status IN ('complete', 'partial', 'unavailable')
              THEN false
-        WHEN usage_schema = 'aop-token-usage-v2'
+        WHEN usage_schema IN ('aop-token-usage-v2', 'aop-token-usage-v3')
              THEN error('unsupported AOP accounting status')
         ELSE error('unsupported AOP token usage schema')
     END
@@ -1379,6 +1442,11 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
         if paths:
             if tool_name == ZCODE_TOOL:
                 _load_zcode_usage(db, paths)
+            if tool_name == AOP_RESULT_TOOL:
+                _load_aop_agy_step_usage(db, paths)
+                parts.append(builder(_sql_file_list(paths),
+                                     agy_step_usage_table=AOP_AGY_STEP_USAGE_TABLE))
+                continue
             if tool_name == "Agy":
                 _load_agy_models(db, paths)
                 parts.append(builder(_sql_file_list(paths), models_table=AGY_MODELS_TABLE))
