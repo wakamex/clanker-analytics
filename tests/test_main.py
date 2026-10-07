@@ -1634,6 +1634,22 @@ class TestDebugHooks(Case):
 
         assert list(files) == [transcript.as_posix()]
 
+    def test_source_scan_reads_claude_subagent_transcripts_but_not_workflow_journals(self):
+        projects = self.tmp_path / "projects"
+        workflow = projects / "-code-x" / "session" / "subagents" / "workflows" / "wf_1"
+        workflow.mkdir(parents=True)
+        transcripts = [projects / "-code-x" / "session.jsonl",
+                       projects / "-code-x" / "session" / "subagents" / "agent-a1.jsonl",
+                       workflow / "agent-b2.jsonl"]
+        for path in [*transcripts, workflow / "journal.jsonl"]:
+            path.write_text("{}\n")
+        self.monkeypatch.setattr(main_mod, "SOURCE_TREES", [("Claude Code", projects, "*.jsonl")])
+        self.monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        files, _, _ = main_mod.scan_source_files()
+
+        assert set(files) == {path.as_posix() for path in transcripts}
+
     def test_sources_mtime_includes_gemini_json(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch

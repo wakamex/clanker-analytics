@@ -1243,6 +1243,11 @@ def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
                 # (Claude memory folders); they are not that tool's transcripts.
                 if ".aop" in path.relative_to(root).parts:
                     continue
+                # Claude Code keeps workflow journals beside subagent transcripts, which
+                # are always agent-<id>.jsonl.
+                if (tool == "Claude Code" and "subagents" in path.relative_to(root).parts
+                        and not path.name.startswith("agent-")):
+                    continue
                 stats = [path.stat()]
                 if tool == ZCODE_TOOL:
                     # SQLite commits land in the write-ahead log before checkpointing.
