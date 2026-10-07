@@ -128,6 +128,23 @@ def _write_aop_result(
 # ===========================================================================
 
 class TestSourceLoaders(Case):
+    def test_timestamps_become_utc_text_whatever_the_session_time_zone(self):
+        db = duckdb.connect()
+        db.execute("SET TimeZone = 'America/Toronto'")
+        values = [
+            ("2026-10-06 12:00:12.88", "2026-10-06T12:00:12.880Z"),  # zone-less logs are UTC
+            ("2026-10-06T12:00:12.88Z", "2026-10-06T12:00:12.880Z"),
+            ("2026-08-30T03:32:30.636575+00:00", "2026-08-30T03:32:30.636Z"),
+            ("2026-08-30T03:32:30-04:00", "2026-08-30T07:32:30.000Z"),
+        ]
+        for value, expected in values:
+            with self.subTest(value=value):
+                sql = main_mod._utc_timestamp(main_mod._sql_literal(value))
+                assert db.sql(f"SELECT {sql}").fetchone()[0] == expected
+        # DuckDB may detect a log's timestamps as zone-less TIMESTAMP values.
+        sql = main_mod._utc_timestamp("TIMESTAMP '2026-10-06 12:00:12.88'")
+        assert db.sql(f"SELECT {sql}").fetchone()[0] == "2026-10-06T12:00:12.880Z"
+
     def test_codex_uses_own_session_metadata_once(self):
         tmp_path = self.tmp_path
         session_id = "019fceda-3070-71e2-b533-349e787d37ac"
@@ -540,8 +557,8 @@ class TestSourceLoaders(Case):
         assert sum(row[13] for row in results) == 2
         assert sum(row[14] or 0 for row in results) == 8
         assert sorted(row[18] for row in results) == [
-            "2026-08-14T12:00:02Z",
-            "2026-08-14T12:00:04Z",
+            "2026-08-14T12:00:02.000Z",
+            "2026-08-14T12:00:04.000Z",
         ]
 
     def test_agy_metadata_filters_internal_trajectories(self):

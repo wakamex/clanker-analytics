@@ -80,7 +80,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 25
+CACHE_SCHEMA_VERSION = 26
 
 AGY_METADATA_TOOL = "Agy metadata"
 # AOP appends every state directory that records a run here, one absolute .aop path per line.
@@ -163,6 +163,29 @@ def _sql_file_list(paths: list[str]) -> str:
     return "[" + ", ".join(_sql_literal(p) for p in paths) + "]"
 
 
+def _utc_timestamp(expr: str) -> str:
+    """SQL for a timestamp as UTC text ending in Z, whatever the session time zone.
+
+    Logs record UTC, but DuckDB detects some batches as zone-less TIMESTAMP values, and
+    a zone-less value would otherwise be read in the local time zone.
+    """
+    text = f"cast({expr} as VARCHAR)"
+    return (f"strftime(timezone('UTC', try_cast(CASE WHEN regexp_matches({text}, "
+            f"'(Z|[+-][0-9]{{2}}:?[0-9]{{2}})$') THEN {text} ELSE {text} || 'Z' END "
+            f"AS TIMESTAMPTZ)), '%Y-%m-%dT%H:%M:%S.%gZ')")
+
+
+# The transcript fields the Claude query reads. Declaring them stops DuckDB from inferring
+# a schema from sampled files, which fails for some mixes of transcripts and other records.
+CLAUDE_COLUMNS = """{
+    'type': 'VARCHAR', 'timestamp': 'VARCHAR', 'sessionId': 'VARCHAR',
+    'isSidechain': 'BOOLEAN', 'cwd': 'VARCHAR',
+    'message': 'STRUCT(model VARCHAR, usage STRUCT(input_tokens BIGINT, output_tokens BIGINT,
+        cache_creation_input_tokens BIGINT, cache_read_input_tokens BIGINT,
+        cache_creation STRUCT(ephemeral_1h_input_tokens BIGINT)))'
+}"""
+
+
 def _claude_sql(source_expr: str) -> str:
     return f"""
 SELECT
@@ -178,8 +201,8 @@ SELECT
     coalesce(cast(message.usage.cache_read_input_tokens as INTEGER), 0) as cache_read_tokens,
     -- The part of cache_write_tokens written to the one-hour cache, which main threads use;
     -- absent from transcripts older than the split.
-    coalesce(try_cast(json_extract_string(to_json(message.usage),
-        '$.cache_creation.ephemeral_1h_input_tokens') as INTEGER), 0) as cache_write_1h_tokens,
+    coalesce(cast(message.usage.cache_creation.ephemeral_1h_input_tokens as INTEGER), 0)
+        as cache_write_1h_tokens,
     coalesce(cast(message.usage.input_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.output_tokens as INTEGER), 0)
       + coalesce(cast(message.usage.cache_creation_input_tokens as INTEGER), 0)
@@ -198,15 +221,15 @@ SELECT
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
     replace(filename, '\\', '/') as source_file,
-    cast(timestamp as VARCHAR) as timestamp,
+    {_utc_timestamp("timestamp")} as timestamp,
     '' as rate_mode,
     NULL::DOUBLE as quota_used_pct,
     NULL::BIGINT as quota_resets_at,
     NULL::INTEGER as quota_window_minutes,
     NULL::VARCHAR as quota_limit_id
 FROM read_json({source_expr},
-    format='newline_delimited', filename=true, union_by_name=true,
-    ignore_errors=true, maximum_depth=3, maximum_object_size=67108864)
+    format='newline_delimited', filename=true, columns={CLAUDE_COLUMNS},
+    ignore_errors=true, maximum_object_size=67108864)
 WHERE type = 'assistant'
   AND message.model != '<synthetic>'
   AND message.usage IS NOT NULL
@@ -414,7 +437,7 @@ SELECT
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
     t.filename as source_file,
-    cast(t.timestamp as VARCHAR) as timestamp,
+    {_utc_timestamp("t.timestamp")} as timestamp,
     coalesce(t.rate_mode, 'default') as rate_mode,
     t.quota_used_pct,
     t.quota_resets_at,
@@ -463,7 +486,7 @@ SELECT
     'native' as source_kind,
     NULL::DOUBLE as cost_usd,
     filename as source_file,
-    cast(m.timestamp as VARCHAR) as timestamp,
+    {_utc_timestamp("m.timestamp")} as timestamp,
     '' as rate_mode,
     NULL::DOUBLE as quota_used_pct,
     NULL::BIGINT as quota_resets_at,
@@ -703,7 +726,7 @@ turns AS (
     SELECT
         filename,
         left(cast(created_at as VARCHAR), 10) as date,
-        cast(created_at as VARCHAR) as timestamp,
+        {_utc_timestamp("created_at")} as timestamp,
         exact_input_raw IS NOT NULL AND exact_output_raw IS NOT NULL as is_exact,
         CASE WHEN is_exact THEN
             greatest(exact_input_raw - coalesce(exact_cache, 0), 0)
@@ -802,10 +825,9 @@ stored AS (
         json_extract_string(result_json, '$.session_id') as session_id,
         json_extract_string(result_json, '$.task') as task,
         json_extract_string(result_json, '$.model') as model,
-        coalesce(
+        {_utc_timestamp("""coalesce(
             json_extract_string(result_json, '$.started_at'),
-            json_extract_string(result_json, '$.finished_at')
-        ) as timestamp,
+            json_extract_string(result_json, '$.finished_at'))""")} as timestamp,
         greatest(coalesce(try_cast(json_extract_string(
             result_json, '$.usage.input_tokens') as BIGINT), 0), 0) as raw_input,
         greatest(coalesce(try_cast(json_extract_string(
