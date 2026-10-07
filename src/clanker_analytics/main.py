@@ -1420,6 +1420,7 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
     else:
         _empty_tokens_table(db)
     _carry_over_vanished_rows(db, files, timer)
+    _drop_other_copies_of_aop_runs(db, list(files), timer)
     _deduplicate_aop(db, timer)
     with timer.span("price rows"):
         price_tokens(db, all_rows=True)
@@ -1451,6 +1452,41 @@ def _carry_over_vanished_rows(db: duckdb.DuckDBPyConnection, files: dict[str, So
               AND source_file NOT IN (SELECT path FROM scanned_sources)
         """)
         db.execute("DROP TABLE scanned_sources")
+
+
+def _drop_other_copies_of_aop_runs(db: duckdb.DuckDBPyConnection, read: list[str],
+                                   timer: DebugTimer) -> None:
+    """Count each AOP run once when its results were copied under another path.
+
+    A run is identified by its run directory name. Rows read just now from `read` replace
+    the rows of the same runs from any other path, such as kept rows of a path that
+    discovery no longer lists.
+    """
+    read = [path for path in read if "/.aop/runs/" in path]
+    if not read:
+        return
+    run = "regexp_extract(source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1)"
+    with timer.span("drop other copies of AOP runs"):
+        db.execute("CREATE OR REPLACE TEMP TABLE read_results (path VARCHAR)")
+        db.executemany("INSERT INTO read_results VALUES (?)", [[path] for path in read])
+        db.execute(f"""
+            DELETE FROM tokens
+            WHERE source_kind = 'aop'
+              AND source_file NOT IN (SELECT path FROM read_results)
+              AND {run} IN (SELECT regexp_extract(path, '/[.]aop/runs/([^/]+)/result[.]json$', 1)
+                            FROM read_results)
+        """)
+        # Copies read together keep the first path.
+        db.execute(f"""
+            DELETE FROM tokens
+            WHERE source_kind = 'aop' AND source_file IN (SELECT path FROM read_results)
+              AND source_file != (
+                  SELECT min(other.source_file) FROM tokens other
+                  WHERE other.source_kind = 'aop'
+                    AND regexp_extract(other.source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1)
+                        = regexp_extract(tokens.source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1))
+        """)
+        db.execute("DROP TABLE read_results")
 
 
 def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
@@ -1631,6 +1667,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         changed = [path for path in changed if path not in unread]
         _delete_source_files(db, changed, timer)
         _append_source_files(db, {path: files[path] for path in changed}, timer)
+        _drop_other_copies_of_aop_runs(db, changed, timer)
         _deduplicate_aop(db, timer)
         with timer.span("price rows"):
             price_tokens(db, all_rows=reprice)

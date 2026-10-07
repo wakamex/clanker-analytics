@@ -1960,6 +1960,36 @@ class TestDebugHooks(Case):
         assert db2.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/two"
         assert any(sample.label == "append changed files" for sample in timer.samples)
 
+    def test_aop_run_copied_under_two_roots_counts_once(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
+        copies = [tmp_path / root / ".aop" / "runs" / "run-1" / "result.json"
+                  for root in ("code-memory", "claude-memory")]
+        for path in copies:
+            _write_aop_result(path)
+        roots = tmp_path / "state-roots"
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, roots, "")])
+        monkeypatch.setattr(main_mod, "SOURCES", {"aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql)})
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        def load(listed, refresh=False):
+            roots.write_text("".join(str(path.parents[2]) + "\n" for path in listed))
+            db = duckdb.connect()
+            register_macros(db)
+            main_mod.load_tokens(db, refresh=refresh)
+            return db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone()
+
+        # The first copy is read, then discovery lists only the second, then both.
+        assert load(copies[:1]) == (1, 110)
+        assert load(copies[1:]) == (1, 110)
+        assert load(copies[1:], refresh=True) == (1, 110)
+        assert load(copies) == (1, 110)
+        assert load(copies, refresh=True) == (1, 110)
+
     def test_aop_cache_appends_new_resume_result(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
