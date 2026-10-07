@@ -76,8 +76,8 @@ def _write_aop_result(
     reasoning_output_tokens: int = 5,
     inference_provider: str | None = None,
     cost_usd: float | None = 0.25,
-    usage_schema: str = "aop-token-usage-v2",
-    accounting_status: str | None = "complete",
+    usage_schema: str = "aop-token-usage-v3",
+    accounting_status: str = "complete",
 ) -> None:
     counts = (
         input_tokens,
@@ -91,14 +91,10 @@ def _write_aop_result(
         raise ValueError("AOP fixture cached input cannot exceed input")
     if reasoning_output_tokens > output_tokens:
         raise ValueError("AOP fixture reasoning output cannot exceed output")
-    if usage_schema in {"aop-token-usage-v2", "aop-token-usage-v3"}:
-        if accounting_status not in {"complete", "partial"}:
-            raise ValueError("usage-bearing v2 or v3 fixture requires complete or partial accounting")
-    elif usage_schema == "aop-token-usage-v1":
-        if accounting_status is not None:
-            raise ValueError("v1 fixture cannot have v2 accounting status")
-    else:
+    if usage_schema != "aop-token-usage-v3":
         raise ValueError("unsupported AOP fixture usage schema")
+    if accounting_status not in {"complete", "partial"}:
+        raise ValueError("usage-bearing fixture requires complete or partial accounting")
     path.parent.mkdir(parents=True, exist_ok=True)
     calculated_cost = (
         {"amount_usd": cost_usd, "currency": "USD"}
@@ -123,8 +119,7 @@ def _write_aop_result(
         },
         "calculated_cost": calculated_cost,
     }
-    if accounting_status is not None:
-        result["accounting_status"] = accounting_status
+    result["accounting_status"] = accounting_status
     path.write_text(json.dumps(result))
 
 
@@ -598,28 +593,25 @@ class TestSourceLoaders(Case):
 
 
 class TestAOPSourceLoader(Case):
-    def test_discovers_neighboring_and_nested_repositories(self):
+    def test_discovers_the_results_of_listed_state_roots(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
-        current = tmp_path / "workspace" / "current"
-        (current / ".git").mkdir(parents=True)
-        nearby = tmp_path / "workspace" / "nearby" / ".aop" / "runs" / "one" / "result.json"
-        nested = (
-            tmp_path / "workspace" / "group" / "nested" / ".aop"
-            / "runs" / "two" / "result.json"
-        )
-        _write_aop_result(nearby)
-        _write_aop_result(nested, run_id="run-2")
-        monkeypatch.delenv("AOP_STATE_ROOT", raising=False)
-        monkeypatch.setattr(main_mod, "SOURCE_TREES", [
-            (main_mod.AOP_RESULT_TOOL, current, ""),
-        ])
+        first = tmp_path / "one" / ".aop" / "runs" / "a" / "result.json"
+        second = tmp_path / "memory" / ".aop" / "runs" / "b" / "result.json"
+        unlisted = tmp_path / "other" / ".aop" / "runs" / "c" / "result.json"
+        for path in (first, second, unlisted):
+            _write_aop_result(path)
+        (first.parent / "result.pre-v3.json").write_text("{}")
+        roots = tmp_path / "state-roots"
+        # AOP may list a root more than once, and a listed root may be gone.
+        roots.write_text("\n".join([str(tmp_path / "one" / ".aop"), str(tmp_path / "memory" / ".aop"),
+                                    str(tmp_path / "one" / ".aop"), str(tmp_path / "gone" / ".aop")]) + "\n")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, roots, "")])
         monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
 
         files, dir_count, _ = main_mod.scan_source_files()
 
-        assert set(files) == {nearby.as_posix(), nested.as_posix()}
-        assert all(item.tool == main_mod.AOP_RESULT_TOOL for item in files.values())
+        assert set(files) == {first.as_posix(), second.as_posix()}
         assert dir_count == 2
 
     def test_uses_provider_independent_token_semantics(self):
@@ -639,12 +631,10 @@ class TestAOPSourceLoader(Case):
         ]:
             with self.subTest(provider=provider, inference_provider=inference_provider, tool=tool, expected=expected):
                 result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-                # Under v3 every provider's usage is its own run's.
                 _write_aop_result(
                     result_path,
                     provider=provider,
                     inference_provider=inference_provider,
-                    usage_schema="aop-token-usage-v3",
                 )
 
                 relation = duckdb.sql(main_mod._aop_sql(
@@ -665,45 +655,19 @@ class TestAOPSourceLoader(Case):
                 assert row["source_kind"] == "aop"
                 assert row["cost_usd"] == 0.25
 
-    def test_normalizes_unversioned_aop_usage(self):
-        tmp_path = self.tmp_path
-        for provider, expected in [
-            ("agy", (100, 10, 30, 140)),
-            ("claude", (70, 10, 30, 110)),
-            ("codex", (70, 10, 30, 110)),
-            ("cursor", (100, 10, 30, 140)),
-            ("devin", (70, 10, 30, 110)),
-            ("dsh", (100, 10, 30, 140)),
-            ("grok", (70, 10, 30, 110)),
-            ("hermes", (70, 10, 30, 110)),
-            ("opencode", (70, 15, 30, 115)),
-        ]:
-            with self.subTest(provider=provider, expected=expected):
-                result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-                _write_aop_result(result_path, provider=provider)
-                value = json.loads(result_path.read_text())
-                value.pop("usage_schema")
-                value.pop("accounting_status")
-                result_path.write_text(json.dumps(value))
-
-                row = duckdb.sql(main_mod._aop_sql(
-                    main_mod._sql_literal(result_path.as_posix())
-                )).fetchone()
-
-                assert (row[5], row[6], row[8], row[9]) == expected
-
-    def test_rejects_unknown_aop_usage_schema(self):
+    def test_rejects_results_that_are_not_v3(self):
         tmp_path = self.tmp_path
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(result_path)
         value = json.loads(result_path.read_text())
-        value["usage_schema"] = "aop-token-usage-v4"
-        result_path.write_text(json.dumps(value))
+        for schema in ("aop-token-usage-v2", "aop-token-usage-v4"):
+            value["usage_schema"] = schema
+            result_path.write_text(json.dumps(value))
 
-        with raises(duckdb.Error, match="unsupported AOP token usage schema"):
-            duckdb.sql(main_mod._aop_sql(
-                main_mod._sql_literal(result_path.as_posix())
-            )).fetchall()
+            with raises(duckdb.Error, match="run aop migrate-results"):
+                duckdb.sql(main_mod._aop_sql(
+                    main_mod._sql_literal(result_path.as_posix())
+                )).fetchall()
 
     def _load_aop(self, paths):
         db = duckdb.connect()
@@ -714,7 +678,7 @@ class TestAOPSourceLoader(Case):
 
     def test_accepts_v3_aop_usage(self):
         result_path = self.tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(result_path, usage_schema="aop-token-usage-v3")
+        _write_aop_result(result_path)
 
         db = self._load_aop([result_path])
 
@@ -722,58 +686,7 @@ class TestAOPSourceLoader(Case):
             (70, 30, 10),
         ]
 
-    def test_v2_agy_run_takes_its_own_step_usage_and_drops_its_stored_cost(self):
-        run = self.tmp_path / "project" / ".aop" / "runs" / "resumed"
-        # The stored usage is the conversation's running total across earlier runs.
-        _write_aop_result(run / "result.json", provider="agy", input_tokens=150_000_000,
-                          cached_input_tokens=140_000_000, output_tokens=1_600_000,
-                          reasoning_output_tokens=200_000, cost_usd=99.0)
-        events = [
-            {"event": "init", "conversation_id": "c"},
-            {"event": "step_update", "step_update": {"step_index": 1, "state": "DONE",
-                                                     "step_type": "user_input"}},
-            {"event": "step_update", "step_update": {"step_index": 2, "state": "DONE", "usage": {
-                "input_tokens": 4_000, "output_tokens": 1_500, "thinking_tokens": 300,
-                "cache_read_tokens": 120_000, "total_tokens": 5_500}}},
-            {"event": "step_update", "step_update": {"step_index": 3, "state": "DONE", "usage": {
-                "input_tokens": 2_476, "output_tokens": 1_004, "thinking_tokens": 126,
-                "cache_read_tokens": 100_102, "total_tokens": 3_480}}},
-            {"event": "result", "result": {"status": "SUCCESS", "usage": {
-                "input_tokens": 10_000_000, "output_tokens": 1_600_000,
-                "cache_read_tokens": 140_000_000}}},
-        ]
-        (run / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
-
-        db = self._load_aop([run / "result.json"])
-
-        assert db.sql("SELECT input_tokens, cache_read_tokens, output_tokens, cost_usd FROM tokens").fetchall() == [
-            (6_476, 220_102, 2_504, None),
-        ]
-
-    def test_v2_agy_run_without_events_is_left_out(self):
-        result_path = self.tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(result_path, provider="agy")
-
-        db = self._load_aop([result_path])
-
-        assert db.sql("SELECT count(*) FROM tokens").fetchone()[0] == 0
-
-    def test_accepts_legacy_v1_aop_usage(self):
-        tmp_path = self.tmp_path
-        result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(
-            result_path,
-            usage_schema="aop-token-usage-v1",
-            accounting_status=None,
-        )
-
-        row = duckdb.sql(main_mod._aop_sql(
-            main_mod._sql_literal(result_path.as_posix())
-        )).fetchone()
-
-        assert (row[5], row[6], row[8], row[9]) == (70, 10, 30, 110)
-
-    def test_accepts_usage_bearing_partial_v2_accounting(self):
+    def test_accepts_usage_bearing_partial_accounting(self):
         tmp_path = self.tmp_path
         result_path = tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
         _write_aop_result(result_path, accounting_status="partial")
@@ -784,7 +697,7 @@ class TestAOPSourceLoader(Case):
 
         assert (row[5], row[6], row[8], row[9]) == (70, 10, 30, 110)
 
-    def test_ignores_v2_accounting_without_usage(self):
+    def test_ignores_accounting_without_usage(self):
         tmp_path = self.tmp_path
         for accounting_status in ["partial", "unavailable"]:
             with self.subTest(accounting_status=accounting_status):
@@ -808,7 +721,7 @@ class TestAOPSourceLoader(Case):
 
                 assert rows == []
 
-    def test_rejects_invalid_v2_accounting_status(self):
+    def test_rejects_invalid_accounting_status(self):
         tmp_path = self.tmp_path
         for accounting_status in [None, "future"]:
             with self.subTest(accounting_status=accounting_status):
@@ -2018,17 +1931,17 @@ class TestDebugHooks(Case):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
         project = tmp_path / "project"
-        (project / ".git").mkdir(parents=True)
         first = project / ".aop" / "runs" / "one" / "result.json"
         _write_aop_result(first, run_id="run-1", session_id="resumed")
+        roots = tmp_path / "state-roots"
+        roots.write_text(str(project / ".aop") + "\n")
 
         cache_dir = tmp_path / "cache"
-        monkeypatch.delenv("AOP_STATE_ROOT", raising=False)
         monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
         monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
         monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
         monkeypatch.setattr(main_mod, "SOURCE_TREES", [
-            (main_mod.AOP_RESULT_TOOL, project, ""),
+            (main_mod.AOP_RESULT_TOOL, roots, ""),
         ])
         monkeypatch.setattr(main_mod, "SOURCES", {
             "aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql),
@@ -2058,6 +1971,17 @@ class TestDebugHooks(Case):
 
         assert db2.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (2, 330)
         assert db2.sql("SELECT count(DISTINCT session) FROM tokens").fetchone()[0] == 1
+
+        # A result rewritten in an older format keeps its cached usage until AOP migrates it.
+        value = json.loads(second.read_text())
+        value["usage_schema"] = "aop-token-usage-v2"
+        value["usage"]["output_tokens"] = 999
+        second.write_text(json.dumps(value))
+        for refresh in (False, True):
+            db3 = duckdb.connect()
+            register_macros(db3)
+            main_mod.load_tokens(db3, refresh=refresh)
+            assert db3.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (2, 330)
         assert any(sample.label == "append changed files" for sample in timer.samples)
         metadata = json.loads((cache_dir / "tokens-meta.json").read_text())
         assert set(metadata["files"]) == {first.as_posix(), second.as_posix()}

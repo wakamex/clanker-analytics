@@ -83,6 +83,9 @@ CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
 CACHE_SCHEMA_VERSION = 25
 
 AGY_METADATA_TOOL = "Agy metadata"
+# AOP appends every state directory that records a run here, one absolute .aop path per line.
+AOP_STATE_ROOTS = (Path(os.environ.get("XDG_STATE_HOME", Path(HOME) / ".local" / "state"))
+                   / "aop" / "state-roots")
 AOP_RESULT_TOOL = "AOP result"
 ZCODE_TOOL = "Zcode"
 ZCODE_USAGE_TABLE = "zcode_model_usage"
@@ -95,7 +98,7 @@ SOURCE_TREES = [
      "*/.system_generated/logs/transcript_full.jsonl"),
     (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
      "conversation_metadata.json"),
-    (AOP_RESULT_TOOL, Path.cwd(), ""),
+    (AOP_RESULT_TOOL, AOP_STATE_ROOTS, ""),
     (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
 ]
 
@@ -776,53 +779,11 @@ WHERE t.total_tokens > 0
 """
 
 
-AOP_AGY_STEP_USAGE_TABLE = "aop_agy_step_usage"
+AOP_USAGE_SCHEMA = "aop-token-usage-v3"
 
 
-def _load_aop_agy_step_usage(db: duckdb.DuckDBPyConnection, result_paths: list[str]) -> None:
-    """Record each v2 Agy run's own usage from the step events in its events.jsonl.
-
-    A v2 Agy result stores the conversation's running total across every run that resumed
-    it; the run's own usage is the sum of its step_update usage. A run with events but no
-    step usage used no tokens. Runs without events are absent and treated as unknown.
-    """
-    db.execute(f"""
-        CREATE OR REPLACE TEMP TABLE {AOP_AGY_STEP_USAGE_TABLE} (
-            result_file VARCHAR, input_tokens BIGINT, cached_input_tokens BIGINT,
-            output_tokens BIGINT, reasoning_output_tokens BIGINT)
-    """)
-    results = [row[0] for row in db.execute(f"""
-        SELECT replace(filename, '\\', '/')
-        FROM read_json_objects({_sql_file_list(result_paths)}, format='auto', filename=true,
-                               ignore_errors=true)
-        WHERE lower(json_extract_string(json, '$.provider')) = 'agy'
-          AND json_extract_string(json, '$.usage_schema') = 'aop-token-usage-v2'
-    """).fetchall()]
-    events = [path for path in (str(Path(result).with_name("events.jsonl")) for result in results)
-              if Path(path).is_file()]
-    if not events:
-        return
-    db.execute(f"""
-        INSERT INTO {AOP_AGY_STEP_USAGE_TABLE}
-        SELECT
-            regexp_replace(replace(filename, '\\', '/'), 'events[.]jsonl$', 'result.json'),
-            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.input_tokens') AS BIGINT)), 0)
-              + coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.cache_read_tokens') AS BIGINT)), 0),
-            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.cache_read_tokens') AS BIGINT)), 0),
-            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.output_tokens') AS BIGINT)), 0),
-            coalesce(sum(try_cast(json_extract_string(json, '$.step_update.usage.thinking_tokens') AS BIGINT)), 0)
-        FROM read_json_objects({_sql_file_list(events)}, format='newline_delimited',
-                               filename=true, ignore_errors=true)
-        GROUP BY filename
-    """)
-
-
-def _aop_sql(source_expr: str, agy_step_usage_table: str | None = None) -> str:
-    """Load exact per-run usage normalized by Agent Orchestration Process."""
-    step_usage = agy_step_usage_table or (
-        "(SELECT NULL::VARCHAR AS result_file, NULL::BIGINT AS input_tokens, "
-        "NULL::BIGINT AS cached_input_tokens, NULL::BIGINT AS output_tokens, "
-        "NULL::BIGINT AS reasoning_output_tokens WHERE false)")
+def _aop_sql(source_expr: str) -> str:
+    """Load the per-run usage Agent Orchestration Process records in v3 results."""
     return f"""
 WITH raw AS (
     SELECT replace(filename, '\\', '/') as filename, json as result_json
@@ -854,56 +815,22 @@ stored AS (
         greatest(coalesce(try_cast(json_extract_string(
             result_json, '$.usage.reasoning_output_tokens') as BIGINT), 0), 0)
             as reasoning_output,
-        coalesce(
-            try_cast(json_extract_string(
-                result_json, '$.calculated_cost.amount_usd') as DOUBLE),
-            try_cast(json_extract_string(
-                result_json, '$.api_equivalent_cost.amount_usd') as DOUBLE)
-        ) as cost_usd,
+        try_cast(json_extract_string(
+            result_json, '$.calculated_cost.amount_usd') as DOUBLE) as cost_usd,
         regexp_extract(replace(filename, '\\', '/'),
                        '^(.*)/[.]aop/runs/', 1) as owner_path
     FROM raw
 ),
--- A v2 Agy result stored the conversation's running total, so its usage comes from the
--- run's own step events and its stored cost, which priced that total, is dropped.
-usage AS (
-    SELECT
-        stored.* REPLACE (
-            CASE WHEN agy_v2 THEN step.input_tokens ELSE raw_input END AS raw_input,
-            CASE WHEN agy_v2 THEN step.cached_input_tokens ELSE cached_input END AS cached_input,
-            CASE WHEN agy_v2 THEN step.output_tokens ELSE raw_output END AS raw_output,
-            CASE WHEN agy_v2 THEN step.reasoning_output_tokens ELSE reasoning_output END
-                AS reasoning_output,
-            CASE WHEN agy_v2 THEN NULL ELSE cost_usd END AS cost_usd
-        ),
-        agy_v2 AND step.result_file IS NULL AS usage_unknown
-    FROM (SELECT *, provider = 'agy' AND usage_schema = 'aop-token-usage-v2' AS agy_v2
-          FROM stored) stored
-    LEFT JOIN {step_usage} step ON step.result_file = stored.filename
-),
 normalized AS (
-    SELECT
-        *,
-        raw_input
-          + CASE WHEN usage_schema IS NULL
-                       AND provider IN ('agy', 'cursor', 'dsh')
-                 THEN cached_input ELSE 0 END as normalized_input,
-        raw_output
-          + CASE WHEN usage_schema IS NULL AND provider = 'opencode'
-                 THEN reasoning_output ELSE 0 END as processed_output
-    FROM usage
+    -- Input and output are totals; cached input and reasoning output are their subsets.
+    SELECT *, raw_input as normalized_input, raw_output as processed_output
+    FROM stored
     WHERE CASE
-        WHEN usage_unknown THEN false
-        WHEN usage_schema IS NULL OR usage_schema = 'aop-token-usage-v1' THEN true
-        WHEN usage_schema IN ('aop-token-usage-v2', 'aop-token-usage-v3')
-             AND accounting_status IN ('complete', 'partial')
-             AND has_usage THEN true
-        WHEN usage_schema IN ('aop-token-usage-v2', 'aop-token-usage-v3')
-             AND accounting_status IN ('complete', 'partial', 'unavailable')
-             THEN false
-        WHEN usage_schema IN ('aop-token-usage-v2', 'aop-token-usage-v3')
-             THEN error('unsupported AOP accounting status')
-        ELSE error('unsupported AOP token usage schema')
+        WHEN usage_schema != '{AOP_USAGE_SCHEMA}' OR usage_schema IS NULL
+             THEN error('unsupported AOP token usage schema; run aop migrate-results')
+        WHEN accounting_status IN ('complete', 'partial') AND has_usage THEN true
+        WHEN accounting_status IN ('complete', 'partial', 'unavailable') THEN false
+        ELSE error('unsupported AOP accounting status')
     END
 ),
 tokens AS (
@@ -1276,59 +1203,16 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
     return trees
 
 
-def _repository_root(start: Path) -> Path | None:
-    """Return the nearest Git worktree root without invoking Git."""
+def _aop_result_paths(state_roots: Path) -> list[Path]:
+    """Find the results of every AOP state directory in AOP's state-root list."""
     try:
-        current = start.resolve()
+        roots = {line.strip() for line in state_roots.read_text().splitlines() if line.strip()}
     except OSError:
-        current = start.absolute()
-    if current.is_file():
-        current = current.parent
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return None
-
-
-def _aop_result_paths(start: Path) -> list[Path]:
-    """Discover retained AOP results in this repository and nearby workspaces."""
-    owners: set[Path] = set()
-    explicit = os.environ.get("AOP_STATE_ROOT")
-    if explicit:
-        state_root = Path(explicit).expanduser()
-        owners.add(state_root.parent if state_root.name == ".aop" else state_root)
-
-    try:
-        resolved = start.resolve()
-    except OSError:
-        resolved = start.absolute()
-    normalized = resolved.as_posix()
-    marker = "/.aop/worktrees/"
-    if marker in normalized:
-        owners.add(Path(normalized.split(marker, 1)[0]))
-
-    repository = _repository_root(resolved)
-    if repository is not None:
-        owners.add(repository)
-        search_base = repository.parent
-    elif (resolved / ".aop").is_dir():
-        owners.add(resolved)
-        search_base = resolved.parent
-    else:
-        search_base = resolved
-
+        return []
     paths: set[Path] = set()
-    for owner in owners:
+    for root in roots:
         try:
-            paths.update((owner / ".aop" / "runs").glob("*/result.json"))
-        except OSError:
-            pass
-    for pattern in (
-        "*/.aop/runs/*/result.json",
-        "*/*/.aop/runs/*/result.json",
-    ):
-        try:
-            paths.update(search_base.glob(pattern))
+            paths.update((Path(root) / "runs").glob("*/result.json"))
         except OSError:
             pass
     return sorted(path for path in paths if path.is_file())
@@ -1442,11 +1326,6 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
         if paths:
             if tool_name == ZCODE_TOOL:
                 _load_zcode_usage(db, paths)
-            if tool_name == AOP_RESULT_TOOL:
-                _load_aop_agy_step_usage(db, paths)
-                parts.append(builder(_sql_file_list(paths),
-                                     agy_step_usage_table=AOP_AGY_STEP_USAGE_TABLE))
-                continue
             if tool_name == "Agy":
                 _load_agy_models(db, paths)
                 parts.append(builder(_sql_file_list(paths), models_table=AGY_MODELS_TABLE))
@@ -1481,8 +1360,29 @@ def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot]
     return row_count
 
 
+def _unmigrated_aop_results(db: duckdb.DuckDBPyConnection,
+                            files: dict[str, SourceSnapshot]) -> set[str]:
+    """AOP results that are not v3, whose cached usage is kept until AOP migrates them."""
+    paths = [path for path, snapshot in files.items() if snapshot.tool == AOP_RESULT_TOOL]
+    if not paths:
+        return set()
+    unmigrated = {row[0] for row in db.execute(f"""
+        SELECT replace(filename, '\\', '/')
+        FROM read_json_objects({_sql_file_list(paths)}, format='auto', filename=true,
+                               ignore_errors=true)
+        WHERE coalesce(json_extract_string(json, '$.usage_schema'), '') != '{AOP_USAGE_SCHEMA}'
+    """).fetchall()}
+    if unmigrated:
+        print(f"  warning: {len(unmigrated)} AOP results are not {AOP_USAGE_SCHEMA}; their cached "
+              "usage is kept. Run aop migrate-results.", file=sys.stderr)
+    return unmigrated
+
+
 def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
-                    timer: DebugTimer) -> None:
+                    timer: DebugTimer) -> set[str]:
+    """Rebuild the table from source files, returning the AOP results left unread."""
+    unmigrated = _unmigrated_aop_results(db, files)
+    files = {path: snapshot for path, snapshot in files.items() if path not in unmigrated}
     parts = _build_source_sql(db, _group_files_by_tool(files))
     if parts:
         with timer.span("build tokens table", f"{len(parts)} sources"):
@@ -1496,6 +1396,7 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
     _deduplicate_aop(db, timer)
     with timer.span("price rows"):
         price_tokens(db, all_rows=True)
+    return unmigrated
 
 
 def _carry_over_vanished_rows(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
@@ -1640,14 +1541,18 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
                  f"{len(files)} files in {dir_count} dirs")
 
     meta = _load_cache_meta()
-    # Files a scan no longer finds stay known, so their rows are kept and a file that
-    # reappears unchanged is not loaded again.
-    known = {**(meta[1] if meta else {}), **files}
+
+    def known(unread: set[str]) -> dict[str, SourceSnapshot]:
+        # Files a scan no longer finds, or could not read, stay known with their last
+        # snapshot, so their rows are kept and a file that reappears unchanged is not
+        # loaded again.
+        return {**(meta[1] if meta else {}),
+                **{path: snapshot for path, snapshot in files.items() if path not in unread}}
 
     if refresh:
         timer.note("cache refresh forced by --refresh")
-        _rebuild_tokens(db, files, timer)
-        _write_cache(db, known, timer, "rebuilt cache", "--refresh")
+        unread = _rebuild_tokens(db, files, timer)
+        _write_cache(db, known(unread), timer, "rebuilt cache", "--refresh")
         return
 
     cache_mt = CACHE_FILE.stat().st_mtime if CACHE_FILE.exists() else 0.0
@@ -1669,7 +1574,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             if reprice:
                 with timer.span("reprice rows", pricing_basis()):
                     price_tokens(db, all_rows=True)
-                _write_cache(db, known, timer, "repriced cache", pricing_basis())
+                _write_cache(db, known(set()), timer, "repriced cache", pricing_basis())
                 return
             print("  (cached)", file=sys.stderr)
             timer.note(
@@ -1679,8 +1584,8 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
 
         if _aop_change_requires_rebuild(cached_files, changed):
             timer.note("retained AOP result changed; rebuilding for precedence")
-            _rebuild_tokens(db, files, timer)
-            _write_cache(db, known, timer, "rebuilt cache", "AOP result changed")
+            unread = _rebuild_tokens(db, files, timer)
+            _write_cache(db, known(unread), timer, "rebuilt cache", "AOP result changed")
             return
 
         with timer.span("load parquet cache", CACHE_FILE.as_posix()):
@@ -1688,13 +1593,15 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         if not _table_has_source_file(db):
             timer.note("cache schema missing source_file; rebuilding")
             db.execute("DROP TABLE tokens")
-            _rebuild_tokens(db, files, timer)
-            _write_cache(db, known, timer, "rebuilt cache", "schema migration")
+            unread = _rebuild_tokens(db, files, timer)
+            _write_cache(db, known(unread), timer, "rebuilt cache", "schema migration")
             return
 
         timer.note(
             f"incremental update: {len(changed)} changed, {len(vanished)} vanished and kept; newest source {_fmt_debug_ts(newest_source)}"
         )
+        unread = _unmigrated_aop_results(db, {path: files[path] for path in changed})
+        changed = [path for path in changed if path not in unread]
         _delete_source_files(db, changed, timer)
         _append_source_files(db, {path: files[path] for path in changed}, timer)
         _deduplicate_aop(db, timer)
@@ -1702,7 +1609,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             price_tokens(db, all_rows=reprice)
         _write_cache(
             db,
-            known,
+            known(unread),
             timer,
             "updated cache",
             f"{len(changed)} changed, {len(vanished)} vanished and kept",
@@ -1720,8 +1627,8 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     else:
         timer.note(f"cache missing: {CACHE_FILE}")
 
-    _rebuild_tokens(db, files, timer)
-    _write_cache(db, known, timer, "rebuilt cache")
+    unread = _rebuild_tokens(db, files, timer)
+    _write_cache(db, known(unread), timer, "rebuilt cache")
 
 
 def _get_version() -> str:
