@@ -1768,7 +1768,7 @@ class TestDebugHooks(Case):
         assert any(sample.label == "append changed files" for sample in timer.samples)
         assert not any(sample.label.startswith("probe ") for sample in timer.samples)
 
-    def test_incremental_cache_removes_deleted_files(self):
+    def test_cache_keeps_rows_of_deleted_files_through_updates_and_rebuilds(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
         src_dir = tmp_path / "src"
@@ -1780,11 +1780,12 @@ class TestDebugHooks(Case):
             "input_tokens": 1, "output_tokens": 2, "cache_write_tokens": 0,
             "cache_read_tokens": 0, "total_tokens": 3,
         }) + "\n")
-        file_b.write_text(json.dumps({
+        file_b_text = json.dumps({
             "project": "beta", "session": "s2", "date": "2026-03-15", "model": "m",
             "input_tokens": 4, "output_tokens": 5, "cache_write_tokens": 0,
             "cache_read_tokens": 0, "total_tokens": 9,
-        }) + "\n")
+        }) + "\n"
+        file_b.write_text(file_b_text)
 
         def build_sql(source_expr):
             return f"""
@@ -1828,14 +1829,22 @@ class TestDebugHooks(Case):
 
         file_b.unlink()
 
-        db2 = duckdb.connect()
-        register_macros(db2)
-        timer = main_mod.DebugTimer(True)
-        main_mod.load_tokens(db2, refresh=False, timing=timer)
-        rows = db2.sql("SELECT project, total_tokens FROM tokens ORDER BY project").fetchall()
-        assert rows == [("alpha", 3)]
-        assert any(sample.label == "drop changed rows" for sample in timer.samples)
-        assert not any(sample.label == "append changed files" for sample in timer.samples)
+        def load(refresh=False):
+            db = duckdb.connect()
+            register_macros(db)
+            main_mod.load_tokens(db, refresh=refresh)
+            return db.sql("SELECT project, total_tokens FROM tokens ORDER BY project").fetchall()
+
+        expected = [("alpha", 3), ("beta", 9)]
+        assert load() == expected
+        assert load(refresh=True) == expected
+        monkeypatch.setattr(main_mod, "CACHE_SCHEMA_VERSION", main_mod.CACHE_SCHEMA_VERSION + 1)
+        assert load() == expected
+
+        # A deleted file that reappears replaces its kept rows instead of adding to them.
+        file_b.write_text(file_b_text)
+        assert load() == expected
+        assert load(refresh=True) == expected
 
     def test_agy_resume_replaces_cached_session_without_double_counting(self):
         tmp_path = self.tmp_path

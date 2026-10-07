@@ -1389,14 +1389,9 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
 
 def _expand_dependency_changes(
         files: dict[str, SourceSnapshot],
-        cached_files: dict[str, SourceSnapshot],
         changed: list[str],
-        deleted: list[str],
 ) -> list[str]:
-    dependencies = [
-        files.get(path) or cached_files.get(path)
-        for path in [*changed, *deleted]
-    ]
+    dependencies = [files.get(path) for path in changed]
     if any(snapshot and snapshot.tool == AGY_METADATA_TOOL for snapshot in dependencies):
         changed = [
             *changed,
@@ -1429,9 +1424,37 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
             db.execute("ALTER TABLE tokens ADD COLUMN IF NOT EXISTS cache_write_1h_tokens INT")
     else:
         _empty_tokens_table(db)
+    _carry_over_vanished_rows(db, files, timer)
     _deduplicate_aop(db, timer)
     with timer.span("price rows"):
         price_tokens(db, all_rows=True)
+
+
+def _carry_over_vanished_rows(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
+                              timer: DebugTimer) -> None:
+    """Keep the cached rows of source files this scan did not find.
+
+    Tools prune their own logs, and AOP results are found relative to the working
+    directory, so the cache can hold the only record of that usage.
+    """
+    if not CACHE_FILE.exists():
+        return
+    cache = _sql_literal(CACHE_FILE.as_posix())
+    cached = {row[0] for row in db.sql(f"DESCRIBE SELECT * FROM read_parquet({cache})").fetchall()}
+    if "source_file" not in cached:
+        return
+    current = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
+    columns = ", ".join(f'"{name}"' for name in sorted(cached & current))
+    with timer.span("carry over vanished sources"):
+        db.execute("CREATE OR REPLACE TEMP TABLE scanned_sources (path VARCHAR)")
+        db.executemany("INSERT INTO scanned_sources VALUES (?)", [[path] for path in files])
+        db.execute(f"""
+            INSERT INTO tokens BY NAME
+            SELECT {columns} FROM read_parquet({cache})
+            WHERE source_file IS NOT NULL
+              AND source_file NOT IN (SELECT path FROM scanned_sources)
+        """)
+        db.execute("DROP TABLE scanned_sources")
 
 
 def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
@@ -1487,13 +1510,13 @@ def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
 
 
 def _aop_change_requires_rebuild(
-    cached_files: dict[str, SourceSnapshot], changed: list[str], deleted: list[str]
+    cached_files: dict[str, SourceSnapshot], changed: list[str]
 ) -> bool:
     """A changed retained result may release a previously shadowed native session."""
     return any(
         cached_files.get(path)
         and cached_files[path].tool == AOP_RESULT_TOOL
-        for path in [*changed, *deleted]
+        for path in changed
     )
 
 
@@ -1548,13 +1571,17 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     timer.record("scan source mtimes", scan_seconds,
                  f"{len(files)} files in {dir_count} dirs")
 
+    meta = _load_cache_meta()
+    # Files a scan no longer finds stay known, so their rows are kept and a file that
+    # reappears unchanged is not loaded again.
+    known = {**(meta[1] if meta else {}), **files}
+
     if refresh:
         timer.note("cache refresh forced by --refresh")
         _rebuild_tokens(db, files, timer)
-        _write_cache(db, files, timer, "rebuilt cache", "--refresh")
+        _write_cache(db, known, timer, "rebuilt cache", "--refresh")
         return
 
-    meta = _load_cache_meta()
     cache_mt = CACHE_FILE.stat().st_mtime if CACHE_FILE.exists() else 0.0
     newest_source = max((meta.mtime_ns / 1e9 for meta in files.values()), default=0.0)
 
@@ -1566,15 +1593,15 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             path for path, snapshot in files.items()
             if cached_files.get(path) != snapshot
         )
-        deleted = sorted(path for path in cached_files if path not in files)
-        changed = _expand_dependency_changes(files, cached_files, changed, deleted)
-        if not changed and not deleted:
+        vanished = sorted(path for path in cached_files if path not in files)
+        changed = _expand_dependency_changes(files, changed)
+        if not changed:
             with timer.span("load parquet cache", CACHE_FILE.as_posix()):
                 db.execute(f"CREATE TABLE tokens AS FROM '{CACHE_FILE.as_posix()}'")
             if reprice:
                 with timer.span("reprice rows", pricing_basis()):
                     price_tokens(db, all_rows=True)
-                _write_cache(db, files, timer, "repriced cache", pricing_basis())
+                _write_cache(db, known, timer, "repriced cache", pricing_basis())
                 return
             print("  (cached)", file=sys.stderr)
             timer.note(
@@ -1582,10 +1609,10 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             )
             return
 
-        if _aop_change_requires_rebuild(cached_files, changed, deleted):
-            timer.note("retained AOP result changed or disappeared; rebuilding for precedence")
+        if _aop_change_requires_rebuild(cached_files, changed):
+            timer.note("retained AOP result changed; rebuilding for precedence")
             _rebuild_tokens(db, files, timer)
-            _write_cache(db, files, timer, "rebuilt cache", "AOP result changed")
+            _write_cache(db, known, timer, "rebuilt cache", "AOP result changed")
             return
 
         with timer.span("load parquet cache", CACHE_FILE.as_posix()):
@@ -1594,23 +1621,23 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             timer.note("cache schema missing source_file; rebuilding")
             db.execute("DROP TABLE tokens")
             _rebuild_tokens(db, files, timer)
-            _write_cache(db, files, timer, "rebuilt cache", "schema migration")
+            _write_cache(db, known, timer, "rebuilt cache", "schema migration")
             return
 
         timer.note(
-            f"incremental update: {len(changed)} changed, {len(deleted)} deleted; newest source {_fmt_debug_ts(newest_source)}"
+            f"incremental update: {len(changed)} changed, {len(vanished)} vanished and kept; newest source {_fmt_debug_ts(newest_source)}"
         )
-        _delete_source_files(db, changed + deleted, timer)
+        _delete_source_files(db, changed, timer)
         _append_source_files(db, {path: files[path] for path in changed}, timer)
         _deduplicate_aop(db, timer)
         with timer.span("price rows"):
             price_tokens(db, all_rows=reprice)
         _write_cache(
             db,
-            files,
+            known,
             timer,
             "updated cache",
-            f"{len(changed)} changed, {len(deleted)} deleted",
+            f"{len(changed)} changed, {len(vanished)} vanished and kept",
         )
         return
 
@@ -1626,7 +1653,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         timer.note(f"cache missing: {CACHE_FILE}")
 
     _rebuild_tokens(db, files, timer)
-    _write_cache(db, files, timer, "rebuilt cache")
+    _write_cache(db, known, timer, "rebuilt cache")
 
 
 def _get_version() -> str:

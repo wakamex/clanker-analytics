@@ -62,7 +62,7 @@ repository, neighboring repositories, and repositories nested one workspace leve
 are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest
 at `~/.cache/clanker-analytics/tokens-meta.json`.
 
-The cache is incremental: unchanged source files are reused, changed files are re-read, and deleted files are removed from the cached table. A full rebuild only happens when the cache is missing, you pass `--refresh`, or the cache schema changes.
+The cache is incremental: unchanged source files are reused and changed files are re-read. A full rebuild only happens when the cache is missing, you pass `--refresh`, or the cache schema changes. The cache keeps the usage of source files it no longer finds, through updates and rebuilds alike, because tools prune their own logs and AOP results are found relative to the working directory. Deleting `tokens.parquet` therefore deletes that history; usage whose logs are gone cannot be recovered from the logs.
 
 ## Quota pace comparison
 
