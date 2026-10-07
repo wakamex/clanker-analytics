@@ -1775,7 +1775,10 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
 
     if args.sql:
         with timer.span("run custom sql"):
-            db.sql(args.sql).show(max_rows=100)
+            result = db.sql(args.sql)
+            # Statements such as COPY return no rows to show.
+            if result is not None:
+                result.show(max_rows=100)
         return 0
 
     if args.regime:
