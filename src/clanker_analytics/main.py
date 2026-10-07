@@ -1292,6 +1292,10 @@ def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
                 continue
             dir_count += 1
             for path in root.rglob(pattern):
+                # AOP keeps run logs in .aop/runs, which can sit inside a tool's own tree
+                # (Claude memory folders); they are not that tool's transcripts.
+                if ".aop" in path.relative_to(root).parts:
+                    continue
                 stats = [path.stat()]
                 if tool == ZCODE_TOOL:
                     # SQLite commits land in the write-ahead log before checkpointing.

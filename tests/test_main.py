@@ -1650,6 +1650,22 @@ class TestDebugHooks(Case):
         assert files[canonical.as_posix()].tool == "Agy"
         assert dir_count == 1
 
+    def test_source_scan_skips_aop_run_logs_inside_a_tool_tree(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
+        projects = tmp_path / "projects"
+        transcript = projects / "-code-debate" / "session.jsonl"
+        run_log = projects / "-code-debate" / "memory" / ".aop" / "runs" / "run" / "events.jsonl"
+        run_log.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        run_log.write_text("{}\n")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [("Claude Code", projects, "*.jsonl")])
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        files, _, _ = main_mod.scan_source_files()
+
+        assert list(files) == [transcript.as_posix()]
+
     def test_sources_mtime_includes_gemini_json(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
