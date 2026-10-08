@@ -80,7 +80,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 26
+CACHE_SCHEMA_VERSION = 27
 
 AGY_METADATA_TOOL = "Agy metadata"
 # AOP appends every state directory that records a run here, one absolute .aop path per line.
@@ -1421,6 +1421,7 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
         _empty_tokens_table(db)
     _carry_over_vanished_rows(db, files, timer)
     _drop_other_copies_of_aop_runs(db, list(files), timer)
+    _name_claude_projects(db, timer)
     _deduplicate_aop(db, timer)
     with timer.span("price rows"):
         price_tokens(db, all_rows=True)
@@ -1487,6 +1488,39 @@ def _drop_other_copies_of_aop_runs(db: duckdb.DuckDBPyConnection, read: list[str
                         = regexp_extract(tokens.source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1))
         """)
         db.execute("DROP TABLE read_results")
+
+
+def _name_claude_projects(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
+    """Name each Claude Code session's project after the directory it was launched in.
+
+    Claude Code stores a session under ~/.claude/projects/<launch directory with every
+    character other than a letter or digit replaced by '-'>. The launch directory is the
+    ancestor of any of the folder's request directories that encodes to that name, so
+    requests made in a subdirectory or another repository keep the session's project.
+    """
+    with timer.span("name Claude projects"):
+        db.execute("""
+            WITH requests AS (
+                SELECT DISTINCT regexp_extract(source_file, '/projects/([^/]+)/', 1) AS folder,
+                       project_path AS cwd
+                FROM tokens
+                WHERE tool = 'Claude Code' AND coalesce(source_kind, 'native') = 'native'
+                  AND project_path IS NOT NULL
+            ),
+            launch AS (
+                SELECT folder, min(dir) AS dir FROM (
+                    SELECT folder, unnest(list_filter(
+                        list_transform(range(2, len(string_split(cwd, '/')) + 1),
+                                       i -> array_to_string(string_split(cwd, '/')[1:i], '/')),
+                        dir -> regexp_replace(dir, '[^a-zA-Z0-9]', '-', 'g') = folder)) AS dir
+                    FROM requests)
+                GROUP BY folder
+            )
+            UPDATE tokens SET project = lower(split_part(launch.dir, '/', -1))
+            FROM launch
+            WHERE tokens.tool = 'Claude Code' AND coalesce(tokens.source_kind, 'native') = 'native'
+              AND regexp_extract(tokens.source_file, '/projects/([^/]+)/', 1) = launch.folder
+        """)
 
 
 def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
@@ -1668,6 +1702,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         _delete_source_files(db, changed, timer)
         _append_source_files(db, {path: files[path] for path in changed}, timer)
         _drop_other_copies_of_aop_runs(db, changed, timer)
+        _name_claude_projects(db, timer)
         _deduplicate_aop(db, timer)
         with timer.span("price rows"):
             price_tokens(db, all_rows=reprice)

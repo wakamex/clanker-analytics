@@ -1970,6 +1970,28 @@ class TestDebugHooks(Case):
         assert db2.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/two"
         assert any(sample.label == "append changed files" for sample in timer.samples)
 
+    def test_claude_projects_are_named_after_the_launch_directory(self):
+        db = duckdb.connect()
+        db.execute(f"CREATE TABLE tokens ({main_mod.TOKEN_SCHEMA})")
+        folder = "/home/u/.claude/projects/-code-llama-cpp"
+        db.execute("""
+            INSERT INTO tokens (tool, project, project_path, source_kind, source_file) VALUES
+                ('Claude Code', 'llama.cpp', '/code/llama.cpp', 'native', ?),
+                ('Claude Code', 'cat', '/code/llama.cpp/build/exp/cat', 'native', ?),
+                ('Claude Code', 'codex', '/code/codex', 'native', ?),
+                ('Claude Code', 'sub', '/code/llama.cpp/sub', 'native', ?),
+                ('Claude Code', 'other', '/elsewhere/other', 'native', '/home/u/.claude/projects/-x/b.jsonl'),
+                ('Codex', 'cat', '/code/llama.cpp/build/exp/cat', 'native', '/home/u/.codex/c.jsonl')
+        """, [f"{folder}/a.jsonl", f"{folder}/a.jsonl", f"{folder}/a.jsonl",
+              f"{folder}/a/subagents/agent-1.jsonl"])
+
+        main_mod._name_claude_projects(db, main_mod.DebugTimer(False))
+
+        assert db.sql("SELECT tool, project FROM tokens").fetchall() == [
+            ("Claude Code", "llama.cpp"), ("Claude Code", "llama.cpp"), ("Claude Code", "llama.cpp"),
+            ("Claude Code", "llama.cpp"), ("Claude Code", "other"), ("Codex", "cat"),
+        ]
+
     def test_aop_run_copied_under_two_roots_counts_once(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch

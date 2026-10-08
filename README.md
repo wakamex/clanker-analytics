@@ -212,8 +212,9 @@ It ends with an estimate of what Claude Code subagents would have paid for promp
 - `retained_text` - unique retained transcript text estimated at four characters per token when the
   source supports it
 - `execution_type` - `interactive`, `exec`, `subagent`, or `unknown`; available through
-  `--by execution` and custom SQL. Sessions under `/.aop/worktrees/` count as subagents even when
+  `table --by execution` and the `sql` command. Sessions under `/.aop/worktrees/` count as subagents even when
   launched through a headless execution.
+- `project` - the project's directory name. A Claude Code session's requests all take the name of the directory it was launched in, including requests made in a subdirectory or another repository. AOP runs take the repository that owns `.aop`.
 - `project_path` - exact working directory when the source log provides it
 - `token_count_type` - `exact` when the source retained complete API token metadata, otherwise
   `estimated_processed`
