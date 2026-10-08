@@ -86,10 +86,11 @@ def _color(tool: str) -> str:
 
 
 def _stack(ax, x, series: dict[str, np.ndarray], width: float,
-           partial: int | None = None, horizontal: bool = False) -> None:
+           partial: int | None = None, horizontal: bool = False,
+           labels: dict[int, str] | None = None) -> None:
     """Stacked bars, first series at the bottom, with a background-colored gap between
     segments so each tool's share stays legible. The bar at `partial`, a period still in
-    progress, is hatched."""
+    progress, is hatched, and `labels` maps bar indexes to text at their ends."""
     bottoms = np.zeros(len(x))
     plt.rcParams["hatch.color"] = BG
     plt.rcParams["hatch.linewidth"] = 1.5
@@ -99,20 +100,31 @@ def _stack(ax, x, series: dict[str, np.ndarray], width: float,
         if partial is not None:
             bars[partial].set_hatch("///")
         bottoms += vals
+    for i, text in (labels or {}).items():
+        point, offset = ((bottoms[i], x[i]), (4, 0)) if horizontal else ((x[i], bottoms[i]), (0, 3))
+        ax.annotate(text, point, xytext=offset, textcoords="offset points", color=TEXT,
+                    **_font(10), ha="left" if horizontal else "center",
+                    va="center" if horizontal else "bottom")
     # Headroom above the tallest bar, which the stack's segment edges would otherwise
-    # pin to the plot's edge.
-    (ax.set_xlim if horizontal else ax.set_ylim)(0, max(bottoms.max(), 1e-9) * 1.05)
+    # pin to the plot's edge, and room for its label.
+    headroom = 1.05 if not labels else (1.15 if horizontal else 1.08)
+    (ax.set_xlim if horizontal else ax.set_ylim)(0, max(bottoms.max(), 1e-9) * headroom)
 
 
 def _plot_periods(ax, periods: list[date], step: int,
                   series: dict[str, np.ndarray]) -> str | None:
     """Cost as one stacked bar per day, or per week starting Monday when step is 7.
 
-    Returns a note explaining the hatched bar of a period still in progress, if any."""
+    Up to two weeks of bars each show their total; more show only the tallest, since
+    labels on every bar would run together. Returns a note explaining the hatched bar of
+    a period still in progress when its own label does not."""
     x = np.arange(len(periods))
     today = date.today()
     partial = len(periods) - 1 if periods[-1] + timedelta(step) > today else None
-    _stack(ax, x, series, width=0.8, partial=partial)
+    totals = sum(series.values())
+    shown = list(x) if len(periods) <= 14 else [int(np.argmax(totals))]
+    labels = {i: _fmt_cost(totals[i]) + (" so far" if i == partial else "") for i in shown}
+    _stack(ax, x, series, width=0.8, partial=partial, labels=labels)
     if step == 7:
         # A label at the first week of each month.
         ticks = []
@@ -131,7 +143,7 @@ def _plot_periods(ax, periods: list[date], step: int,
     ax.set_xticks(ticks)
     ax.set_xticklabels(labels, rotation=0, ha="center", **_font(11))
     ax.set_xlim(-0.6, len(periods) - 0.4)
-    if partial is not None:
+    if partial is not None and partial not in labels:
         return f"hatched: {'today' if step == 1 else 'this week'} so far"
     return None
 
@@ -215,8 +227,11 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     if use_bars and projects:
         # Horizontal, so project names of any length get their own column.
         y = np.arange(len(projects))
-        _stack(ax, y, {t: np.array([tool_proj[t].get(p, 0) for p in projects], dtype=float)
-                       for t in order}, width=0.6, horizontal=True)
+        project_series = {t: np.array([tool_proj[t].get(p, 0) for p in projects], dtype=float)
+                          for t in order}
+        totals = sum(project_series.values())
+        _stack(ax, y, project_series, width=0.6, horizontal=True,
+               labels={i: _fmt_cost(total) for i, total in enumerate(totals)})
         ax.set_yticks(y)
         ax.set_yticklabels(projects, **_font(11))
         ax.invert_yaxis()
@@ -372,9 +387,10 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     cmd = "uvx clanker-analytics chart"
     if since_label and since_label != "7d":
         cmd += f" --since {since_label}"
-    fig.text(0.95, 0.01, cmd, color=MUTED, **_font(11), ha="right", va="bottom")
+    fig.text(0.05, 0.01, cmd, color=MUTED, **_font(11), ha="left", va="bottom")
     if note:
-        fig.text(0.05, 0.01, note, color=MUTED, **_font(11), ha="left", va="bottom")
+        # Bottom right, under the hatched bar it explains.
+        fig.text(0.95, 0.01, note, color=MUTED, **_font(11), ha="right", va="bottom")
 
     plt.tight_layout(rect=[0, 0.04, 1, 0.78])
     output = output or OUTPUT
