@@ -64,7 +64,7 @@ DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/session
 are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest
 at `~/.cache/clanker-analytics/tokens-meta.json`.
 
-The cache is incremental: unchanged source files are reused and changed files are re-read. A full rebuild only happens when the cache is missing, you pass `--refresh`, or the cache schema changes. The cache keeps the usage of source files it no longer finds, through updates and rebuilds alike, because tools prune their own logs and AOP runs get removed. Deleting `tokens.parquet` therefore deletes that history; usage whose logs are gone cannot be recovered from the logs.
+The cache is incremental: unchanged source files are reused and changed files are re-read. Claude Code and Codex logs only grow, so a changed one is read from where the last read stopped, after a hash of the bytes before that point confirms the log was not rewritten; a rewritten or truncated log is read again from its start. A Codex log's new lines are parsed together with the earlier lines its parser needs, such as the session header, the latest model, and the latest running token total, so they give the same rows as reading the whole log. A full rebuild only happens when the cache is missing, you pass `--refresh`, or the cache schema changes. The cache keeps the usage of source files it no longer finds, through updates and rebuilds alike, because tools prune their own logs and AOP runs get removed. Deleting `tokens.parquet` therefore deletes that history; usage whose logs are gone cannot be recovered from the logs.
 
 ## Quota pace comparison
 

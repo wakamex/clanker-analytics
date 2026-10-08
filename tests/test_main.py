@@ -1618,6 +1618,143 @@ class TestWindowsPaths(Case):
 # Debug / profiling tests
 # ===========================================================================
 
+def _codex_line(timestamp, kind, payload):
+    return json.dumps({"timestamp": timestamp, "type": kind, "payload": payload}) + "\n"
+
+
+def _codex_tokens(timestamp, total, last=None):
+    info = {"total_token_usage": {"total_tokens": total}}
+    if last is not None:
+        info["last_token_usage"] = {"total_tokens": last, "input_tokens": last - 10,
+                                    "output_tokens": 10, "cached_input_tokens": 0}
+    return _codex_line(timestamp, "event_msg", {"type": "token_count", "info": info})
+
+
+def _claude_line(timestamp, output):
+    return json.dumps({
+        "type": "assistant", "timestamp": timestamp, "sessionId": "s1", "cwd": "/code/alpha",
+        "message": {"model": "claude-opus-4-6", "usage": {
+            "input_tokens": 5, "output_tokens": output, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 100}},
+    }) + "\n"
+
+
+class TestAppendOnlyLogs(Case):
+    def setUp(self):
+        super().setUp()
+        self.claude = self.tmp_path / "claude" / "-code-alpha" / "s1.jsonl"
+        self.codex = (self.tmp_path / "codex" / "2026" / "10" / "08"
+                      / "rollout-2026-10-08T10-00-00-019fd3f1-91fd-7902-8893-028d79084e33.jsonl")
+        for path in (self.claude, self.codex):
+            path.parent.mkdir(parents=True)
+        self.monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            ("Claude Code", self.tmp_path / "claude", "*.jsonl"),
+            ("Codex", self.tmp_path / "codex", "*.jsonl"),
+        ])
+        self.monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+        self.use_cache("cache")
+
+    def use_cache(self, name):
+        cache_dir = self.tmp_path / name
+        self.monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        self.monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        self.monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+
+    def load(self, refresh=False):
+        db = duckdb.connect()
+        register_macros(db)
+        timer = main_mod.DebugTimer(True)
+        with mock.patch("sys.stderr"):
+            main_mod.load_tokens(db, refresh=refresh, timing=timer)
+        rows = sorted(db.sql("SELECT * EXCLUDE (api_cost_usd, current_api_cost_usd, pricing) "
+                             "FROM tokens").fetchall(), key=repr)
+        return rows, timer
+
+    def rebuilt_rows(self):
+        self.use_cache("rebuilt")
+        rows, _ = self.load(refresh=True)
+        self.use_cache("cache")
+        return rows
+
+    def append(self, path, text):
+        with open(path, "a") as log:
+            log.write(text)
+
+    def test_new_lines_parse_as_the_whole_log_does(self):
+        self.claude.write_text(_claude_line("2026-10-08T10:00:01Z", 10)
+                               + _claude_line("2026-10-08T10:00:02Z", 20))
+        self.codex.write_text(
+            _codex_line("2026-10-08T10:00:00Z", "session_meta",
+                        {"id": "019fd3f1-91fd-7902-8893-028d79084e33", "cwd": "/code/beta"})
+            + _codex_line("2026-10-08T10:00:01Z", "turn_context", {"model": "gpt-5.5"})
+            + _codex_line("2026-10-08T10:00:01Z", "event_msg", {
+                "type": "thread_settings_applied",
+                "thread_settings": {"model": "gpt-5.5", "service_tier": "priority"}})
+            + _codex_tokens("2026-10-08T10:00:20Z", 100, 100))
+        rows, _ = self.load()
+        assert len(rows) == 3
+
+        steps = [
+            # A partial last line waits for its newline; a repeated total adds nothing.
+            (_claude_line("2026-10-08T10:01:00Z", 30) + _claude_line("2026-10-08T10:01:01Z", 40)[:50],
+             _codex_tokens("2026-10-08T10:01:00Z", 100, 100)
+             + _codex_tokens("2026-10-08T10:01:10Z", 250, 150)
+             + _codex_line("2026-10-08T10:01:20Z", "turn_context", {"model": "gpt-5.6"})
+             + _codex_tokens("2026-10-08T10:01:30Z", 400, 150)),
+            # Totals without a last-turn count take the difference from the previous total.
+            (_claude_line("2026-10-08T10:01:01Z", 40)[50:] + _claude_line("2026-10-08T10:02:00Z", 50),
+             _codex_tokens("2026-10-08T10:02:00Z", 500)
+             + _codex_tokens("2026-10-08T10:02:10Z", 500)),
+        ]
+        for step, (claude_text, codex_text) in enumerate(steps):
+            with self.subTest(step=step):
+                self.append(self.claude, claude_text)
+                self.append(self.codex, codex_text)
+                rows, timer = self.load()
+                assert rows == self.rebuilt_rows()
+                labels = {sample.label for sample in timer.samples}
+                assert "copy new log lines" in labels
+                # The rebuild recorded only the Claude log's position, so the Codex log
+                # is read whole once; after that both logs are read from their positions.
+                assert ("drop changed rows" in labels) == (step == 0)
+        assert len(rows) == 9
+        positions = main_mod._load_cache_meta()[3]
+        assert positions[self.claude.as_posix()].offset == self.claude.stat().st_size
+        assert len(positions[self.codex.as_posix()].context) == 4
+
+        # A rewritten log is read again from its start.
+        self.claude.write_text(_claude_line("2026-10-08T11:00:00Z", 99) * 3)
+        rows, _ = self.load()
+        assert rows == self.rebuilt_rows()
+        assert [row[6] for row in rows if row[0] == "Claude Code"] == [99, 99, 99]
+
+    def test_codex_log_inside_a_forks_replay_window_is_read_whole(self):
+        meta = _codex_line("2026-10-08T10:00:00Z", "session_meta",
+                           {"id": "019fd3f1-91fd-7902-8893-028d79084e33", "cwd": "/code/beta",
+                            "forked_from_id": "parent"})
+        model = _codex_line("2026-10-08T10:00:00Z", "turn_context", {"model": "gpt-5.5"})
+        replay = "".join(_codex_tokens(f"2026-10-08T10:00:01.{i:03d}Z", 100 * (i + 1), 100)
+                         for i in range(12))
+        self.codex.write_text(meta + model + replay)
+        mirror = self.tmp_path / "mirror.jsonl"
+        position, whole = main_mod._stage_log(self.codex.as_posix(), "Codex", None, mirror)
+        assert whole
+
+        self.append(self.codex, _codex_tokens("2026-10-08T10:05:00Z", 1300, 100))
+        _, whole = main_mod._stage_log(self.codex.as_posix(), "Codex", position, mirror)
+        assert whole
+
+    def test_vanished_log_keeps_its_rows_after_a_tail_read(self):
+        self.claude.write_text(_claude_line("2026-10-08T10:00:01Z", 10))
+        self.load()
+        self.append(self.claude, _claude_line("2026-10-08T10:00:02Z", 20))
+        rows, _ = self.load()
+        assert len(rows) == 2
+        self.claude.unlink()
+        rows, _ = self.load()
+        assert len(rows) == 2
+
+
 class TestDebugHooks(Case):
     def test_source_scan_discovers_only_canonical_agy_transcript(self):
         tmp_path = self.tmp_path

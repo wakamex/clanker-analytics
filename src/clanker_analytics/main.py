@@ -3,6 +3,7 @@
 
 import argparse
 import cProfile
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ import re
 import sqlite3
 import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -1209,6 +1211,187 @@ class SourceSnapshot:
         }
 
 
+# Logs that only ever grow, so a changed one is read from where the last read stopped.
+APPEND_ONLY_TOOLS = ("Claude Code", "Codex")
+# Bytes before a read position whose hash shows the log was not rewritten since.
+CHECKPOINT_BYTES = 4096
+# Codex replays a fork's history within this many seconds of the session start.
+CODEX_REPLAY_SECONDS = 5
+CODEX_LINE_TYPES = re.compile(rb'"type":\s*"([a-z_]+)"')
+CODEX_TIMESTAMP = re.compile(rb'"timestamp":\s*"([^"]+)"')
+CODEX_INFO = re.compile(rb'"info":\s*\{')
+CODEX_SERVICE_TIER = re.compile(rb'"service_tier":\s*"')
+
+
+@dataclass(frozen=True)
+class ReadPosition:
+    """Where the last read of an append-only log stopped.
+
+    `offset` ends the last complete line read, `checkpoint` hashes the bytes before it,
+    and `context` holds the byte ranges of the earlier Codex lines its parser needs to
+    read the lines after `offset` the way it reads the whole log: the session headers,
+    the latest model and service tier events, and the latest running token total.
+    """
+    offset: int
+    checkpoint: str
+    context: tuple[tuple[int, int], ...] = ()
+
+    def to_json(self) -> dict:
+        return {"offset": self.offset, "checkpoint": self.checkpoint,
+                "context": [list(span) for span in self.context]}
+
+
+def _checkpoint(source, offset: int) -> str:
+    start = max(0, offset - CHECKPOINT_BYTES)
+    source.seek(start)
+    return hashlib.sha256(source.read(offset - start)).hexdigest()
+
+
+def _complete_end(source, start: int, size: int) -> int:
+    """The end of the last complete line between start and size."""
+    end = size
+    while end > start:
+        chunk_start = max(start, end - 65536)
+        source.seek(chunk_start)
+        newline = source.read(end - chunk_start).rfind(b"\n")
+        if newline >= 0:
+            return chunk_start + newline + 1
+        end = chunk_start
+    return start
+
+
+def _codex_line_kind(line: bytes) -> str | None:
+    """Which kind of context line this Codex line is, if any."""
+    types = CODEX_LINE_TYPES.findall(line[:400])
+    if not types:
+        return None
+    if types[0] in (b"session_meta", b"turn_context"):
+        return types[0].decode()
+    if types[0] != b"event_msg" or len(types) < 2:
+        return None
+    if types[1] == b"token_count" and CODEX_INFO.search(line):
+        return "token_count"
+    if types[1] == b"thread_settings_applied":
+        return "tier" if CODEX_SERVICE_TIER.search(line) else "settings"
+    return None
+
+
+def _codex_timestamp(line: bytes) -> datetime | None:
+    match = CODEX_TIMESTAMP.search(line[:200])
+    try:
+        return datetime.fromisoformat(match.group(1).decode()) if match else None
+    except ValueError:
+        return None
+
+
+def _codex_context_line(line: bytes) -> bytes:
+    """A context token count keeps only its running total, so it adds no row itself."""
+    record = json.loads(line)
+    record["payload"]["info"].pop("last_token_usage", None)
+    record["payload"].pop("rate_limits", None)
+    return json.dumps(record, separators=(",", ":")).encode() + b"\n"
+
+
+def _read_line(source, span: tuple[int, int]) -> bytes:
+    source.seek(span[0])
+    return source.read(span[1] - span[0])
+
+
+def _stage_log(path: str, tool: str, position: ReadPosition | None,
+               mirror: Path) -> tuple[ReadPosition, bool]:
+    """Copy a log's unread complete lines to `mirror`, with any context its parser needs.
+
+    Returns the new read position and whether the log was copied from its start, whose
+    cached rows the copy then replaces.
+    """
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "rb") as source, open(mirror, "wb") as out:
+        size = os.fstat(source.fileno()).st_size
+        start = 0
+        if (position and position.offset <= size
+                and _checkpoint(source, position.offset) == position.checkpoint):
+            start = position.offset
+        end = _complete_end(source, start, size)
+        context: dict = {}
+        if tool == "Codex" and start:
+            for span in position.context:
+                line = _read_line(source, span)
+                kind = _codex_line_kind(line)
+                context[(kind, span[0]) if kind == "session_meta" else kind] = (span, line)
+            if not _codex_can_resume(context, _read_line(source, (start, end))[:400]):
+                start, context = 0, {}
+        if tool == "Codex":
+            for span, line in sorted(context.values()):
+                out.write(_codex_context_line(line) if _codex_line_kind(line) == "token_count"
+                          else line)
+            source.seek(start)
+            offset = start
+            while offset < end:
+                line = source.readline()
+                if not line or offset + len(line) > end:
+                    break
+                out.write(line)
+                kind = _codex_line_kind(line)
+                if kind:
+                    span = (offset, offset + len(line))
+                    context[(kind, offset) if kind == "session_meta" else kind] = (span, line)
+                offset += len(line)
+        else:
+            source.seek(start)
+            remaining = end - start
+            while remaining:
+                chunk = source.read(min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                out.write(chunk)
+                remaining -= len(chunk)
+        spans = tuple(sorted(span for span, _ in context.values()))
+        return ReadPosition(end, _checkpoint(source, end), spans), start == 0
+
+
+def _codex_can_resume(context: dict, first_new_line: bytes) -> bool:
+    """Whether the lines after a read position parse as they would within the whole log.
+
+    The parser gives lines before a session's first model event the first model that
+    follows, and drops a fork's replayed history from the session's first seconds; both
+    need the whole log when the earlier lines hold no model or end inside that window.
+    """
+    if "turn_context" not in context and "settings" not in context and "tier" not in context:
+        return False
+    starts = [_codex_timestamp(line) for key, (_, line) in context.items()
+              if isinstance(key, tuple)]
+    starts = [start for start in starts if start]
+    if not starts:
+        return True
+    window_end = max(starts) + timedelta(seconds=CODEX_REPLAY_SECONDS)
+    for line in (context.get("token_count", (None, b""))[1], first_new_line):
+        stamp = _codex_timestamp(line) if line else None
+        if stamp and stamp <= window_end:
+            return False
+    return True
+
+
+def _positions_after_full_read(files: dict[str, "SourceSnapshot"]) -> dict[str, ReadPosition]:
+    """Read positions for the Claude logs a rebuild read whole and unchanged.
+
+    Codex logs get theirs on their next update, which records their context lines.
+    """
+    positions = {}
+    for path, snapshot in files.items():
+        if snapshot.tool != "Claude Code":
+            continue
+        try:
+            with open(path, "rb") as source:
+                status = os.fstat(source.fileno())
+                if (status.st_mtime_ns, status.st_size) != (snapshot.mtime_ns, snapshot.size):
+                    continue
+                end = _complete_end(source, 0, status.st_size)
+                positions[path] = ReadPosition(end, _checkpoint(source, end))
+        except OSError:
+            continue
+    return positions
+
+
 def _iter_source_trees() -> list[tuple[str, Path, str]]:
     trees = list(SOURCE_TREES)
     for wsl_home in _WSL_HOMES:
@@ -1303,7 +1486,8 @@ def sources_mtime() -> tuple[float, int, int, float]:
     return newest, len(files), dir_count, elapsed
 
 
-def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot], str] | None:
+def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot], str,
+                                dict[str, ReadPosition]] | None:
     if not CACHE_META_FILE.exists():
         return None
     try:
@@ -1322,17 +1506,24 @@ def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot], str] | None:
             )
             for path, meta in raw_files.items()
         }
+        positions = {
+            path: ReadPosition(int(position["offset"]), str(position["checkpoint"]),
+                               tuple(tuple(map(int, span)) for span in position["context"]))
+            for path, position in data.get("positions", {}).items()
+        }
     except (KeyError, TypeError, ValueError):
         return None
-    return version, files, str(data.get("pricing_basis", ""))
+    return version, files, str(data.get("pricing_basis", "")), positions
 
 
-def _write_cache_meta(files: dict[str, SourceSnapshot]) -> None:
+def _write_cache_meta(files: dict[str, SourceSnapshot],
+                      positions: dict[str, ReadPosition]) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": CACHE_SCHEMA_VERSION,
         "pricing_basis": pricing_basis(),
         "files": {path: meta.to_json() for path, meta in sorted(files.items())},
+        "positions": {path: position.to_json() for path, position in sorted(positions.items())},
     }
     CACHE_META_FILE.write_text(json.dumps(payload, separators=(",", ":")))
 
@@ -1385,13 +1576,14 @@ def _expand_dependency_changes(
 
 
 def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
-                 timer: DebugTimer, action: str, detail: str = "") -> int:
+                 positions: dict[str, ReadPosition], timer: DebugTimer, action: str,
+                 detail: str = "") -> int:
     with timer.span("count token rows"):
         row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with timer.span("write parquet cache", CACHE_FILE.as_posix()):
         db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-    _write_cache_meta(files)
+    _write_cache_meta(files, positions)
     detail_part = f"{detail}; " if detail else ""
     print(f"  {action}: {detail_part}{row_count} rows → {CACHE_FILE}", file=sys.stderr)
     return row_count
@@ -1605,7 +1797,9 @@ def _delete_source_files(db: duckdb.DuckDBPyConnection, paths: list[str],
 
 
 def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
-                         timer: DebugTimer) -> None:
+                         timer: DebugTimer, real_paths: dict[str, str] | None = None) -> None:
+    """Parse files into the table; rows from a copy at a key of `real_paths` name the
+    file it was copied from."""
     if not files:
         return
     parts = _build_source_sql(db, _group_files_by_tool(files))
@@ -1616,6 +1810,48 @@ def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceS
             "INSERT INTO tokens BY NAME "
             + " UNION ALL BY NAME ".join(f"SELECT * FROM ({part})" for part in parts)
         )
+        if real_paths:
+            db.execute("CREATE OR REPLACE TEMP TABLE copied_logs (copy VARCHAR, path VARCHAR)")
+            db.executemany("INSERT INTO copied_logs VALUES (?, ?)", list(real_paths.items()))
+            db.execute("""
+                UPDATE tokens SET source_file = copied_logs.path FROM copied_logs
+                WHERE tokens.source_file = copied_logs.copy
+            """)
+            db.execute("DROP TABLE copied_logs")
+
+
+def _read_changed_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
+                        positions: dict[str, ReadPosition], timer: DebugTimer) -> None:
+    """Replace the rows of changed files, reading append-only logs from their positions.
+
+    Each log's unread lines are copied beside the cache under a path ending in the log's
+    own, so the parsers derive the same sessions and projects from its name.
+    """
+    logs = {path: snapshot for path, snapshot in files.items()
+            if snapshot.tool in APPEND_ONLY_TOOLS}
+    others = {path: snapshot for path, snapshot in files.items() if path not in logs}
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=CACHE_DIR, prefix="new-lines-") as copies:
+        staged: dict[str, SourceSnapshot] = {}
+        real_paths: dict[str, str] = {}
+        from_start = []
+        with timer.span("copy new log lines", f"{len(logs)} logs"):
+            for index, (path, snapshot) in enumerate(sorted(logs.items())):
+                mirror = Path(copies, str(index), path.lstrip("/").replace(":", ""))
+                try:
+                    positions[path], whole = _stage_log(path, snapshot.tool,
+                                                        positions.get(path), mirror)
+                except OSError:
+                    # Gone or unreadable since the scan: its cached rows stay.
+                    positions.pop(path, None)
+                    continue
+                if whole:
+                    from_start.append(path)
+                if mirror.stat().st_size:
+                    staged[mirror.as_posix()] = snapshot
+                    real_paths[mirror.as_posix()] = path
+        _delete_source_files(db, [*others, *from_start], timer)
+        _append_source_files(db, {**others, **staged}, timer, real_paths)
 
 
 def register_macros(db: duckdb.DuckDBPyConnection) -> None:
@@ -1648,6 +1884,12 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
                  f"{len(files)} files in {dir_count} dirs")
 
     meta = _load_cache_meta()
+    positions = dict(meta[3]) if meta else {}
+
+    def rebuild(detail: str = "") -> None:
+        unread = _rebuild_tokens(db, files, timer)
+        _write_cache(db, known(unread), _positions_after_full_read(files), timer,
+                     "rebuilt cache", detail)
 
     def known(unread: set[str]) -> dict[str, SourceSnapshot]:
         # Files a scan no longer finds, or could not read, stay known with their last
@@ -1658,15 +1900,14 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
 
     if refresh:
         timer.note("cache refresh forced by --refresh")
-        unread = _rebuild_tokens(db, files, timer)
-        _write_cache(db, known(unread), timer, "rebuilt cache", "--refresh")
+        rebuild("--refresh")
         return
 
     cache_mt = CACHE_FILE.stat().st_mtime if CACHE_FILE.exists() else 0.0
     newest_source = max((meta.mtime_ns / 1e9 for meta in files.values()), default=0.0)
 
     if CACHE_FILE.exists() and meta and meta[0] == CACHE_SCHEMA_VERSION:
-        _, cached_files, cached_basis = meta
+        _, cached_files, cached_basis, _ = meta
         # Price data changed since the cache was written: reprice every row.
         reprice = cached_basis != pricing_basis()
         changed = sorted(
@@ -1681,7 +1922,8 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             if reprice:
                 with timer.span("reprice rows", pricing_basis()):
                     price_tokens(db, all_rows=True)
-                _write_cache(db, known(set()), timer, "repriced cache", pricing_basis())
+                _write_cache(db, known(set()), positions, timer, "repriced cache",
+                             pricing_basis())
                 return
             print("  (cached)", file=sys.stderr)
             timer.note(
@@ -1691,8 +1933,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
 
         if _aop_change_requires_rebuild(cached_files, changed):
             timer.note("retained AOP result changed; rebuilding for precedence")
-            unread = _rebuild_tokens(db, files, timer)
-            _write_cache(db, known(unread), timer, "rebuilt cache", "AOP result changed")
+            rebuild("AOP result changed")
             return
 
         with timer.span("load parquet cache", CACHE_FILE.as_posix()):
@@ -1700,8 +1941,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         if not _table_has_source_file(db):
             timer.note("cache schema missing source_file; rebuilding")
             db.execute("DROP TABLE tokens")
-            unread = _rebuild_tokens(db, files, timer)
-            _write_cache(db, known(unread), timer, "rebuilt cache", "schema migration")
+            rebuild("schema migration")
             return
 
         timer.note(
@@ -1709,8 +1949,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         )
         unread = _unmigrated_aop_results(db, {path: files[path] for path in changed})
         changed = [path for path in changed if path not in unread]
-        _delete_source_files(db, changed, timer)
-        _append_source_files(db, {path: files[path] for path in changed}, timer)
+        _read_changed_files(db, {path: files[path] for path in changed}, positions, timer)
         _drop_other_copies_of_aop_runs(db, changed, timer)
         _name_claude_projects(db, timer)
         _deduplicate_aop(db, timer)
@@ -1719,6 +1958,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         _write_cache(
             db,
             known(unread),
+            positions,
             timer,
             "updated cache",
             f"{len(changed)} changed, {len(vanished)} vanished and kept",
@@ -1736,8 +1976,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     else:
         timer.note(f"cache missing: {CACHE_FILE}")
 
-    unread = _rebuild_tokens(db, files, timer)
-    _write_cache(db, known(unread), timer, "rebuilt cache")
+    rebuild()
 
 
 def _get_version() -> str:
