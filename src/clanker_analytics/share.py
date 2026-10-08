@@ -17,6 +17,8 @@ BG = "#040506"
 TEXT = "#d4c8b8"
 ACCENT = "#ff9800"
 DIM = "#6b5d4f"
+# Footer text: dimmer than TEXT but readable on BG (contrast about 6:1).
+MUTED = "#958676"
 LIGHT = "#e0e0e0"
 
 TOOL_COLORS = {
@@ -35,7 +37,7 @@ TOOL_COLORS = {
 DAILY_BAR_DAYS = 62
 # Tools under 1% of the period's cost share one segment and one legend entry.
 OTHER = "Other"
-OTHER_COLOR = "#7a7a7a"
+OTHER_COLOR = "#8a8a8a"
 
 from clanker_analytics.main import COST_PER_ROW as COST_SQL
 
@@ -95,8 +97,11 @@ def _stack(ax, x, series: dict[str, np.ndarray], width: float,
         draw = ax.barh if horizontal else ax.bar
         bars = draw(x, vals, width, bottoms, color=_color(t), edgecolor=BG, linewidth=1)
         if partial is not None:
-            bars[partial].set_hatch("//")
+            bars[partial].set_hatch("///")
         bottoms += vals
+    # Headroom above the tallest bar, which the stack's segment edges would otherwise
+    # pin to the plot's edge.
+    (ax.set_xlim if horizontal else ax.set_ylim)(0, max(bottoms.max(), 1e-9) * 1.05)
 
 
 def _plot_periods(ax, periods: list[date], step: int,
@@ -122,6 +127,7 @@ def _plot_periods(ax, periods: list[date], step: int,
         ticks = (list(x) if len(periods) <= 14
                  else [i for i, d in enumerate(periods) if d.weekday() == 0])
         labels = [_short_date(periods[i].isoformat()) for i in ticks]
+        ax.set_xticks(x, minor=True)
     ax.set_xticks(ticks)
     ax.set_xticklabels(labels, rotation=0, ha="center", **_font(11))
     ax.set_xlim(-0.6, len(periods) - 0.4)
@@ -223,6 +229,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         lambda v, _: (f"${v:,.0f}" if v == round(v) else f"${v:,.2f}") if v > 0 else ""))
 
     ax.tick_params(colors=TEXT, which="both")
+    ax.tick_params(which="minor", length=2, color=DIM)
     for label in [*ax.get_yticklabels(), *ax.get_xticklabels()]:
         label.set_fontproperties(fm.FontProperties(fname=FONT_PATH, size=11))
         label.set_color(TEXT)
@@ -365,9 +372,9 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     cmd = "uvx clanker-analytics chart"
     if since_label and since_label != "7d":
         cmd += f" --since {since_label}"
-    fig.text(0.95, 0.01, cmd, color=DIM, **_font(11), ha="right", va="bottom")
+    fig.text(0.95, 0.01, cmd, color=MUTED, **_font(11), ha="right", va="bottom")
     if note:
-        fig.text(0.05, 0.01, note, color=DIM, **_font(11), ha="left", va="bottom")
+        fig.text(0.05, 0.01, note, color=MUTED, **_font(11), ha="left", va="bottom")
 
     plt.tight_layout(rect=[0, 0.04, 1, 0.78])
     output = output or OUTPUT
