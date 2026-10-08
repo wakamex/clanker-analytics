@@ -1491,6 +1491,24 @@ class TestChartGeneration(Case):
         assert path == chosen and chosen.read_bytes()[:4] == b"\x89PNG"
         assert not (self.tmp_path / "default.png").exists()
 
+    def test_generate_draws_weekly_bars_for_long_ranges(self):
+        import clanker_analytics.share as share_mod
+        self.monkeypatch.setattr(share_mod, "OUTPUT", self.tmp_path / "default.png")
+        rows = [("Claude Code", "alpha", "s1", day, "claude-opus-4-6", 10, 20, 0, 0, 30)
+                for day in ("2026-01-05", "2026-01-06", "2026-02-11", "2026-04-20")]
+        bars = []
+        original = share_mod._plot_periods
+        self.monkeypatch.setattr(share_mod, "_plot_periods",
+                                 lambda ax, periods, step, series: bars.append(
+                                     (periods, step)) or original(ax, periods, step, series))
+
+        path = share_mod.generate(_make_db(*rows), "2026-01-01", {})
+
+        periods, step = bars[0]
+        assert path.exists() and step == 7
+        assert periods[0].isoformat() == "2026-01-05" and periods[-1].isoformat() == "2026-04-20"
+        assert all(day.weekday() == 0 for day in periods)
+
     def test_generate_creates_png(self):
         tmp_path = self.tmp_path
         db = _make_db(*ALL_ROWS)

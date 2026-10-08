@@ -2272,7 +2272,7 @@ def main(argv: list[str] | None = None):
                              "execution, over --since (default 7d)", usage, limit)
     table.add_argument("--by", choices=list(QUERIES), default="project",
                        help="Group results by (default: project)")
-    for name, help in (("chart", "Save a PNG chart of daily cost by tool over --since (default 7d)"),
+    for name, help in (("chart", "Save a PNG chart of cost by tool per day, or per week beyond two months, over --since (default 7d)"),
                        ("share", "Save the chart, copy it to the clipboard, and open X to post it")):
         chart = command(name, help, usage, plans, output)
         cost = chart.add_mutually_exclusive_group()

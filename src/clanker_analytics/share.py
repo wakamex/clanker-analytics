@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from datetime import date, timedelta
 import urllib.parse
 from pathlib import Path
 
@@ -30,6 +31,11 @@ TOOL_COLORS = {
     "Hermes": "#ff6b35",
     "OpenCode": "#f0b429",
 }
+# Ranges longer than this many days draw one bar per week instead of per day.
+DAILY_BAR_DAYS = 62
+# Tools under 1% of the period's cost share one segment and one legend entry.
+OTHER = "Other"
+OTHER_COLOR = "#7a7a7a"
 
 from clanker_analytics.main import COST_PER_ROW as COST_SQL
 
@@ -73,6 +79,57 @@ def _short_date(d: str) -> str:
     return f"{months[int(parts[1]) - 1]} {int(parts[2])}"
 
 
+def _color(tool: str) -> str:
+    return OTHER_COLOR if tool == OTHER else TOOL_COLORS.get(tool, "#c4862c")
+
+
+def _stack(ax, x, series: dict[str, np.ndarray], width: float,
+           partial: int | None = None, horizontal: bool = False) -> None:
+    """Stacked bars, first series at the bottom, with a background-colored gap between
+    segments so each tool's share stays legible. The bar at `partial`, a period still in
+    progress, is hatched."""
+    bottoms = np.zeros(len(x))
+    plt.rcParams["hatch.color"] = BG
+    plt.rcParams["hatch.linewidth"] = 1.5
+    for t, vals in series.items():
+        draw = ax.barh if horizontal else ax.bar
+        bars = draw(x, vals, width, bottoms, color=_color(t), edgecolor=BG, linewidth=1)
+        if partial is not None:
+            bars[partial].set_hatch("//")
+        bottoms += vals
+
+
+def _plot_periods(ax, periods: list[date], step: int,
+                  series: dict[str, np.ndarray]) -> str | None:
+    """Cost as one stacked bar per day, or per week starting Monday when step is 7.
+
+    Returns a note explaining the hatched bar of a period still in progress, if any."""
+    x = np.arange(len(periods))
+    today = date.today()
+    partial = len(periods) - 1 if periods[-1] + timedelta(step) > today else None
+    _stack(ax, x, series, width=0.8, partial=partial)
+    if step == 7:
+        # A label at the first week of each month.
+        ticks = []
+        for i, d in enumerate(periods):
+            # Skip a month start too close to the previous label to fit beside it.
+            if (i == 0 or d.month != periods[i - 1].month) and (not ticks or i - ticks[-1] > 2):
+                ticks.append(i)
+        labels = [periods[i].strftime("%b '%y" if periods[i].month == 1 or i == ticks[0]
+                                      else "%b") for i in ticks]
+    else:
+        # A label for every day up to two weeks, then one each Monday.
+        ticks = (list(x) if len(periods) <= 14
+                 else [i for i, d in enumerate(periods) if d.weekday() == 0])
+        labels = [_short_date(periods[i].isoformat()) for i in ticks]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(labels, rotation=0, ha="center", **_font(11))
+    ax.set_xlim(-0.6, len(periods) - 0.4)
+    if partial is not None:
+        return f"hatched: {'today' if step == 1 else 'this week'} so far"
+    return None
+
+
 def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
              plans: dict | None = None, cost_mode: str = "auto",
              output: Path | None = None) -> Path:
@@ -104,7 +161,13 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         FROM tokens GROUP BY tool ORDER BY cost DESC
     """).fetchall()
 
-    # Get chart data — use per-project bars for short ranges, daily area for longer
+    # Largest tools first, at the bottom of each stack; the rest fold into Other.
+    shown = [item for item in tool_costs if item[1] >= 0.01 * total_cost] or tool_costs[:1]
+    folded = tool_costs[len(shown):]
+    order = [t for t, _, _ in shown] + ([OTHER] if folded else [])
+    group = {t: (t if t in order else OTHER) for t, _, _ in tool_costs}
+
+    # Get chart data — use per-project bars for short ranges, daily bars for longer
     n_dates = db.sql("SELECT count(DISTINCT date) FROM tokens").fetchone()[0]
     use_bars = n_dates <= 3
 
@@ -120,72 +183,52 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
             ORDER BY sum({COST_SQL}) DESC
         """).fetchall()
         projects = list(dict.fromkeys(p for p, _, _ in chart_data))
-        tools = sorted(set(t for _, t, _ in chart_data))
-        tool_proj = {t: {} for t in tools}
+        tool_proj = {t: {} for t in order}
         for p, t, cost in chart_data:
-            tool_proj[t][p] = cost
+            tool_proj[group[t]][p] = tool_proj[group[t]].get(p, 0) + cost
     else:
         daily = db.sql(f"""
             SELECT date, tool, sum({COST_SQL}) as cost
             FROM tokens GROUP BY date, tool ORDER BY date
         """).fetchall()
-        tools = sorted(set(t for _, t, _ in daily))
-        dates = sorted(set(d for d, _, _ in daily))
-        tool_data = {t: {} for t in tools}
+        # Every day or week from the first to the last, so idle ones show as gaps.
+        first, last = (date.fromisoformat(d) for d in (daily[0][0], daily[-1][0]))
+        step = 1 if (last - first).days < DAILY_BAR_DAYS else 7
+        first -= timedelta((first.weekday() if step == 7 else 0))
+        periods = [first + timedelta(n) for n in range(0, (last - first).days + 1, step)]
+        series = {t: np.zeros(len(periods)) for t in order}
         for d, t, cost in daily:
-            tool_data[t][d] = cost
+            series[group[t]][(date.fromisoformat(d) - first).days // step] += cost
 
     # Build figure
     fig, ax = plt.subplots(figsize=(12, 6.75), dpi=100)
     fig.set_facecolor(BG)
     ax.set_facecolor(BG)
 
+    note = None
     if use_bars and projects:
-        x = np.arange(len(projects))
-        bar_width = 0.6
-        bottoms = np.zeros(len(projects))
-        for t in tools:
-            vals = np.array([tool_proj[t].get(p, 0) for p in projects], dtype=float)
-            color = TOOL_COLORS.get(t, "#c4862c")
-            ax.bar(x, vals, bar_width, bottom=bottoms, color=color, alpha=0.8)
-            bottoms += vals
-        ax.set_xticks(x)
-        ax.set_xticklabels(projects, rotation=0, ha="center", **_font(11))
-    elif not use_bars and dates:
-        x = np.arange(len(dates))
-        bottoms = np.zeros(len(dates))
-        for t in tools:
-            vals = np.array([tool_data[t].get(d, 0) for d in dates], dtype=float)
-            color = TOOL_COLORS.get(t, "#c4862c")
-            ax.fill_between(x, bottoms, bottoms + vals,
-                            color=color, alpha=0.8, linewidth=0)
-            ax.plot(x, bottoms + vals, color=color, alpha=0.9, linewidth=1)
-            bottoms += vals
+        # Horizontal, so project names of any length get their own column.
+        y = np.arange(len(projects))
+        _stack(ax, y, {t: np.array([tool_proj[t].get(p, 0) for p in projects], dtype=float)
+                       for t in order}, width=0.6, horizontal=True)
+        ax.set_yticks(y)
+        ax.set_yticklabels(projects, **_font(11))
+        ax.invert_yaxis()
+    elif not use_bars:
+        note = _plot_periods(ax, periods, step, series)
 
-        if len(dates) <= 14:
-            ax.set_xticks(x)
-            ax.set_xticklabels([_short_date(d) for d in dates],
-                               rotation=0, ha="center", **_font(11))
-        else:
-            step = max(1, len(dates) // 10)
-            ticks = list(range(0, len(dates), step))
-            ax.set_xticks(ticks)
-            ax.set_xticklabels([_short_date(dates[i]) for i in ticks],
-                               rotation=0, ha="center", **_font(11))
-
-    # Y axis as dollars
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(
-        lambda v, _: _fmt_cost(v) if v > 0 else ""))
+    # Value axis as dollars, whole unless the ticks fall between them
+    value_axis = ax.xaxis if use_bars else ax.yaxis
+    value_axis.set_major_formatter(ticker.FuncFormatter(
+        lambda v, _: (f"${v:,.0f}" if v == round(v) else f"${v:,.2f}") if v > 0 else ""))
 
     ax.tick_params(colors=TEXT, which="both")
-    for label in ax.get_yticklabels():
+    for label in [*ax.get_yticklabels(), *ax.get_xticklabels()]:
         label.set_fontproperties(fm.FontProperties(fname=FONT_PATH, size=11))
-        label.set_color(TEXT)
-    for label in ax.get_xticklabels():
         label.set_color(TEXT)
     for spine in ax.spines.values():
         spine.set_visible(False)
-    ax.grid(axis="y", color=DIM, alpha=0.3, linewidth=0.5)
+    ax.grid(axis="x" if use_bars else "y", color=DIM, alpha=0.3, linewidth=0.5)
 
     # No legend — tool names in subtitle are color-coded instead
 
@@ -278,17 +321,14 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
             multiplier = f" ({ratio:.0f}x)"
     estimate_note = " (includes processed-token estimates)" if has_estimates else ""
     context = f"of AI compute{f' {period}' if period else ''}{sub_label}{multiplier}{estimate_note}"
-    fig.text(0.05, 0.89, context, color=TEXT, **_font(14),
+    fig.text(0.05, 0.87, context, color=TEXT, **_font(14),
              ha="left", va="top")
 
-    # Third line: colored tool names as legend. Tools under 1% of the cost fold into one
-    # entry, so the line fits the card however many tools ran.
-    shown = [item for item in tool_costs if item[1] >= 0.01 * total_cost] or tool_costs[:1]
-    folded = tool_costs[len(shown):]
+    # Third line: colored tool names as legend, in stack order, with Other last.
     x_pos = 0.05
     for i, (t, c, estimated) in enumerate(shown):
         if i > 0:
-            sep = fig.text(x_pos, 0.84, "  |  ", color=TEXT, **_font(12),
+            sep = fig.text(x_pos, 0.825, "  |  ", color=TEXT, **_font(12),
                            ha="left", va="top")
             fig.canvas.draw()
             x_pos += sep.get_window_extent(renderer=renderer).width / fig_width
@@ -300,19 +340,25 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         if estimated:
             details.append("processed estimate")
         label = f"{t} ({', '.join(details)})" if details else t
-        name_txt = fig.text(x_pos, 0.84, label, color=color, **_font(12, bold=True),
+        name_txt = fig.text(x_pos, 0.825, label, color=color, **_font(12, bold=True),
                             ha="left", va="top")
         fig.canvas.draw()
         x_pos += name_txt.get_window_extent(renderer=renderer).width / fig_width
         cost_prefix = "~" if estimated else ""
-        cost_txt = fig.text(x_pos, 0.84, f" {cost_prefix}{_fmt_cost(c)}", color=TEXT, **_font(12),
+        cost_txt = fig.text(x_pos, 0.825, f" {cost_prefix}{_fmt_cost(c)}", color=TEXT, **_font(12),
                             ha="left", va="top")
         fig.canvas.draw()
         x_pos += cost_txt.get_window_extent(renderer=renderer).width / fig_width
 
-    more = (f"  |  +{len(folded)} more {_fmt_cost(sum(c for _, c, _ in folded))}"
-            if folded else "")
-    fig.text(x_pos, 0.84, f"{more}  |  {n_projects} projects", color=TEXT, **_font(12),
+    if folded:
+        for text, color, bold in (("  |  ", TEXT, False),
+                                  (f"{OTHER} ({len(folded)} tools)", OTHER_COLOR, True),
+                                  (f" {_fmt_cost(sum(c for _, c, _ in folded))}", TEXT, False)):
+            part = fig.text(x_pos, 0.825, text, color=color, **_font(12, bold=bold),
+                            ha="left", va="top")
+            fig.canvas.draw()
+            x_pos += part.get_window_extent(renderer=renderer).width / fig_width
+    fig.text(x_pos, 0.825, f"  |  {n_projects} projects", color=TEXT, **_font(12),
              ha="left", va="top")
 
     # Footer: the command that draws this chart, with --since when it is not the default
@@ -320,6 +366,8 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     if since_label and since_label != "7d":
         cmd += f" --since {since_label}"
     fig.text(0.95, 0.01, cmd, color=DIM, **_font(11), ha="right", va="bottom")
+    if note:
+        fig.text(0.05, 0.01, note, color=DIM, **_font(11), ha="left", va="bottom")
 
     plt.tight_layout(rect=[0, 0.04, 1, 0.78])
     output = output or OUTPUT
