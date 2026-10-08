@@ -13,6 +13,7 @@ import os
 import pstats
 import re
 import sqlite3
+import stat
 import sys
 import time
 from pathlib import Path
@@ -1225,19 +1226,32 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
     return trees
 
 
-def _aop_result_paths(state_roots: Path) -> list[Path]:
-    """Find the results of every AOP state directory in AOP's state-root list."""
+def _aop_results(state_roots: Path) -> tuple[dict[str, os.stat_result], int]:
+    """The result of every run in AOP's listed state directories, with its file status,
+    and how many state directories were read. One stat call per run keeps the scan of
+    tens of thousands of results fast."""
     try:
         roots = {line.strip() for line in state_roots.read_text().splitlines() if line.strip()}
     except OSError:
-        return []
-    paths: set[Path] = set()
-    for root in roots:
+        return {}, 0
+    results: dict[str, os.stat_result] = {}
+    read = 0
+    for root in sorted(roots):
         try:
-            paths.update((Path(root) / "runs").glob("*/result.json"))
+            runs = os.scandir(Path(root) / "runs")
         except OSError:
-            pass
-    return sorted(path for path in paths if path.is_file())
+            continue
+        read += 1
+        with runs:
+            for run in runs:
+                path = f"{run.path}/result.json"
+                try:
+                    status = os.stat(path)
+                except OSError:
+                    continue
+                if stat.S_ISREG(status.st_mode):
+                    results[Path(path).as_posix()] = status
+    return results, read
 
 
 def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
@@ -1247,15 +1261,11 @@ def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
     for tool, root, pattern in _iter_source_trees():
         try:
             if tool == AOP_RESULT_TOOL:
-                paths = _aop_result_paths(root)
-                dir_count += len({path.parents[1] for path in paths})
-                for path in paths:
-                    stat = path.stat()
-                    files[path.as_posix()] = SourceSnapshot(
-                        tool=tool,
-                        mtime_ns=stat.st_mtime_ns,
-                        size=stat.st_size,
-                    )
+                results, roots_read = _aop_results(root)
+                dir_count += roots_read
+                for path, status in results.items():
+                    files[path] = SourceSnapshot(
+                        tool=tool, mtime_ns=status.st_mtime_ns, size=status.st_size)
                 continue
             if not root.exists():
                 continue
