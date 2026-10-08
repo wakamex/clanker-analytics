@@ -32,6 +32,7 @@ clanker-analytics table --since 24h        # last 24 hours (also: 7d, 2w, 2026-0
 clanker-analytics table --by date          # grouped by date (also: model, session, execution)
 clanker-analytics table --tool claude      # Claude Code only (also: codex, gemini, agy, aop, zcode)
 clanker-analytics chart                    # PNG chart of daily cost by tool over the last 7 days
+clanker-analytics chart -o month.png       # save it elsewhere (also on share and regime)
 clanker-analytics share                    # chart + copy to clipboard + open X
 clanker-analytics regime                   # detect cache rate regime changes
 clanker-analytics diagnose                 # what changed in the last 3 days vs the 7 before

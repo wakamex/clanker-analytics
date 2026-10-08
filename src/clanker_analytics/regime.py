@@ -34,8 +34,8 @@ def _short_date(d: str) -> str:
 
 
 def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
-                    tool: str | None = None) -> Path | None:
-    """Detect cache rate regime change and generate a chart."""
+                    tool: str | None = None, output: Path | None = None) -> Path | None:
+    """Detect cache rate regime change and save a chart at `output`, by default OUTPUT."""
     plt.rcParams['text.parse_math'] = False
 
     # Get daily cache rates per tool
@@ -226,8 +226,9 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
              **_font(11), ha="left", va="top")
 
     plt.tight_layout(rect=[0, 0, 1, 0.80])
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUTPUT, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
+    output = output or OUTPUT
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
     plt.close(fig)
 
-    return OUTPUT
+    return output

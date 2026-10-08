@@ -1481,6 +1481,16 @@ class TestPlanDetection(Case):
 # ===========================================================================
 
 class TestChartGeneration(Case):
+    def test_generate_saves_to_a_chosen_path(self):
+        import clanker_analytics.share as share_mod
+        self.monkeypatch.setattr(share_mod, "OUTPUT", self.tmp_path / "default.png")
+        chosen = self.tmp_path / "charts" / "month.png"
+
+        path = share_mod.generate(_make_db(*ALL_ROWS), "7d", {}, output=chosen)
+
+        assert path == chosen and chosen.read_bytes()[:4] == b"\x89PNG"
+        assert not (self.tmp_path / "default.png").exists()
+
     def test_generate_creates_png(self):
         tmp_path = self.tmp_path
         db = _make_db(*ALL_ROWS)
@@ -2099,6 +2109,24 @@ class TestDebugHooks(Case):
             with self.subTest(argv=argv):
                 with raises(SystemExit):
                     main_mod.main(argv)
+        capsys.readouterr()
+
+    def test_chart_commands_take_an_output_path(self):
+        capsys = self.capsys
+        captured = {}
+
+        def fake_run(args, timer):
+            captured["args"] = args
+            return 0
+
+        for argv in (["chart", "-o", "~/month.png"], ["share", "--output", "~/month.png"],
+                     ["regime", "-o", "~/month.png"]):
+            with self.subTest(argv=argv):
+                with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+                    assert main_mod.main(argv) == 0
+                assert captured["args"].output == Path.home() / "month.png"
+        with raises(SystemExit):
+            main_mod.main(["table", "-o", "x.png"])
         capsys.readouterr()
 
     def test_bare_invocation_runs_the_table(self):

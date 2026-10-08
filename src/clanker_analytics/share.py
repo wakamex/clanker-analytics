@@ -74,8 +74,9 @@ def _short_date(d: str) -> str:
 
 
 def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
-             plans: dict | None = None, cost_mode: str = "auto") -> Path:
-    """Generate share card PNG. Returns path to output file."""
+             plans: dict | None = None, cost_mode: str = "auto",
+             output: Path | None = None) -> Path:
+    """Generate share card PNG at `output`, by default OUTPUT. Returns its path."""
     plt.rcParams['text.parse_math'] = False
 
     # Get totals
@@ -318,11 +319,12 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
              **_font(11), ha="right", va="top")
 
     plt.tight_layout(rect=[0, 0, 1, 0.78])
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUTPUT, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
+    output = output or OUTPUT
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
     plt.close(fig)
 
-    return OUTPUT
+    return output
 
 
 def copy_and_open(path: Path, total_cost: float, since_label: str | None,

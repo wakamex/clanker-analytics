@@ -1844,7 +1844,8 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
 
     if args.command == "regime":
         from clanker_analytics.regime import detect_and_plot
-        path = detect_and_plot(db, args.since, args.tool if args.tool != "all" else None)
+        path = detect_and_plot(db, args.since, args.tool if args.tool != "all" else None,
+                               output=args.output)
         if path:
             print(f"  Card saved to {path}")
         return 0
@@ -1863,7 +1864,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         plans = plans_for(args)
     cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
     with timer.span("generate chart", since):
-        path = generate(db, since, plans, cost_mode)
+        path = generate(db, since, plans, cost_mode, output=args.output)
     if not path:
         pass
     elif args.command == "share":
@@ -1964,6 +1965,10 @@ def main(argv: list[str] | None = None):
     as_json.add_argument("--json", action="store_true", help="Print the report as JSON")
     limit = argparse.ArgumentParser(add_help=False)
     limit.add_argument("--limit", type=int, default=50, help="Max rows to display (default: 50)")
+    output = argparse.ArgumentParser(add_help=False)
+    output.add_argument("-o", "--output", type=lambda value: Path(value).expanduser(),
+                        metavar="PATH",
+                        help="Where to save the PNG (default: in ~/.cache/clanker-analytics/)")
     plans = argparse.ArgumentParser(add_help=False)
     plans.add_argument("--plan", action="append", type=plan_setting, default=[],
                        metavar="TOOL=PLAN|USD",
@@ -1985,13 +1990,13 @@ def main(argv: list[str] | None = None):
                        help="Group results by (default: project)")
     for name, help in (("chart", "Save a PNG chart of daily cost by tool over --since (default 7d)"),
                        ("share", "Save the chart, copy it to the clipboard, and open X to post it")):
-        chart = command(name, help, usage, plans)
+        chart = command(name, help, usage, plans, output)
         cost = chart.add_mutually_exclusive_group()
         cost.add_argument("--monthly", action="store_true",
                           help="Show the full monthly subscription cost")
         cost.add_argument("--prorated", action="store_true",
                           help="Show the subscription cost pro-rated to the period")
-    command("regime", "Detect and plot changes in the cache hit rate over --since", usage)
+    command("regime", "Detect and plot changes in the cache hit rate over --since", usage, output)
     sql = command("sql", "Run SQL against the 'tokens' table, over --since if given", usage)
     sql.add_argument("query", help="SQL to run, such as \"SELECT count(*) FROM tokens\"")
     diagnose = command("diagnose", "What changed in the --since period (default 3d) against "
