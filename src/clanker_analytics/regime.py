@@ -217,7 +217,7 @@ def detect_and_plot(db: duckdb.DuckDBPyConnection, since_label: str | None,
                  **_font(13), ha="left", va="top")
 
     # Command line below detail
-    cmd_parts = ["uvx clanker-analytics --regime"]
+    cmd_parts = ["uvx clanker-analytics regime"]
     if since_label:
         cmd_parts.append(f"--since {since_label}")
     if tool:

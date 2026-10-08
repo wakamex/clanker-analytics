@@ -2057,7 +2057,7 @@ class TestDebugHooks(Case):
             return 0
 
         with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
-            result = main_mod.main(["--debug-timing", "--sql", "select 1"])
+            result = main_mod.main(["sql", "select 1", "--debug-timing"])
 
         captured = capsys.readouterr()
         assert result == 0
@@ -2071,7 +2071,7 @@ class TestDebugHooks(Case):
             return 0
 
         with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
-            result = main_mod.main(["--profile", "--sql", "select 1"])
+            result = main_mod.main(["sql", "select 1", "--profile"])
 
         captured = capsys.readouterr()
         assert result == 0
@@ -2089,8 +2089,52 @@ class TestDebugHooks(Case):
             result = main_mod.main(["pace", "5m", "10m", "15m"])
 
         assert result == 0
-        assert captured["args"].pace is True
-        assert captured["args"].lookback == [300, 600, 900]
+        assert captured["args"].command == "pace"
+        assert captured["args"].periods == [300, 600, 900]
+
+    def test_commands_take_only_their_own_options(self):
+        capsys = self.capsys
+        for argv in (["table", "--vs", "3d"], ["pace", "--since", "7d"], ["record-quota", "--json"],
+                     ["chart", "--by", "date"]):
+            with self.subTest(argv=argv):
+                with raises(SystemExit):
+                    main_mod.main(argv)
+        capsys.readouterr()
+
+    def test_bare_invocation_runs_the_table(self):
+        captured = {}
+
+        def fake_run(args, timer):
+            captured["args"] = args
+            return 0
+
+        for argv, by in (([], "project"), (["--since", "30d", "--by", "date"], "date")):
+            with self.subTest(argv=argv):
+                with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+                    assert main_mod.main(argv) == 0
+                assert (captured["args"].command, captured["args"].by) == ("table", by)
+
+    def test_option_style_invocations_still_work_with_a_warning(self):
+        capsys = self.capsys
+        captured = {}
+
+        def fake_run(args, timer):
+            captured["args"] = args
+            return 0
+
+        for argv, command, check in (
+            (["--record-quota"], "record-quota", {}),
+            (["--sql", "select 1"], "sql", {"query": "select 1"}),
+            (["--pace", "--lookback", "3h", "--quota-json"], "pace", {"periods": [10800], "json": True}),
+            (["--table", "--by", "date"], "table", {"by": "date"}),
+        ):
+            with self.subTest(argv=argv):
+                with mock.patch("clanker_analytics.main._run", side_effect=fake_run):
+                    assert main_mod.main(argv) == 0
+                assert captured["args"].command == command
+                for name, value in check.items():
+                    assert getattr(captured["args"], name) == value
+                assert "deprecated" in capsys.readouterr().err
 
     def test_pace_command_accepts_model_mix(self):
         captured = {}
@@ -2103,7 +2147,7 @@ class TestDebugHooks(Case):
             result = main_mod.main(["pace", "--model-mix"])
 
         assert result == 0
-        assert captured["args"].pace is True
+        assert captured["args"].command == "pace"
         assert captured["args"].model_mix is True
 
 

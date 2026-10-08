@@ -8,7 +8,7 @@ Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, Zcode, and every har
 ![clanker-analytics table](table.png)
 ![clanker-analytics regime](regime.png)
 
-Worried your cache hit rate dropped? `--regime` auto-detects statistically significant changes using Welch's t-test: `clanker-analytics --regime --since 30d --tool claude`
+Worried your cache hit rate dropped? `regime` auto-detects statistically significant changes using Welch's t-test: `clanker-analytics regime --since 30d --tool claude`
 
 ## Install
 
@@ -24,35 +24,37 @@ uvx clanker-analytics
 
 ## Usage
 
+Each view is a command. Without one, `clanker-analytics` runs `table`. Run `clanker-analytics COMMAND --help` for a command's options.
+
 ```
-clanker-analytics                        # 7-day chart (default)
-clanker-analytics --since 24h            # last 24 hours (also: 7d, 2w, 2026-03-01)
-clanker-analytics --share                # chart + copy to clipboard + open X
-clanker-analytics --table                # tabular view
-clanker-analytics --table --by date      # table grouped by date (also: model, session)
-clanker-analytics --table --by execution # interactive, exec, and subagent usage
-clanker-analytics --regime               # detect cache rate regime changes
-clanker-analytics --tool claude          # Claude Code only (also: codex, gemini, agy, aop, zcode)
-clanker-analytics --record-quota         # retain current provider quota percentages
-clanker-analytics pace                   # compare quota and local token pace at 1h, 6h, and 24h
-clanker-analytics pace 5m 10m 15m        # arbitrary human-readable periods
-clanker-analytics pace --quota-json      # versioned machine-readable comparison
-clanker-analytics pace --all-buckets     # include inactive quota buckets
-clanker-analytics pace --model-mix       # include the model mix column
-clanker-analytics --quota-history        # implied full-quota API cost for every observed period
-clanker-analytics value                  # API-equivalent value of each subscription vs its price
-clanker-analytics value --plan codex=pro_500     # what-if with a different plan or price
+clanker-analytics                          # table of the last 7 days by project
+clanker-analytics table --since 24h        # last 24 hours (also: 7d, 2w, 2026-03-01)
+clanker-analytics table --by date          # grouped by date (also: model, session, execution)
+clanker-analytics table --tool claude      # Claude Code only (also: codex, gemini, agy, aop, zcode)
+clanker-analytics chart                    # PNG chart of daily cost by tool over the last 7 days
+clanker-analytics share                    # chart + copy to clipboard + open X
+clanker-analytics regime                   # detect cache rate regime changes
 clanker-analytics diagnose                 # what changed in the last 3 days vs the 7 before
 clanker-analytics diagnose --since 2d --vs 5d    # choose both periods
 clanker-analytics cache                    # prompt-cache health over the last 7 days
 clanker-analytics throughput               # output tokens per second by day, with parallel streams
-clanker-analytics --quota-history --quota-json
-clanker-analytics --prices current       # reprice all usage at today's API rates
-clanker-analytics --refresh              # force cache rebuild
-clanker-analytics --debug-timing         # print cache decisions and stage timings
-clanker-analytics --profile              # print a cProfile summary to stderr
-clanker-analytics --sql "SELECT ..."     # custom SQL against 'tokens' table
+clanker-analytics record-quota             # retain current provider quota percentages
+clanker-analytics pace                     # compare quota and local token pace at 1h, 6h, and 24h
+clanker-analytics pace 5m 10m 15m          # arbitrary human-readable periods
+clanker-analytics pace --json              # versioned machine-readable comparison
+clanker-analytics pace --all-buckets       # include inactive quota buckets
+clanker-analytics pace --model-mix         # include the model mix column
+clanker-analytics quota-history            # implied full-quota API cost for every observed period
+clanker-analytics value                    # API-equivalent value of each subscription vs its price
+clanker-analytics value --plan codex=pro_500     # what-if with a different plan or price
+clanker-analytics sql "SELECT ..."         # custom SQL against the 'tokens' table
+clanker-analytics table --prices current   # reprice all usage at today's API rates
+clanker-analytics table --refresh          # rebuild the cache first
+clanker-analytics table --debug-timing     # print cache decisions and stage timings
+clanker-analytics table --profile          # print a cProfile summary to stderr
 ```
+
+The option-style form of version 0.4, such as `--table`, `--record-quota` or `--sql`, still runs, rewritten to the matching command with a deprecation warning, and will be removed in a later release.
 
 ## How it works
 
@@ -65,7 +67,7 @@ The cache is incremental: unchanged source files are reused and changed files ar
 
 ## Quota pace comparison
 
-`--record-quota` asks the installed Claude, Codex, Antigravity, and Zcode usage packages for fresh quota
+`record-quota` asks the installed Claude, Codex, Antigravity, and Zcode usage packages for fresh quota
 percentages and stores normalized snapshots in
 `~/.local/state/clanker-analytics/quota.sqlite3`. The provider percentage remains authoritative and
 includes activity that local session logs may miss. Claude, Antigravity, and Zcode history starts when the
@@ -104,11 +106,9 @@ The default periods are `1h`, `6h`, and `24h`. Pass any positive integer with `m
 after the command, such as `pace 3h 7h`. Until enough snapshots have accumulated,
 the corresponding row says `collecting history`.
 
-The older `--pace --lookback 3h --lookback 7h` form remains accepted for compatibility.
-
 The terminal report shows only complete lookbacks, meaning the selected historical sample covers
 between 100 and 125 percent of the requested duration. Partial and still-collecting periods remain
-available in `--quota-json` but are omitted from the default table. If a displayed bucket has no
+available in `pace --json` but are omitted from the default table. If a displayed bucket has no
 complete periods, such as under `--all-buckets`, it says `No complete lookbacks yet.`
 
 Buckets with no quota movement and no matching local tokens across every completed requested period
@@ -120,11 +120,11 @@ the JSON report regardless.
 
 ## Quota history audit
 
-`--quota-history` reconstructs every observed fixed quota period and estimates what a full quota is worth at API prices. Observations come from three places:
+`quota-history` reconstructs every observed fixed quota period and estimates what a full quota is worth at API prices. Observations come from three places:
 
 - Codex session files embed 7-day quota percentages in their token events.
 - Zcode usage-limit errors are exact 100% observations of their window.
-- The quota recorder database supplies Claude, Antigravity, and Zcode snapshots from `--record-quota`.
+- The quota recorder database supplies Claude, Antigravity, and Zcode snapshots from `record-quota`.
 
 For each period it uses the chronologically last nonzero quota observation, totals local token usage for that tool, including AOP runs of that tool, from the window start up to that observation, and reports:
 
@@ -251,7 +251,7 @@ Every row is priced with [model-prices](https://github.com/wakamex/model-prices)
 
 `--prices current` reprices every request from today's price list instead, while keeping each request's own peak or off-peak hour. Use it to compare usage across periods without price changes showing up as usage changes.
 
-Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). Each report run fetches model-prices' newest published price data when the local copy is more than a day old; offline, it keeps the local copy and warns. The cache records the data version and reprices every row when it changes. The `--table`, `diagnose`, `cache`, quota history and `value` reports end with a `pricing:` line naming that version, so a cost can be traced to the exact price data behind it. The `pricing` column says where each row's price came from:
+Prices are computed once per row when the cache is built, into `api_cost_usd` (rates when the request ran) and `current_api_cost_usd` (today's rates). Each report run fetches model-prices' newest published price data when the local copy is more than a day old; offline, it keeps the local copy and warns. The cache records the data version and reprices every row when it changes. The `table`, `diagnose`, `cache`, `quota-history` and `value` reports end with a `pricing:` line naming that version, so a cost can be traced to the exact price data behind it. The `pricing` column says where each row's price came from:
 
 - `model-prices`: priced from the model's API price history.
 - `assumed model`: an AOP run that recorded no model and has no native log of its own. It is priced as the model its tool ran most that day.
@@ -262,7 +262,7 @@ The `billable` token column applies the same cache discount across sources. Thes
 
 ## Environmental impact estimates
 
-The `--chart` / `--share` output shows estimated environmental impact per million tokens:
+The `chart` and `share` output shows estimated environmental impact per million tokens:
 
 | Metric | Per 1M tokens | Source |
 |---|---|---|
@@ -274,7 +274,7 @@ These are rough estimates - actual impact varies 10-100x depending on model, har
 
 ## Chart colors
 
-Brand colors used in `--chart` / `--share` output:
+Brand colors used in `chart` and `share` output:
 
 | Tool | Color | Source |
 |---|---|---|

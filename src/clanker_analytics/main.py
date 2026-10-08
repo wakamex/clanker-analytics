@@ -1706,7 +1706,7 @@ def _get_version() -> str:
 def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     timer = timing or DebugTimer(False)
 
-    if args.record_quota:
+    if args.command == "record-quota":
         from clanker_analytics.quota import NORMALIZERS, record_quota
         inserted, errors = record_quota(Path(args.quota_db))
         print(f"Recorded {inserted} new quota samples in {Path(args.quota_db).expanduser()}")
@@ -1726,42 +1726,42 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         db.execute("UPDATE tokens SET api_cost_usd = current_api_cost_usd")
     basis = f"{pricing_basis()}, {PRICE_BASES[args.prices]}"
 
-    if args.pace:
+    if args.command == "pace":
         from clanker_analytics.quota import build_report, connect, print_report
         from clanker_analytics.quota import DEFAULT_LOOKBACKS
-        lookbacks = args.lookback or list(DEFAULT_LOOKBACKS)
+        lookbacks = args.periods or list(DEFAULT_LOOKBACKS)
         with connect(Path(args.quota_db)) as quota_db:
             report = build_report(
                 quota_db, db, lookbacks, COST_PER_ROW,
                 include_inactive=args.all_buckets, pricing_basis=basis,
             )
-        if args.quota_json:
+        if args.json:
             print(json.dumps(report, indent=2))
         elif report["buckets"]:
             print_report(report, show_model_mix=args.model_mix)
         elif report["sample_bucket_count"]:
             print(
                 "No active complete pace lookbacks yet. "
-                "Keep the quota recorder running or use --all-buckets."
+                "Keep the quota recorder running or use pace --all-buckets."
             )
             return 1
         else:
-            print("No quota samples found. Run clanker-analytics --record-quota first.")
+            print("No quota samples found. Run clanker-analytics record-quota first.")
             return 1
         return 0
 
-    if args.quota_history or args.value:
+    if args.command in ("quota-history", "value"):
         from clanker_analytics.quota import (
             build_quota_history, build_value_report, connect, print_quota_history,
             print_value_report,
         )
         with connect(Path(args.quota_db)) as quota_db:
             report = build_quota_history(db, COST_PER_ROW, basis, quota_db)
-        if args.value:
+        if args.command == "value":
             with timer.span("detect plans"):
                 plans = plans_for(args)
             report = build_value_report(report, plans)
-            if args.quota_json:
+            if args.json:
                 print(json.dumps(report, indent=2))
             elif report["tools"]:
                 print_value_report(report)
@@ -1769,7 +1769,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
                 print("No weekly quota periods with local usage found.")
                 return 1
             return 0
-        if args.quota_json:
+        if args.json:
             print(json.dumps(report, indent=2))
         elif report["periods"]:
             print_quota_history(report)
@@ -1805,23 +1805,25 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             report = build_diagnosis(db, recent, timedelta(seconds=args.vs or 7 * 86400), now,
                                      limit=min(args.limit, 10))
             report["pricing_basis"] = basis
-            print(json.dumps(report, indent=2) if args.quota_json else "", end="")
-            if not args.quota_json:
+            print(json.dumps(report, indent=2) if args.json else "", end="")
+            if not args.json:
                 print_diagnosis(report)
         elif args.command == "throughput":
             report = build_throughput(db, now - recent, now)
-            print(json.dumps(report, indent=2) if args.quota_json else "", end="")
-            if not args.quota_json:
+            print(json.dumps(report, indent=2) if args.json else "", end="")
+            if not args.json:
                 print_throughput(report)
         else:
             report = build_cache_health(db, now - recent, limit=min(args.limit, 10))
             report["pricing_basis"] = basis
-            print(json.dumps(report, indent=2, default=str) if args.quota_json else "", end="")
-            if not args.quota_json:
+            print(json.dumps(report, indent=2, default=str) if args.json else "", end="")
+            if not args.json:
                 print_cache_health(report)
         return 0
 
-    # Apply --since filter
+    # Views over a period default to the last 7 days; SQL and regime see all history.
+    if args.command in ("table", "chart", "share") and not args.since:
+        args.since = "7d"
     if args.since:
         with timer.span("filter since", args.since):
             m = re.fullmatch(r'(\d+)([hdw])', args.since)
@@ -1832,35 +1834,31 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             else:
                 db.execute(f"DELETE FROM tokens WHERE date < '{args.since}'")
 
-    if args.sql:
+    if args.command == "sql":
         with timer.span("run custom sql"):
-            result = db.sql(args.sql)
+            result = db.sql(args.query)
             # Statements such as COPY return no rows to show.
             if result is not None:
                 result.show(max_rows=100)
         return 0
 
-    if args.regime:
+    if args.command == "regime":
         from clanker_analytics.regime import detect_and_plot
         path = detect_and_plot(db, args.since, args.tool if args.tool != "all" else None)
         if path:
             print(f"  Card saved to {path}")
         return 0
 
-    if args.table:
+    if args.command == "table":
         with timer.span("render table", args.by):
             db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
         print(f"pricing: {basis}")
         return 0
 
-    # Default: chart mode
+    # chart or share
     with timer.span("import share module"):
         from clanker_analytics.share import generate, copy_and_open
-    since = args.since or "7d"
-    if not args.since:
-        # Apply default --since 7d
-        with timer.span("apply default since", since):
-            db.execute("DELETE FROM tokens WHERE date < (current_date - INTERVAL 7 DAY)::DATE::VARCHAR")
+    since = args.since
     with timer.span("detect plans"):
         plans = plans_for(args)
     cost_mode = "monthly" if args.monthly else ("prorated" if args.prorated else "auto")
@@ -1868,7 +1866,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         path = generate(db, since, plans, cost_mode)
     if not path:
         pass
-    elif args.share:
+    elif args.command == "share":
         with timer.span("share card"):
             total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
             sub_cost = sum(c for _, c in plans.values())
@@ -1889,6 +1887,43 @@ def _since_delta(since: str | None, now: datetime, default: str) -> timedelta:
         return now - (start if start.tzinfo else start.replace(tzinfo=timezone.utc))
 
 
+# Options that chose a mode before commands existed, and the command each maps to.
+LEGACY_MODES = {
+    "--record-quota": "record-quota", "--pace": "pace", "--quota-history": "quota-history",
+    "--sql": "sql", "--regime": "regime", "--table": "table", "--share": "share",
+    "--chart": "chart",
+}
+
+
+def _modernize_argv(argv: list[str], commands: set[str]) -> list[str]:
+    """Rewrite the option-style interface of 0.4 into a command line, with a warning.
+
+    A bare invocation, or one that starts with options, runs the default table.
+    """
+    if argv and (argv[0] in commands or argv[0] in ("-h", "--help", "--version")):
+        return argv
+    modes = [arg for arg in argv if arg in LEGACY_MODES]
+    legacy = modes or any(arg in ("--lookback", "--quota-json") for arg in argv)
+    command = LEGACY_MODES[modes[0]] if modes else "table"
+    rest, periods = [], []
+    args = iter(argv)
+    for arg in args:
+        if arg in LEGACY_MODES:
+            if arg == "--sql":
+                rest.append(next(args, ""))
+        elif arg == "--lookback":
+            periods.append(next(args, ""))
+        elif arg == "--quota-json":
+            rest.append("--json")
+        else:
+            rest.append(arg)
+    modern = [command, *periods, *rest]
+    if legacy:
+        print(f"warning: options such as {modes[0] if modes else '--lookback'} are deprecated "
+              f"and will be removed; run: clanker-analytics {' '.join(modern)}", file=sys.stderr)
+    return modern
+
+
 def main(argv: list[str] | None = None):
     from clanker_analytics.quota import DEFAULT_DB_PATH, parse_duration
 
@@ -1907,101 +1942,79 @@ def main(argv: list[str] | None = None):
         except ValueError as error:
             raise argparse.ArgumentTypeError(str(error)) from None
 
-    parser = argparse.ArgumentParser(description="AI coding tool token analytics")
-    parser.add_argument(
-        "command", nargs="?", choices=["pace", "value", "diagnose", "cache", "throughput"],
-        help="Run a report command: pace (accepts optional duration arguments), value, "
-             "diagnose (what changed in the --since period against the --vs period before "
-             "it), cache (prompt-cache health over --since), or throughput (output tokens "
-             "per second by day over --since)",
-    )
-    parser.add_argument(
-        "periods", nargs="*", type=duration, metavar="PERIOD",
-        help="Pace periods such as 5m 10m 15m",
-    )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
-    parser.add_argument("--by", choices=list(QUERIES), default="project",
-                        help="Group results by (default: project)")
-    parser.add_argument("--tool", choices=[*SOURCES, "all"], default="all",
-                        help="Which tool to analyze (default: all)")
-    parser.add_argument("--limit", type=int, default=50,
-                        help="Max rows to display (default: 50)")
-    parser.add_argument("--sql", type=str,
-                        help="Run custom SQL against the 'tokens' table")
-    parser.add_argument("--vs", type=duration, metavar="DURATION",
-                        help="For diagnose: the baseline period before --since (default: 7d)")
-    parser.add_argument("--since", type=str,
-                        help="Only include data since date (e.g. 24h, 7d, 2026-03-01)")
-    parser.add_argument("--chart", action="store_true", default=True,
-                        help="Generate PNG chart (default)")
-    parser.add_argument("--table", action="store_true",
-                        help="Show table instead of chart")
-    parser.add_argument("--share", action="store_true",
-                        help="Generate PNG chart, copy to clipboard, and open X")
-    parser.add_argument("--regime", action="store_true",
-                        help="Detect cache rate regime changes and plot")
-    cost_group = parser.add_mutually_exclusive_group()
-    cost_group.add_argument("--monthly", action="store_true",
-                            help="Show full monthly subscription cost")
-    cost_group.add_argument("--prorated", action="store_true",
-                            help="Show pro-rated subscription cost for the period")
-    parser.add_argument("--prices", choices=list(PRICE_BASES), default="historical",
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--prices", choices=list(PRICE_BASES), default="historical",
                         help="Price requests at the rates in effect when they ran "
                              "(historical, default) or at today's rates (current)")
-    parser.add_argument("--refresh", action="store_true",
-                        help="Force rebuild of cache from source files")
-    parser.add_argument("--debug-timing", action="store_true",
+    common.add_argument("--refresh", action="store_true",
+                        help="Rebuild the token cache from source files first")
+    common.add_argument("--debug-timing", action="store_true",
                         help="Print execution timings and cache decisions to stderr")
-    parser.add_argument("--profile", action="store_true",
+    common.add_argument("--profile", action="store_true",
                         help="Print a cProfile summary to stderr")
-    quota_group = parser.add_mutually_exclusive_group()
-    quota_group.add_argument("--record-quota", action="store_true",
-                             help="Fetch and retain current provider quota percentages")
-    quota_group.add_argument("--pace", action="store_true",
-                             help="Compare quota-delta and local token-derived pace")
-    quota_group.add_argument(
-        "--quota-history", action="store_true",
-        help="Audit API-equivalent usage across every observed fixed quota period",
-    )
-    parser.add_argument("--lookback", action="append", type=duration,
-                        help="Pace period such as 3h or 7h; repeat for several periods")
-    parser.add_argument("--quota-db", default=str(DEFAULT_DB_PATH),
-                        help=f"Quota history database (default: {DEFAULT_DB_PATH})")
-    parser.add_argument("--quota-json", action="store_true",
-                        help="Emit the quota report as versioned JSON")
-    parser.add_argument("--all-buckets", action="store_true",
-                        help="Include quota buckets with no activity in requested periods")
-    parser.add_argument("--model-mix", action="store_true",
-                        help="Include model mix in the pace table")
-    parser.add_argument("--plan", action="append", type=plan_setting, default=[],
-                        metavar="TOOL=PLAN|USD",
-                        help="Subscription plan for this run, as an model-prices plan id such as "
-                             "codex=pro_200 or a monthly price such as zcode=18; overrides "
-                             "the [plans] table in ~/.config/clanker-analytics/config.toml")
-    args = parser.parse_args(argv)
-    if args.command == "pace":
-        if args.pace:
-            parser.error("use either 'pace' or --pace, not both")
-        if args.lookback and args.periods:
-            parser.error("use positional pace periods or --lookback, not both")
-        args.pace = True
-        if args.periods:
-            args.lookback = args.periods
-    if args.command in ("value", "diagnose", "cache", "throughput") and args.periods:
-        parser.error(f"{args.command} does not accept periods")
-    if args.vs and args.command != "diagnose":
-        parser.error("--vs requires diagnose")
-    args.value = args.command == "value"
-    if args.lookback and not args.pace:
-        parser.error("--lookback requires --pace")
-    if args.quota_json and not (args.pace or args.quota_history or args.value
-                                or args.command in ("diagnose", "cache", "throughput")):
-        parser.error("--quota-json requires pace, value, diagnose, cache, throughput, "
-                     "or --quota-history")
-    if args.all_buckets and not args.pace:
-        parser.error("--all-buckets requires --pace")
-    if args.model_mix and not args.pace:
-        parser.error("--model-mix requires --pace")
+    usage = argparse.ArgumentParser(add_help=False)
+    usage.add_argument("--tool", choices=[*SOURCES, "all"], default="all",
+                       help="Which tool to analyze (default: all)")
+    usage.add_argument("--since", type=str,
+                       help="Only include data since a duration or date, such as 24h, 7d or 2026-03-01")
+    quota_db = argparse.ArgumentParser(add_help=False)
+    quota_db.add_argument("--quota-db", default=str(DEFAULT_DB_PATH),
+                          help=f"Quota history database (default: {DEFAULT_DB_PATH})")
+    as_json = argparse.ArgumentParser(add_help=False)
+    as_json.add_argument("--json", action="store_true", help="Print the report as JSON")
+    limit = argparse.ArgumentParser(add_help=False)
+    limit.add_argument("--limit", type=int, default=50, help="Max rows to display (default: 50)")
+    plans = argparse.ArgumentParser(add_help=False)
+    plans.add_argument("--plan", action="append", type=plan_setting, default=[],
+                       metavar="TOOL=PLAN|USD",
+                       help="Subscription plan for this run, as a model-prices plan id such as "
+                            "codex=pro_200 or a monthly price such as zcode=18; overrides "
+                            "the [plans] table in ~/.config/clanker-analytics/config.toml")
+
+    parser = argparse.ArgumentParser(
+        description="AI coding tool token analytics. Without a command, runs table.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
+    commands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
+
+    def command(name: str, help: str, *parents: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        return commands.add_parser(name, help=help, description=help, parents=[common, *parents])
+
+    table = command("table", "Tokens and cost grouped by project, date, model, session or "
+                             "execution, over --since (default 7d)", usage, limit)
+    table.add_argument("--by", choices=list(QUERIES), default="project",
+                       help="Group results by (default: project)")
+    for name, help in (("chart", "Save a PNG chart of daily cost by tool over --since (default 7d)"),
+                       ("share", "Save the chart, copy it to the clipboard, and open X to post it")):
+        chart = command(name, help, usage, plans)
+        cost = chart.add_mutually_exclusive_group()
+        cost.add_argument("--monthly", action="store_true",
+                          help="Show the full monthly subscription cost")
+        cost.add_argument("--prorated", action="store_true",
+                          help="Show the subscription cost pro-rated to the period")
+    command("regime", "Detect and plot changes in the cache hit rate over --since", usage)
+    sql = command("sql", "Run SQL against the 'tokens' table, over --since if given", usage)
+    sql.add_argument("query", help="SQL to run, such as \"SELECT count(*) FROM tokens\"")
+    diagnose = command("diagnose", "What changed in the --since period (default 3d) against "
+                                   "the --vs period before it", usage, limit, as_json)
+    diagnose.add_argument("--vs", type=duration, metavar="DURATION",
+                          help="The baseline period before --since (default: 7d)")
+    command("cache", "Prompt-cache health over --since (default 7d)", usage, limit, as_json)
+    command("throughput", "Output tokens per second by day over --since (default 7d)",
+            usage, as_json)
+    pace = command("pace", "Compare quota-delta and local token-derived pace", quota_db, as_json)
+    pace.add_argument("periods", nargs="*", type=duration, metavar="PERIOD",
+                      help="Pace periods such as 3h or 7h (default: the standard set)")
+    pace.add_argument("--all-buckets", action="store_true",
+                      help="Include quota buckets with no activity in the periods")
+    pace.add_argument("--model-mix", action="store_true", help="Include the model mix")
+    command("value", "What each subscription's latest week is worth at API prices",
+            quota_db, as_json, plans)
+    command("quota-history", "Audit API-equivalent usage across every observed fixed quota "
+                             "period", quota_db, as_json)
+    command("record-quota", "Fetch and retain current provider quota percentages", quota_db)
+
+    argv = sys.argv[1:] if argv is None else list(argv)
+    args = parser.parse_args(_modernize_argv(argv, set(commands.choices)))
 
     timer = DebugTimer(args.debug_timing)
     profiler = cProfile.Profile() if args.profile else None
