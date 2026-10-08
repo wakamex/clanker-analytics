@@ -281,9 +281,12 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     fig.text(0.05, 0.89, context, color=TEXT, **_font(14),
              ha="left", va="top")
 
-    # Third line: colored tool names as legend
+    # Third line: colored tool names as legend. Tools under 1% of the cost fold into one
+    # entry, so the line fits the card however many tools ran.
+    shown = [item for item in tool_costs if item[1] >= 0.01 * total_cost] or tool_costs[:1]
+    folded = tool_costs[len(shown):]
     x_pos = 0.05
-    for i, (t, c, estimated) in enumerate(tool_costs):
+    for i, (t, c, estimated) in enumerate(shown):
         if i > 0:
             sep = fig.text(x_pos, 0.84, "  |  ", color=TEXT, **_font(12),
                            ha="left", va="top")
@@ -307,18 +310,18 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
         fig.canvas.draw()
         x_pos += cost_txt.get_window_extent(renderer=renderer).width / fig_width
 
-    fig.text(x_pos, 0.84, f"  |  {n_projects} projects", color=TEXT, **_font(12),
+    more = (f"  |  +{len(folded)} more {_fmt_cost(sum(c for _, c, _ in folded))}"
+            if folded else "")
+    fig.text(x_pos, 0.84, f"{more}  |  {n_projects} projects", color=TEXT, **_font(12),
              ha="left", va="top")
 
-    # Bottom-right: command (show full command only if non-default args used)
+    # Footer: the command that draws this chart, with --since when it is not the default
+    cmd = "uvx clanker-analytics chart"
     if since_label and since_label != "7d":
-        cmd = f"uvx clanker-analytics --since {since_label}"
-    else:
-        cmd = "uvx clanker-analytics"
-    fig.text(0.95, 0.84, cmd, color=DIM,
-             **_font(11), ha="right", va="top")
+        cmd += f" --since {since_label}"
+    fig.text(0.95, 0.01, cmd, color=DIM, **_font(11), ha="right", va="bottom")
 
-    plt.tight_layout(rect=[0, 0, 1, 0.78])
+    plt.tight_layout(rect=[0, 0.04, 1, 0.78])
     output = output or OUTPUT
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
