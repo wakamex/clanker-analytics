@@ -1,6 +1,6 @@
-Clanker Mono (ClankerMono.ttf) is a modified subset of the D2Coding ligature font,
-patched with Nerd Fonts and a hinting fix, and renamed because the license below
-reserves the name D2Coding. Its build script is build_chart_font.sh in
+Clanker Mono (ClankerMono.ttf) is a modified subset of the D2Coding 1.4.0 ligature font,
+with tighter line spacing, and renamed because the license below reserves the name
+D2Coding. Its build script is build_chart_font.sh in
 https://github.com/wakamex/fonts.
 
 Copyright (c) 2015, NAVER Corporation (https://www.navercorp.com),
