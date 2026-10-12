@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import re
 import subprocess
 
 import duckdb
@@ -252,6 +253,74 @@ class TestQuota(Case):
                                   include_inactive=True)
 
         assert {bucket["account_key"] for bucket in report["buckets"]} == {"org-two"}
+
+    def test_pace_measures_each_account_over_its_logged_in_time(self):
+        tmp_path = self.tmp_path
+        capsys = self.capsys
+
+        def snapshots(account, resets_at, readings):
+            return [sample for when, used in readings
+                    for sample in _claude_snapshot(when, used, resets_at, account)]
+
+        with connect(tmp_path / "quota.sqlite3") as quota_db:
+            insert_samples(quota_db, [
+                # Logged in for 10 minutes, then switched away from with its week still open.
+                *snapshots("org-one", "2026-10-13T13:00:00Z", [
+                    ("2026-10-10T23:30:00Z", 98), ("2026-10-10T23:35:00Z", 99),
+                    ("2026-10-10T23:40:00Z", 100)]),
+                # A day into its week before its first login, then two 10-minute stretches
+                # with five hours logged out between them.
+                *snapshots("org-two", "2026-10-16T14:00:00Z", [
+                    ("2026-10-10T23:45:00Z", 1), ("2026-10-10T23:50:00Z", 2),
+                    ("2026-10-10T23:55:00Z", 3), ("2026-10-11T05:00:00Z", 3),
+                    ("2026-10-11T05:05:00Z", 4), ("2026-10-11T05:10:00Z", 5)]),
+            ])
+            quota_db.execute(
+                "INSERT INTO quota_accounts VALUES ('anthropic', 'org-two', 'second@example.com')")
+            token_db = duckdb.connect()
+            token_db.execute("""
+                CREATE TABLE tokens (
+                    tool VARCHAR, model VARCHAR, rate_mode VARCHAR,
+                    total_tokens BIGINT, cost_usd DOUBLE, timestamp VARCHAR
+                )
+            """)
+            report = build_report(quota_db, token_db, [parse_duration("5m")], "cost_usd",
+                                  include_inactive=True)
+
+        current = report["buckets"][0]
+        assert current["account_label"] == "second"
+        # 4 points in 20 logged-in minutes is 12 points an hour; even use is 100 in 168 hours.
+        assert current["window_pace"]["logged_in_hours"] == approx(20 / 60)
+        assert current["window_pace"]["quota_pp_per_hour"] == approx(12)
+        assert current["window_pace"]["pace_ratio"] == approx(12 * 168 / 100)
+        away = report["logged_out_buckets"][0]
+        assert away["account_key"] == "org-one"
+        assert away["logged_out_since"] == "2026-10-10T23:40:00Z"
+        assert away["window_pace"]["quota_pp_per_hour"] == approx(12)
+
+        print_report(report)
+        output = capsys.readouterr().out
+        assert re.search(r"claude\s+second\s+Week \(all models\)\s+5\.0%\s+0\.3\s+12\.000\s+"
+                         r"20\.16x\s+logged in", output)
+        assert re.search(r"claude\s+org-one\s+Week \(all models\)\s+100\.0%.*"
+                         r"logged out since 2026-10-10 23:40Z", output)
+
+    def test_recording_stores_the_claude_login_email(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
+        (tmp_path / ".claude.json").write_text(json.dumps(
+            {"oauthAccount": {"organizationUuid": "org-second",
+                              "emailAddress": "second@example.com"}}))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        output = json.dumps({"plan": "max_20x", "updated_at": "2026-10-03T01:14:00Z",
+                             "7d": {"pct": 1, "resets_at": "2026-10-09T14:00:00Z"}})
+        monkeypatch.setattr(quota.subprocess, "run",
+                            lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, output, ""))
+
+        quota.record_quota(tmp_path / "quota.sqlite3", ["anthropic"])
+
+        with connect(tmp_path / "quota.sqlite3") as quota_db:
+            assert quota.account_labels(quota_db) == {("anthropic", "org-second"): "second"}
 
     def test_snapshot_insert_is_idempotent(self):
         tmp_path = self.tmp_path

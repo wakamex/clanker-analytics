@@ -103,6 +103,8 @@ unknown windows do not receive target or workload-change guidance. When those bu
 complete lookback, the terminal report labels their percentage-point rate as a net trend and states
 why projection is unavailable.
 
+Below the lookbacks, a second table covers each account's current window of a day or longer, counting only the time that account was logged in. Logged-in time is the stretches the account's own snapshots cover: a gap of more than 15 minutes between two snapshots, three missed recordings, counts as logged out. `quota pp/h` is the percentage gained during those stretches divided by their hours, and `vs even` compares it with using the whole window evenly, so `2.00x` on a weekly quota means the account would be used up in half a week of logged-in time. An account that was switched away from stays in this table while its window is open, marked `logged out since` its last snapshot. Accounts are named by the local part of the login's email, which `record-quota` stores for Claude logins, or by the start of the account key before a login has been recorded. `pace --json` carries the same figures as `window_pace` and `account_label` on each bucket, with switched-away accounts under `logged_out_buckets`.
+
 The default periods are `1h`, `6h`, and `24h`. Pass any positive integer with `m`, `h`, `d`, or `w`
 after the command, such as `pace 3h 7h`. Until enough snapshots have accumulated,
 the corresponding row says `collecting history`.
