@@ -147,6 +147,8 @@ Claude quota snapshots record which login they came from, using the organization
 
 The plan comes from the same usage packages as the chart, and its monthly price from model-prices. Plans whose reported name covers several prices, such as Google AI Ultra's two tiers, are unpriced, and ChatGPT Pro is priced at $200 although Codex reports its $100 and $500 tiers the same way. A usage package's stale cached reading does not count as a current plan. Antigravity uses the Google AI plan reported for Gemini.
 
+A week is priced at the plan it ran on. Codex logs name the plan beside each weekly quota reading, and `record-quota` stores the plan with each Claude snapshot, so a week keeps its plan and that plan's price after you upgrade or downgrade. A configured or detected plan that is a tier of the reported one, such as `pro_200` for a week Codex reported as `pro`, is used as the more exact name. Weeks whose readings name no plan, including Claude snapshots recorded before 0.5.1, use the current plan. `--plan` applies to every week.
+
 When detection cannot tell your plan, name it once in `~/.config/clanker-analytics/config.toml`, either as an model-prices plan id or as a monthly price:
 
 ```toml

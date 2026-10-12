@@ -23,7 +23,7 @@ from pathlib import Path
 import duckdb
 
 from clanker_analytics.pricing import (
-    configured_plans, plan_choice, plan_price, price_tokens, pricing_basis,
+    configured_plans, normalize_plan, plan_choice, plan_price, price_tokens, pricing_basis,
     refresh_prices,
 )
 
@@ -50,13 +50,9 @@ def detect_plans() -> dict[str, tuple[str, float]]:
             # A cached reading cannot confirm that the subscription is still active.
             if data.get("stale"):
                 return tool, None
-            plan = (data.get("plan")
-                    or data.get("account_quota", {}).get("user_tier")
-                    or "unknown")
-            # Normalize display names
-            plan = (plan.replace("default_claude_", "")
-                        .replace("g1-pro-tier", "pro")
-                        .replace("g1-ultra-tier", "ultra"))
+            plan = normalize_plan(data.get("plan")
+                                  or data.get("account_quota", {}).get("user_tier")
+                                  or "unknown")
             return tool, (plan, plan_price(tool, plan))
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
             return tool, None
@@ -83,7 +79,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 27
+CACHE_SCHEMA_VERSION = 28
 
 AGY_METADATA_TOOL = "Agy metadata"
 # AOP appends every state directory that records a run here, one absolute .aop path per line.
@@ -130,7 +126,8 @@ TOKEN_SCHEMA = """
     quota_used_pct DOUBLE,
     quota_resets_at BIGINT,
     quota_window_minutes INTEGER,
-    quota_limit_id VARCHAR
+    quota_limit_id VARCHAR,
+    quota_plan VARCHAR
 """
 
 # On Windows, discover WSL home paths for additional data sources
@@ -405,6 +402,13 @@ token_entries AS (
                 r.payload_json, '$.rate_limits.secondary.window_minutes') as INTEGER) = 10080
             THEN json_extract_string(r.payload_json, '$.rate_limits.limit_id')
         END as quota_limit_id,
+        CASE
+            WHEN try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.primary.window_minutes') as INTEGER) = 10080
+              OR try_cast(json_extract_string(
+                r.payload_json, '$.rate_limits.secondary.window_minutes') as INTEGER) = 10080
+            THEN json_extract_string(r.payload_json, '$.rate_limits.plan_type')
+        END as quota_plan,
         LAG(try_cast(json_extract_string(
             r.payload_json, '$.info.total_token_usage.total_tokens') as BIGINT))
             OVER (PARTITION BY r.filename ORDER BY r.timestamp) as prev_cum
@@ -445,7 +449,8 @@ SELECT
     t.quota_used_pct,
     t.quota_resets_at,
     t.quota_window_minutes,
-    t.quota_limit_id
+    t.quota_limit_id,
+    t.quota_plan
 FROM token_entries t
 LEFT JOIN projects p ON t.filename = p.filename
 WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
@@ -1547,15 +1552,30 @@ def _group_files_by_tool(files: dict[str, SourceSnapshot]) -> dict[str, list[str
 
 
 AOP_BATCH = 5000
+CODEX_BATCH_BYTES = 2 << 30
 
 
 def _source_batches(files: dict[str, SourceSnapshot]) -> list[dict[str, list[str]]]:
-    """Files grouped by tool, with AOP results split into batches of AOP_BATCH: parsing
-    JSON results in one query takes about 110 KB of memory per result."""
+    """Files grouped by tool, with the two large sources split into batches to bound
+    memory. Parsing AOP results in one query takes about 110 KB per result, so they go
+    AOP_BATCH at a time. Parsing Codex logs takes about 1.25 times their size, so they go
+    in batches of up to CODEX_BATCH_BYTES; each log is parsed independently of the rest.
+    """
     grouped = _group_files_by_tool(files)
     aop = grouped.pop(AOP_RESULT_TOOL, [])
-    return [grouped, *({AOP_RESULT_TOOL: aop[start:start + AOP_BATCH]}
-                       for start in range(0, len(aop), AOP_BATCH))]
+    batches = [grouped, *({AOP_RESULT_TOOL: aop[start:start + AOP_BATCH]}
+                          for start in range(0, len(aop), AOP_BATCH))]
+    logs: list[str] = []
+    size = 0
+    for path in grouped.pop("Codex", []):
+        if logs and size + files[path].size > CODEX_BATCH_BYTES:
+            batches.append({"Codex": logs})
+            logs, size = [], 0
+        logs.append(path)
+        size += files[path].size
+    if logs:
+        batches.append({"Codex": logs})
+    return batches
 
 
 def _insert_source_files(db: duckdb.DuckDBPyConnection,
@@ -1614,7 +1634,9 @@ def _unmigrated_aop_results(db: duckdb.DuckDBPyConnection,
                             files: dict[str, SourceSnapshot]) -> set[str]:
     """AOP results that are not v3, whose cached usage is kept until AOP migrates them."""
     unmigrated = set()
-    for grouped in _source_batches(files)[1:]:
+    for grouped in _source_batches(files):
+        if not grouped.get(AOP_RESULT_TOOL):
+            continue
         unmigrated.update(row[0] for row in db.execute(f"""
             SELECT replace(filename, '\\', '/')
             FROM read_json_objects({_sql_file_list(grouped[AOP_RESULT_TOOL])}, format='auto',
@@ -2059,7 +2081,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         if args.command == "value":
             with timer.span("detect plans"):
                 plans = plans_for(args)
-            report = build_value_report(report, plans)
+            report = build_value_report(report, plans, {tool for tool, _ in args.plan})
             if args.json:
                 print(json.dumps(report, indent=2))
             elif report["tools"]:

@@ -316,6 +316,7 @@ class TestSourceLoaders(Case):
                     },
                     "rate_limits": {
                         "limit_id": "codex",
+                        "plan_type": "pro",
                         "primary": {
                             "used_percent": used_pct,
                             "window_minutes": 10080,
@@ -338,7 +339,7 @@ class TestSourceLoaders(Case):
 
         assert len(result) == 1
         assert result[0][18] == "2026-08-13T05:00:12.000Z"
-        assert result[0][20:] == (41.0, 1787200000, 10080, "codex")
+        assert result[0][20:] == (41.0, 1787200000, 10080, "codex", "pro")
 
     def test_claude_includes_subagents_but_not_compaction_duplicates(self):
         tmp_path = self.tmp_path
@@ -2207,6 +2208,21 @@ class TestDebugHooks(Case):
         assert load(10, refresh=True) == (10, 1100)
         assert [len(batch.get(main_mod.AOP_RESULT_TOOL, [])) for batch in main_mod._source_batches(
             main_mod.scan_source_files()[0])] == [0, 2, 2, 2, 2, 2]
+
+    def test_codex_logs_are_read_in_batches_by_size(self):
+        self.monkeypatch.setattr(main_mod, "CODEX_BATCH_BYTES", 100)
+        files = {f"/logs/{name}.jsonl": main_mod.SourceSnapshot("Codex", 0, size)
+                 for name, size in (("a", 60), ("b", 30), ("c", 30), ("d", 500), ("e", 10))}
+        files["/logs/claude.jsonl"] = main_mod.SourceSnapshot("Claude Code", 0, 500)
+
+        batches = main_mod._source_batches(files)
+
+        # A log larger than the limit gets a batch of its own.
+        assert [batch["Codex"] for batch in batches[1:]] == [
+            ["/logs/a.jsonl", "/logs/b.jsonl"], ["/logs/c.jsonl"], ["/logs/d.jsonl"],
+            ["/logs/e.jsonl"]]
+        assert batches[0]["Claude Code"] == ["/logs/claude.jsonl"]
+        assert "Codex" not in batches[0]
 
     def test_aop_cache_appends_new_resume_result(self):
         tmp_path = self.tmp_path

@@ -14,6 +14,8 @@ import subprocess
 import sys
 from typing import Any, Iterable
 
+from clanker_analytics.pricing import normalize_plan, plan_price
+
 
 DEFAULT_LOOKBACKS = (3600, 6 * 3600, 24 * 3600)
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
@@ -57,6 +59,7 @@ class QuotaSample:
     source: str
     source_sample_id: str
     status: str = "ok"
+    plan: str | None = None
 
 
 def parse_duration(value: str) -> int:
@@ -133,6 +136,7 @@ def _make_sample(
     used_pct: float,
     resets_at: str | int | float | None,
     source: str,
+    plan: str | None = None,
 ) -> QuotaSample:
     reset_text = _time_text(resets_at) if _parse_time(resets_at) else None
     return QuotaSample(
@@ -152,6 +156,7 @@ def _make_sample(
         source_sample_id=_sample_id(
             provider, account_key, bucket_id, scope_id, effective_at, float(used_pct), reset_text
         ),
+        plan=plan,
     )
 
 
@@ -191,6 +196,7 @@ def normalize_anthropic(data: dict[str, Any], collected_at: datetime) -> list[Qu
             used_pct=value["pct"],
             resets_at=_rounded_time(value.get("resets_at"), 60),
             source=source,
+            plan=normalize_plan(plan) if plan != "unknown" else None,
         ))
     return samples
 
@@ -396,9 +402,12 @@ def connect(path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
             resets_at TEXT,
             source TEXT NOT NULL,
             source_sample_id TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL
+            status TEXT NOT NULL,
+            plan TEXT
         )
     """)
+    if "plan" not in {row[1] for row in connection.execute("PRAGMA table_info(quota_samples)")}:
+        connection.execute("ALTER TABLE quota_samples ADD COLUMN plan TEXT")
     connection.execute("""
         CREATE INDEX IF NOT EXISTS quota_samples_lookup
         ON quota_samples(provider, account_key, bucket_id, scope_type, scope_id, effective_at)
@@ -421,11 +430,11 @@ def insert_samples(connection: sqlite3.Connection, samples: Iterable[QuotaSample
         INSERT OR IGNORE INTO quota_samples (
             provider, account_key, bucket_id, bucket_label, scope_type, scope_id,
             window_kind, window_seconds, effective_at, collected_at, used_pct,
-            resets_at, source, source_sample_id, status
+            resets_at, source, source_sample_id, status, plan
         ) VALUES (
             :provider, :account_key, :bucket_id, :bucket_label, :scope_type, :scope_id,
             :window_kind, :window_seconds, :effective_at, :collected_at, :used_pct,
-            :resets_at, :source, :source_sample_id, :status
+            :resets_at, :source, :source_sample_id, :status, :plan
         )
     """, [asdict(sample) for sample in samples])
     connection.commit()
@@ -871,7 +880,8 @@ QUOTA_OBSERVATION_COLUMNS = """
     observed_at TIMESTAMPTZ,
     used_pct DOUBLE,
     model_patterns VARCHAR[],
-    account VARCHAR
+    account VARCHAR,
+    plan VARCHAR
 """
 
 
@@ -904,6 +914,7 @@ def _recorder_observations(connection: sqlite3.Connection) -> list[tuple]:
             sample["used_pct"],
             _model_patterns(sample),
             sample["account_key"],
+            sample["plan"],
         ))
     return observations
 
@@ -957,6 +968,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
     token_db.execute(
         f"CREATE OR REPLACE TEMP TABLE quota_observations ({QUOTA_OBSERVATION_COLUMNS})"
     )
+    token_db.execute("ALTER TABLE tokens ADD COLUMN IF NOT EXISTS quota_plan VARCHAR")
     token_db.execute("""
         INSERT INTO quota_observations
         SELECT
@@ -967,7 +979,8 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             try_cast(timestamp AS TIMESTAMPTZ),
             quota_used_pct,
             []::VARCHAR[],
-            'default'
+            'default',
+            nullif(quota_plan, '')
         FROM tokens
         WHERE source_kind = 'native'
           AND quota_used_pct IS NOT NULL
@@ -980,7 +993,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
         recorded = _recorder_observations(quota_connection)
         if recorded:
             token_db.executemany(
-                "INSERT INTO quota_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?)", recorded
+                "INSERT INTO quota_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", recorded
             )
     rows = token_db.execute(f"""
         WITH observations AS (
@@ -996,7 +1009,9 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
                 max(observed_at) as observed_at,
                 count(*)::BIGINT as observation_count,
                 any_value(model_patterns) as model_patterns,
-                account
+                account,
+                -- The plan at the reading the period's used percentage comes from.
+                arg_max(plan, observed_at) FILTER (WHERE plan IS NOT NULL) as plan
             FROM quota_observations
             WHERE observed_at IS NOT NULL
             GROUP BY quota_tool, canonical_resets_at, window_minutes, limit_id, account
@@ -1021,6 +1036,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             cast(o.observed_at AS VARCHAR) as observed_at,
             o.observation_count,
             o.account,
+            o.plan,
             coalesce(nullif(t.model, ''), 'unknown') as model,
             coalesce(nullif(t.rate_mode, ''), 'default') as rate_mode,
             coalesce(t.source_kind, 'native') as source_kind,
@@ -1047,7 +1063,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
         GROUP BY
             o.quota_tool, o.quota_resets_at, o.quota_window_minutes, o.quota_limit_id,
             o.last_used_pct, o.max_used_pct, o.first_observed_at,
-            o.observed_at, o.observation_count, o.account,
+            o.observed_at, o.observation_count, o.account, o.plan,
             coalesce(nullif(t.model, ''), 'unknown'),
             coalesce(nullif(t.rate_mode, ''), 'default'),
             coalesce(t.source_kind, 'native')
@@ -1076,6 +1092,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             "window_minutes": row["quota_window_minutes"],
             "limit_id": row["quota_limit_id"],
             "account": row["account"],
+            "plan": row["plan"],
             "used_pct": float(row["last_used_pct"]),
             "max_used_pct": float(row["max_used_pct"]),
             "observation_count": row["observation_count"],
@@ -1203,10 +1220,23 @@ VALUE_MIN_USED_PCT = 15
 PLAN_TOOLS = {"Agy": "Gemini"}
 
 
-def build_value_report(history: dict[str, Any],
-                       plans: dict[str, tuple[str, float]]) -> dict[str, Any]:
-    """Compare each tool's latest weekly full-quota API value with its plan price, for each
-    account the tool was used with."""
+def _period_plan(tool: str, period: dict[str, Any],
+                 current: tuple[str | None, float | None]) -> tuple[str | None, float | None]:
+    """The plan a quota period ran on: the one its snapshots reported, priced as of the
+    period, or the tool's current plan when they reported none. A current plan that is a
+    tier of the reported one, such as pro_200 for Codex's "pro", is the more exact name."""
+    observed = period.get("plan")
+    name = current[0]
+    if not observed or (name and (name == observed or name.startswith(f"{observed}_"))):
+        return current
+    return observed, plan_price(tool, observed, at=period["resets_at"])
+
+
+def build_value_report(history: dict[str, Any], plans: dict[str, tuple[str, float]],
+                       forced: Iterable[str] = ()) -> dict[str, Any]:
+    """Compare each tool's latest weekly full-quota API value with the price of the plan
+    that week ran on, for each account the tool was used with. Tools in `forced` use the
+    plan in `plans` whatever the week's snapshots reported."""
     latest: dict[tuple[str, str], dict[str, Any]] = {}
     for period in history["periods"]:
         if (period["window_minutes"] != 7 * 24 * 60 or period["total_tokens"] <= 0
@@ -1223,7 +1253,10 @@ def build_value_report(history: dict[str, Any],
         period = entry["period"]
         weekly = period["full_quota_api_equivalent_cost_estimate_usd"]
         monthly = weekly * WEEKS_PER_MONTH
-        plan, price = plans.get(PLAN_TOOLS.get(tool, tool), (None, None))
+        plan_tool = PLAN_TOOLS.get(tool, tool)
+        plan, price = plans.get(plan_tool, (None, None))
+        if plan_tool not in forced:
+            plan, price = _period_plan(plan_tool, period, (plan, price))
         price = price or None
         multiple = monthly / price if price and monthly else None
         api_usd_per_million = (
@@ -1289,7 +1322,8 @@ def print_value_report(report: dict[str, Any]) -> None:
         f"more than {VALUE_MIN_USED_PCT}% used. "
         f"Month: full week x {report['weeks_per_month']:.3f}. $/1M uses that week's own "
         "token mix, counting input, cache, and output tokens. Each account of a tool is a "
-        "separate subscription; the plan shown is the one detected or configured for the tool."
+        "separate subscription. The plan is the one that week's quota snapshots reported, or "
+        "else the one detected or configured for the tool."
     )
 
 

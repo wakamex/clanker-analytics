@@ -721,6 +721,53 @@ class TestQuota(Case):
         assert {item["pricing"] for item in period["model_mix"]} == {"model-prices", "unpriced"}
         assert "unpriced_models" in period["pricing_flags"]
 
+    def test_quota_history_names_the_plan_each_period_reported(self):
+        tmp_path = self.tmp_path
+        db = duckdb.connect()
+        db.execute("""
+            CREATE TABLE tokens (
+                tool VARCHAR, model VARCHAR, rate_mode VARCHAR, source_kind VARCHAR,
+                input_tokens BIGINT, output_tokens BIGINT, cache_write_tokens BIGINT,
+                cache_read_tokens BIGINT, total_tokens BIGINT, cost_usd DOUBLE,
+                timestamp VARCHAR, quota_used_pct DOUBLE, quota_resets_at BIGINT,
+                quota_window_minutes INTEGER, quota_limit_id VARCHAR, quota_plan VARCHAR,
+                pricing VARCHAR
+            )
+        """)
+        first = int(datetime(2026, 10, 10, 5, 24, tzinfo=timezone.utc).timestamp())
+        db.executemany(
+            "INSERT INTO tokens VALUES ('Codex', 'gpt-5.5', '', 'native', 0, 0, 0, 0, 100, 1.0, "
+            "?, ?, ?, 10080, 'codex', ?, 'model-prices')",
+            [("2026-10-04T00:00:00Z", 20, first, "pro"),
+             ("2026-10-06T00:00:00Z", 35, first, "pro"),
+             ("2026-10-12T03:00:00Z", 5, first + 7 * 86400, "plus")],
+        )
+        with connect(tmp_path / "quota.sqlite3") as connection:
+            insert_samples(connection, _claude_snapshot(
+                "2026-10-05T00:00:00Z", 40, "2026-10-09T14:00:00Z", "org-one"))
+            report = build_quota_history(db, "cost_usd", "test", connection)
+
+        assert [(period["tool"], period["plan"]) for period in report["periods"]] == [
+            ("Claude Code", "max_20x"), ("Codex", "pro"), ("Codex", "plus")]
+
+    def test_value_report_prices_a_week_at_the_plan_it_ran_on(self):
+        week = _history_period("Codex", "2026-10-10T05:24:00Z", 36, 510.0, 1_000_000_000, [])
+        history = {"pricing_basis": "test", "periods": [{**week, "plan": "pro"}]}
+
+        def plan(current, forced=()):
+            item = build_value_report(history, {"Codex": current}, forced)["tools"][0]
+            return item["plan"], item["plan_usd_per_month"]
+
+        # A downgrade after the week ended does not reprice it.
+        assert plan(("plus", 20)) == ("pro", 200)
+        # Codex reports every Pro tier as "pro", so a configured tier names it exactly.
+        assert plan(("pro_100", 100)) == ("pro_100", 100)
+        # --plan applies to every week.
+        assert plan(("plus", 20), forced={"Codex"}) == ("plus", 20)
+        # A week whose snapshots named no plan uses the current one.
+        history["periods"][0]["plan"] = None
+        assert plan(("plus", 20)) == ("plus", 20)
+
     def test_value_report_uses_the_latest_week_above_minimum_usage(self):
         history = {"pricing_basis": "test", "periods": [
             _history_period("Claude Code", "2026-09-22T13:00:00Z", 90, 900.0, 1_000_000_000, []),

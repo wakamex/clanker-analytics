@@ -52,6 +52,13 @@ CONFIG_PATH = (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
                / "clanker-analytics" / "config.toml")
 
 
+def normalize_plan(plan: str) -> str:
+    """A usage package's plan name as the model-prices plan id."""
+    return (plan.replace("default_claude_", "")
+                .replace("g1-pro-tier", "pro")
+                .replace("g1-ultra-tier", "ultra"))
+
+
 def plan_price(tool: str, plan: str, at: datetime | str | None = None) -> float:
     """Monthly price of a detected plan, or 0 when model-prices has no price for it."""
     provider = PLAN_PROVIDERS.get(tool)
