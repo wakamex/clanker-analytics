@@ -1,6 +1,6 @@
 [project]
 name = "clanker-analytics"
-version = "0.4.2"
+version = "0.5.0"
 description = "AI coding tool token analytics powered by DuckDB"
 readme = "README.md"
 license = "MIT AND OFL-1.1 AND CC-BY-4.0"
