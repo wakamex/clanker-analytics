@@ -2177,6 +2177,37 @@ class TestDebugHooks(Case):
         assert load(copies) == (1, 110)
         assert load(copies, refresh=True) == (1, 110)
 
+    def test_aop_results_are_read_in_batches(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
+        project = tmp_path / "project"
+        roots = tmp_path / "state-roots"
+        roots.write_text(str(project / ".aop") + "\n")
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, roots, "")])
+        monkeypatch.setattr(main_mod, "SOURCES", {"aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql)})
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+        monkeypatch.setattr(main_mod, "AOP_BATCH", 2)
+
+        def load(runs, refresh=False):
+            for run in range(runs):
+                _write_aop_result(project / ".aop" / "runs" / f"run-{run}" / "result.json",
+                                  run_id=f"run-{run}", session_id=f"session-{run}")
+            db = duckdb.connect()
+            register_macros(db)
+            main_mod.load_tokens(db, refresh=refresh)
+            return db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone()
+
+        assert load(5) == (5, 550)
+        # Five more arrive in one update, then everything is rebuilt.
+        assert load(10) == (10, 1100)
+        assert load(10, refresh=True) == (10, 1100)
+        assert [len(batch.get(main_mod.AOP_RESULT_TOOL, [])) for batch in main_mod._source_batches(
+            main_mod.scan_source_files()[0])] == [0, 2, 2, 2, 2, 2]
+
     def test_aop_cache_appends_new_resume_result(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch

@@ -1546,6 +1546,27 @@ def _group_files_by_tool(files: dict[str, SourceSnapshot]) -> dict[str, list[str
     return grouped
 
 
+AOP_BATCH = 5000
+
+
+def _source_batches(files: dict[str, SourceSnapshot]) -> list[dict[str, list[str]]]:
+    """Files grouped by tool, with AOP results split into batches of AOP_BATCH: parsing
+    JSON results in one query takes about 110 KB of memory per result."""
+    grouped = _group_files_by_tool(files)
+    aop = grouped.pop(AOP_RESULT_TOOL, [])
+    return [grouped, *({AOP_RESULT_TOOL: aop[start:start + AOP_BATCH]}
+                       for start in range(0, len(aop), AOP_BATCH))]
+
+
+def _insert_source_files(db: duckdb.DuckDBPyConnection,
+                         files: dict[str, SourceSnapshot]) -> None:
+    for grouped in _source_batches(files):
+        parts = _build_source_sql(db, grouped)
+        if parts:
+            db.execute("INSERT INTO tokens BY NAME "
+                       + " UNION ALL BY NAME ".join(f"SELECT * FROM ({part})" for part in parts))
+
+
 def _build_source_sql(db: duckdb.DuckDBPyConnection,
                       grouped_files: dict[str, list[str]]) -> list[str]:
     parts = []
@@ -1592,19 +1613,26 @@ def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot]
 def _unmigrated_aop_results(db: duckdb.DuckDBPyConnection,
                             files: dict[str, SourceSnapshot]) -> set[str]:
     """AOP results that are not v3, whose cached usage is kept until AOP migrates them."""
-    paths = [path for path, snapshot in files.items() if snapshot.tool == AOP_RESULT_TOOL]
-    if not paths:
-        return set()
-    unmigrated = {row[0] for row in db.execute(f"""
-        SELECT replace(filename, '\\', '/')
-        FROM read_json_objects({_sql_file_list(paths)}, format='auto', filename=true,
-                               ignore_errors=true)
-        WHERE coalesce(json_extract_string(json, '$.usage_schema'), '') != '{AOP_USAGE_SCHEMA}'
-    """).fetchall()}
+    unmigrated = set()
+    for grouped in _source_batches(files)[1:]:
+        unmigrated.update(row[0] for row in db.execute(f"""
+            SELECT replace(filename, '\\', '/')
+            FROM read_json_objects({_sql_file_list(grouped[AOP_RESULT_TOOL])}, format='auto',
+                                   filename=true, ignore_errors=true)
+            WHERE coalesce(json_extract_string(json, '$.usage_schema'), '') != '{AOP_USAGE_SCHEMA}'
+        """).fetchall())
     if unmigrated:
         print(f"  warning: {len(unmigrated)} AOP results are not {AOP_USAGE_SCHEMA}; their cached "
               "usage is kept. Run aop migrate-results.", file=sys.stderr)
     return unmigrated
+
+
+def _path_table(db: duckdb.DuckDBPyConnection, name: str, paths: list[str]) -> None:
+    """A temporary table of paths. A list literal loads 200,000 paths in about a second,
+    where a bound list takes 18 and a row at a time about a minute."""
+    literals = ", ".join(_sql_literal(path) for path in paths)
+    db.execute(f"CREATE OR REPLACE TEMP TABLE {name} AS "
+               f"SELECT unnest([{literals}]::VARCHAR[]) AS path")
 
 
 def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
@@ -1612,15 +1640,9 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
     """Rebuild the table from source files, returning the AOP results left unread."""
     unmigrated = _unmigrated_aop_results(db, files)
     files = {path: snapshot for path, snapshot in files.items() if path not in unmigrated}
-    parts = _build_source_sql(db, _group_files_by_tool(files))
-    if parts:
-        with timer.span("build tokens table", f"{len(parts)} sources"):
-            # By name: only some sources report columns such as cache_write_1h_tokens.
-            db.execute("CREATE TABLE tokens AS "
-                       + " UNION ALL BY NAME ".join(f"({part})" for part in parts))
-            db.execute("ALTER TABLE tokens ADD COLUMN IF NOT EXISTS cache_write_1h_tokens INT")
-    else:
-        _empty_tokens_table(db)
+    _empty_tokens_table(db)
+    with timer.span("build tokens table", f"{len(files)} files"):
+        _insert_source_files(db, files)
     _carry_over_vanished_rows(db, files, timer)
     _drop_other_copies_of_aop_runs(db, list(files), timer)
     _name_claude_projects(db, timer)
@@ -1646,8 +1668,7 @@ def _carry_over_vanished_rows(db: duckdb.DuckDBPyConnection, files: dict[str, So
     current = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     columns = ", ".join(f'"{name}"' for name in sorted(cached & current))
     with timer.span("carry over vanished sources"):
-        db.execute("CREATE OR REPLACE TEMP TABLE scanned_sources (path VARCHAR)")
-        db.executemany("INSERT INTO scanned_sources VALUES (?)", [[path] for path in files])
+        _path_table(db, "scanned_sources", list(files))
         db.execute(f"""
             INSERT INTO tokens BY NAME
             SELECT {columns} FROM read_parquet({cache})
@@ -1670,8 +1691,7 @@ def _drop_other_copies_of_aop_runs(db: duckdb.DuckDBPyConnection, read: list[str
         return
     run = "regexp_extract(source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1)"
     with timer.span("drop other copies of AOP runs"):
-        db.execute("CREATE OR REPLACE TEMP TABLE read_results (path VARCHAR)")
-        db.executemany("INSERT INTO read_results VALUES (?)", [[path] for path in read])
+        _path_table(db, "read_results", read)
         db.execute(f"""
             DELETE FROM tokens
             WHERE source_kind = 'aop'
@@ -1682,12 +1702,13 @@ def _drop_other_copies_of_aop_runs(db: duckdb.DuckDBPyConnection, read: list[str
         # Copies read together keep the first path.
         db.execute(f"""
             DELETE FROM tokens
-            WHERE source_kind = 'aop' AND source_file IN (SELECT path FROM read_results)
-              AND source_file != (
-                  SELECT min(other.source_file) FROM tokens other
-                  WHERE other.source_kind = 'aop'
-                    AND regexp_extract(other.source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1)
-                        = regexp_extract(tokens.source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1))
+            WHERE source_kind = 'aop' AND source_file IN (
+                SELECT source_file FROM (
+                    SELECT source_file, min(source_file) OVER (PARTITION BY run) AS kept
+                    FROM (SELECT DISTINCT source_file, {run} AS run FROM tokens
+                          WHERE source_kind = 'aop'
+                            AND source_file IN (SELECT path FROM read_results)))
+                WHERE source_file != kept)
         """)
         db.execute("DROP TABLE read_results")
 
@@ -1802,14 +1823,8 @@ def _append_source_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceS
     file it was copied from."""
     if not files:
         return
-    parts = _build_source_sql(db, _group_files_by_tool(files))
-    if not parts:
-        return
     with timer.span("append changed files", f"{len(files)} files"):
-        db.execute(
-            "INSERT INTO tokens BY NAME "
-            + " UNION ALL BY NAME ".join(f"SELECT * FROM ({part})" for part in parts)
-        )
+        _insert_source_files(db, files)
         if real_paths:
             db.execute("CREATE OR REPLACE TEMP TABLE copied_logs (copy VARCHAR, path VARCHAR)")
             db.executemany("INSERT INTO copied_logs VALUES (?, ?)", list(real_paths.items()))
