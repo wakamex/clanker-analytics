@@ -72,6 +72,8 @@ def _write_aop_result(
     model: str = "model-1",
     input_tokens: int = 100,
     cached_input_tokens: int = 30,
+    cache_write_input_tokens: int = 0,
+    cache_write_1h_input_tokens: int = 0,
     output_tokens: int = 10,
     reasoning_output_tokens: int = 5,
     inference_provider: str | None = None,
@@ -82,13 +84,17 @@ def _write_aop_result(
     counts = (
         input_tokens,
         cached_input_tokens,
+        cache_write_input_tokens,
+        cache_write_1h_input_tokens,
         output_tokens,
         reasoning_output_tokens,
     )
     if min(counts) < 0:
         raise ValueError("AOP fixture token counts cannot be negative")
-    if cached_input_tokens > input_tokens:
+    if cached_input_tokens + cache_write_input_tokens > input_tokens:
         raise ValueError("AOP fixture cached input cannot exceed input")
+    if cache_write_1h_input_tokens > cache_write_input_tokens:
+        raise ValueError("AOP fixture 1h cache write cannot exceed cache write")
     if reasoning_output_tokens > output_tokens:
         raise ValueError("AOP fixture reasoning output cannot exceed output")
     if usage_schema != "aop-token-usage-v3":
@@ -114,6 +120,8 @@ def _write_aop_result(
         "usage": {
             "input_tokens": input_tokens,
             "cached_input_tokens": cached_input_tokens,
+            "cache_write_input_tokens": cache_write_input_tokens,
+            "cache_write_1h_input_tokens": cache_write_1h_input_tokens,
             "output_tokens": output_tokens,
             "reasoning_output_tokens": reasoning_output_tokens,
         },
@@ -696,13 +704,46 @@ class TestAOPSourceLoader(Case):
 
     def test_accepts_v3_aop_usage(self):
         result_path = self.tmp_path / "project" / ".aop" / "runs" / "run" / "result.json"
-        _write_aop_result(result_path)
+        _write_aop_result(
+            result_path,
+            provider="claude",
+            model="claude-sonnet-4-6",
+            input_tokens=1_000,
+            cached_input_tokens=200,
+            cache_write_input_tokens=500,
+            cache_write_1h_input_tokens=300,
+            output_tokens=100,
+            reasoning_output_tokens=0,
+        )
 
         db = self._load_aop([result_path])
+        price_tokens(db, all_rows=True)
 
-        assert db.sql("SELECT input_tokens, cache_read_tokens, output_tokens FROM tokens").fetchall() == [
-            (70, 30, 10),
+        assert db.sql("""
+            SELECT input_tokens, cache_read_tokens, cache_write_tokens,
+                   cache_write_1h_tokens, output_tokens, total_tokens
+            FROM tokens
+        """).fetchall() == [
+            (300, 200, 500, 300, 100, 1_100),
         ]
+        cost, write_cost, write_1h_cost = db.sql("""
+            SELECT api_cost_usd, api_cache_write_usd, api_cache_write_1h_usd
+            FROM tokens
+        """).fetchone()
+        breakdown = model_prices.rates(
+            "claude-sonnet-4-6",
+            provider="anthropic",
+            at="2026-08-14T12:00:00Z",
+        ).breakdown(
+            input_tokens=300,
+            cache_read_tokens=200,
+            cache_write_tokens=200,
+            cache_write_1h_tokens=300,
+            output_tokens=100,
+        )
+        assert cost == approx(breakdown.total)
+        assert write_cost == approx(breakdown.cache_write)
+        assert write_1h_cost == approx(breakdown.cache_write_1h)
 
     def test_accepts_usage_bearing_partial_accounting(self):
         tmp_path = self.tmp_path
@@ -762,6 +803,8 @@ class TestAOPSourceLoader(Case):
         for overrides, message in [
             ({"input_tokens": -1}, "cannot be negative"),
             ({"cached_input_tokens": 101}, "cached input cannot exceed input"),
+            ({"cached_input_tokens": 60, "cache_write_input_tokens": 50}, "cached input cannot exceed input"),
+            ({"cache_write_input_tokens": 40, "cache_write_1h_input_tokens": 50}, "1h cache write cannot exceed cache write"),
             ({"reasoning_output_tokens": 11}, "reasoning output cannot exceed output"),
             ({"accounting_status": "unavailable"}, "requires complete or partial"),
         ]:

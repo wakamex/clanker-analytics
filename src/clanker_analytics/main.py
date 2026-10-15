@@ -79,7 +79,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 28
+CACHE_SCHEMA_VERSION = 29
 
 AGY_METADATA_TOOL = "Agy metadata"
 # AOP appends every state directory that records a run here, one absolute .aop path per line.
@@ -841,6 +841,12 @@ stored AS (
         greatest(coalesce(try_cast(json_extract_string(
             result_json, '$.usage.cached_input_tokens') as BIGINT), 0), 0) as cached_input,
         greatest(coalesce(try_cast(json_extract_string(
+            result_json, '$.usage.cache_write_input_tokens') as BIGINT), 0), 0)
+            as cache_write_input,
+        greatest(coalesce(try_cast(json_extract_string(
+            result_json, '$.usage.cache_write_1h_input_tokens') as BIGINT), 0), 0)
+            as cache_write_1h_input,
+        greatest(coalesce(try_cast(json_extract_string(
             result_json, '$.usage.output_tokens') as BIGINT), 0), 0) as raw_output,
         greatest(coalesce(try_cast(json_extract_string(
             result_json, '$.usage.reasoning_output_tokens') as BIGINT), 0), 0)
@@ -852,7 +858,7 @@ stored AS (
     FROM raw
 ),
 normalized AS (
-    -- Input and output are totals; cached input and reasoning output are their subsets.
+    -- Input and output are totals; cached input, cache writes, and reasoning output are subsets.
     SELECT *, raw_input as normalized_input, raw_output as processed_output
     FROM stored
     WHERE CASE
@@ -866,7 +872,8 @@ normalized AS (
 tokens AS (
     SELECT
         *,
-        greatest(normalized_input - cached_input, 0) as uncached_input
+        greatest(normalized_input - cached_input - cache_write_input, 0) as uncached_input,
+        least(cache_write_1h_input, cache_write_input) as cache_write_1h
     FROM normalized
 )
 SELECT
@@ -889,9 +896,10 @@ SELECT
     coalesce(model, '') as model,
     uncached_input::INT as input_tokens,
     processed_output::INT as output_tokens,
-    0 as cache_write_tokens,
+    cache_write_input::INT as cache_write_tokens,
     cached_input::INT as cache_read_tokens,
-    (uncached_input + cached_input + processed_output)::BIGINT as total_tokens,
+    (uncached_input + cached_input + cache_write_input + processed_output)::BIGINT
+        as total_tokens,
     'subagent' as execution_type,
     owner_path || '/.aop/worktrees/' || coalesce(nullif(task, ''), run_id)
         as project_path,
@@ -906,11 +914,12 @@ SELECT
     NULL::DOUBLE as quota_used_pct,
     NULL::BIGINT as quota_resets_at,
     NULL::INTEGER as quota_window_minutes,
-    NULL::VARCHAR as quota_limit_id
+    NULL::VARCHAR as quota_limit_id,
+    cache_write_1h::INT as cache_write_1h_tokens
 FROM tokens
 WHERE timestamp IS NOT NULL
   AND run_id IS NOT NULL
-  AND uncached_input + cached_input + processed_output > 0
+  AND uncached_input + cached_input + cache_write_input + processed_output > 0
 """
 
 
