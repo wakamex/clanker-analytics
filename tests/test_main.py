@@ -2056,6 +2056,71 @@ class TestDebugHooks(Case):
         assert load() == expected
         assert load(refresh=True) == expected
 
+    def test_files_deleted_after_the_scan_are_skipped(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+
+        def write(name, project, total):
+            (src_dir / name).write_text(json.dumps({
+                "project": project, "session": "s", "date": "2026-03-15", "model": "m",
+                "total_tokens": total,
+            }) + "\n")
+
+        def build_sql(source_expr):
+            return f"""
+                SELECT 'TestTool' AS tool, project, session, date, model,
+                    0 AS input_tokens, 0 AS output_tokens, 0 AS cache_write_tokens,
+                    0 AS cache_read_tokens, total_tokens::BIGINT AS total_tokens,
+                    'interactive' AS execution_type, project AS project_path,
+                    'exact' AS token_count_type, 1 AS turn_count,
+                    NULL::BIGINT AS retained_tokens, 'native' AS source_kind,
+                    NULL::DOUBLE AS cost_usd, replace(filename, '\\', '/') AS source_file,
+                    NULL::VARCHAR AS timestamp
+                FROM read_json({source_expr}, format='newline_delimited', filename=true)
+            """
+
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [("TestTool", src_dir, "*.jsonl")])
+        monkeypatch.setattr(main_mod, "SOURCES", {"test": ("TestTool", build_sql)})
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+        scan = main_mod.scan_source_files
+        deleted_after_scan: list[str] = []
+
+        def scan_then_delete():
+            result = scan()
+            for name in deleted_after_scan:
+                (src_dir / name).unlink()
+            return result
+
+        monkeypatch.setattr(main_mod, "scan_source_files", scan_then_delete)
+
+        def load():
+            db = duckdb.connect()
+            register_macros(db)
+            main_mod.load_tokens(db, refresh=False)
+            return db.sql("SELECT project, total_tokens FROM tokens ORDER BY project").fetchall()
+
+        write("a.jsonl", "alpha", 3)
+        write("b.jsonl", "beta", 9)
+        deleted_after_scan[:] = ["b.jsonl"]
+        assert load() == [("alpha", 3)]
+
+        # A new file and a changed cached one both vanish before an update reads them;
+        # the cached one keeps its rows.
+        deleted_after_scan.clear()
+        write("b.jsonl", "beta", 9)
+        assert load() == [("alpha", 3), ("beta", 9)]
+        write("b.jsonl", "beta", 10)
+        os.utime(src_dir / "b.jsonl", ns=(1, 1))
+        write("c.jsonl", "gamma", 5)
+        deleted_after_scan[:] = ["b.jsonl", "c.jsonl"]
+        assert load() == [("alpha", 3), ("beta", 9)]
+
     def test_agy_resume_replaces_cached_session_without_double_counting(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch

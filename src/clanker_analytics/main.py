@@ -1587,13 +1587,31 @@ def _source_batches(files: dict[str, SourceSnapshot]) -> list[dict[str, list[str
     return batches
 
 
+def _skipping_deleted(read, grouped: dict[str, list[str]]):
+    """Run read(grouped), and when DuckDB cannot open a file, run it again without the
+    files deleted since the scan. Benchmark harnesses remove whole AOP run directories
+    seconds after a turn ends, so a listed file can be gone by the time it is read."""
+    while True:
+        try:
+            return read(grouped)
+        except duckdb.IOException:
+            present = {tool: [path for path in paths if os.path.exists(path)]
+                       for tool, paths in grouped.items()}
+            if present == grouped:
+                raise
+            grouped = present
+
+
 def _insert_source_files(db: duckdb.DuckDBPyConnection,
                          files: dict[str, SourceSnapshot]) -> None:
-    for grouped in _source_batches(files):
+    def insert(grouped: dict[str, list[str]]) -> None:
         parts = _build_source_sql(db, grouped)
         if parts:
             db.execute("INSERT INTO tokens BY NAME "
                        + " UNION ALL BY NAME ".join(f"SELECT * FROM ({part})" for part in parts))
+
+    for grouped in _source_batches(files):
+        _skipping_deleted(insert, grouped)
 
 
 def _build_source_sql(db: duckdb.DuckDBPyConnection,
@@ -1642,16 +1660,19 @@ def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot]
 def _unmigrated_aop_results(db: duckdb.DuckDBPyConnection,
                             files: dict[str, SourceSnapshot]) -> set[str]:
     """AOP results that are not v3, whose cached usage is kept until AOP migrates them."""
-    unmigrated = set()
-    for grouped in _source_batches(files):
+    def read(grouped: dict[str, list[str]]) -> list[tuple[str]]:
         if not grouped.get(AOP_RESULT_TOOL):
-            continue
-        unmigrated.update(row[0] for row in db.execute(f"""
+            return []
+        return db.execute(f"""
             SELECT replace(filename, '\\', '/')
             FROM read_json_objects({_sql_file_list(grouped[AOP_RESULT_TOOL])}, format='auto',
                                    filename=true, ignore_errors=true)
             WHERE coalesce(json_extract_string(json, '$.usage_schema'), '') != '{AOP_USAGE_SCHEMA}'
-        """).fetchall())
+        """).fetchall()
+
+    unmigrated = set()
+    for grouped in _source_batches(files):
+        unmigrated.update(row[0] for row in _skipping_deleted(read, grouped))
     if unmigrated:
         print(f"  warning: {len(unmigrated)} AOP results are not {AOP_USAGE_SCHEMA}; their cached "
               "usage is kept. Run aop migrate-results.", file=sys.stderr)
@@ -1875,7 +1896,9 @@ def _read_changed_files(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSn
     """
     logs = {path: snapshot for path, snapshot in files.items()
             if snapshot.tool in APPEND_ONLY_TOOLS}
-    others = {path: snapshot for path, snapshot in files.items() if path not in logs}
+    # A file deleted since the scan keeps its cached rows rather than losing them unread.
+    others = {path: snapshot for path, snapshot in files.items()
+              if path not in logs and os.path.exists(path)}
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=CACHE_DIR, prefix="new-lines-") as copies:
         staged: dict[str, SourceSnapshot] = {}
