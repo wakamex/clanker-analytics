@@ -82,9 +82,10 @@ CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
 CACHE_SCHEMA_VERSION = 29
 
 AGY_METADATA_TOOL = "Agy metadata"
-# AOP appends every state directory that records a run here, one absolute .aop path per line.
-AOP_STATE_ROOTS = (Path(os.environ.get("XDG_STATE_HOME", Path(HOME) / ".local" / "state"))
-                   / "aop" / "state-roots")
+# AOP 0.3.0 and later copies every result it writes here as <run_id>.json, so a run's
+# usage outlives the project directory that holds its .aop.
+AOP_RESULTS = (Path(os.environ.get("XDG_STATE_HOME", Path(HOME) / ".local" / "state"))
+               / "aop" / "results")
 AOP_RESULT_TOOL = "AOP result"
 ZCODE_TOOL = "Zcode"
 ZCODE_USAGE_TABLE = "zcode_model_usage"
@@ -97,7 +98,7 @@ SOURCE_TREES = [
      "*/.system_generated/logs/transcript_full.jsonl"),
     (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
      "conversation_metadata.json"),
-    (AOP_RESULT_TOOL, AOP_STATE_ROOTS, ""),
+    (AOP_RESULT_TOOL, AOP_RESULTS, ""),
     (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
 ]
 
@@ -853,8 +854,9 @@ stored AS (
             as reasoning_output,
         try_cast(json_extract_string(
             result_json, '$.calculated_cost.amount_usd') as DOUBLE) as cost_usd,
-        regexp_extract(replace(filename, '\\', '/'),
-                       '^(.*)/[.]aop/runs/', 1) as owner_path
+        -- The project is the directory that owns the run's .aop.
+        regexp_extract(json_extract_string(result_json, '$.state_root'),
+                       '^(.*)/[.]aop/?$', 1) as owner_path
     FROM raw
 ),
 normalized AS (
@@ -864,6 +866,8 @@ normalized AS (
     WHERE CASE
         WHEN usage_schema != '{AOP_USAGE_SCHEMA}' OR usage_schema IS NULL
              THEN error('unsupported AOP token usage schema; run aop migrate-results')
+        WHEN owner_path IS NULL OR owner_path = ''
+             THEN error('AOP result without state_root; run aop migrate-results')
         WHEN accounting_status IN ('complete', 'partial') AND has_usage THEN true
         WHEN accounting_status IN ('complete', 'partial', 'unavailable') THEN false
         ELSE error('unsupported AOP accounting status')
@@ -1423,32 +1427,26 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
     return trees
 
 
-def _aop_results(state_roots: Path) -> tuple[dict[str, os.stat_result], int]:
-    """The result of every run in AOP's listed state directories, with its file status,
-    and how many state directories were read. One stat call per run keeps the scan of
-    tens of thousands of results fast."""
-    try:
-        roots = {line.strip() for line in state_roots.read_text().splitlines() if line.strip()}
-    except OSError:
-        return {}, 0
+def _aop_results(archive: Path) -> dict[str, os.stat_result]:
+    """The current result of every run in AOP's archive, with its file status. The
+    archive's top level holds one record per run; replaced originals sit in a
+    subdirectory and are not read."""
     results: dict[str, os.stat_result] = {}
-    read = 0
-    for root in sorted(roots):
-        try:
-            runs = os.scandir(Path(root) / "runs")
-        except OSError:
-            continue
-        read += 1
-        with runs:
-            for run in runs:
-                path = f"{run.path}/result.json"
-                try:
-                    status = os.stat(path)
-                except OSError:
-                    continue
-                if stat.S_ISREG(status.st_mode):
-                    results[Path(path).as_posix()] = status
-    return results, read
+    try:
+        entries = os.scandir(archive)
+    except OSError:
+        return results
+    with entries:
+        for entry in entries:
+            if not entry.name.endswith(".json"):
+                continue
+            try:
+                status = entry.stat()
+            except OSError:
+                continue
+            if stat.S_ISREG(status.st_mode):
+                results[Path(entry.path).as_posix()] = status
+    return results
 
 
 def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
@@ -1458,8 +1456,8 @@ def scan_source_files() -> tuple[dict[str, SourceSnapshot], int, float]:
     for tool, root, pattern in _iter_source_trees():
         try:
             if tool == AOP_RESULT_TOOL:
-                results, roots_read = _aop_results(root)
-                dir_count += roots_read
+                results = _aop_results(root)
+                dir_count += 1
                 for path, status in results.items():
                     files[path] = SourceSnapshot(
                         tool=tool, mtime_ns=status.st_mtime_ns, size=status.st_size)
@@ -1659,7 +1657,8 @@ def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot]
 
 def _unmigrated_aop_results(db: duckdb.DuckDBPyConnection,
                             files: dict[str, SourceSnapshot]) -> set[str]:
-    """AOP results that are not v3, whose cached usage is kept until AOP migrates them."""
+    """AOP results that are not v3 or name no state_root, whose cached usage is kept until
+    AOP migrates them."""
     def read(grouped: dict[str, list[str]]) -> list[tuple[str]]:
         if not grouped.get(AOP_RESULT_TOOL):
             return []
@@ -1668,14 +1667,15 @@ def _unmigrated_aop_results(db: duckdb.DuckDBPyConnection,
             FROM read_json_objects({_sql_file_list(grouped[AOP_RESULT_TOOL])}, format='auto',
                                    filename=true, ignore_errors=true)
             WHERE coalesce(json_extract_string(json, '$.usage_schema'), '') != '{AOP_USAGE_SCHEMA}'
+               OR json_extract_string(json, '$.state_root') IS NULL
         """).fetchall()
 
     unmigrated = set()
     for grouped in _source_batches(files):
         unmigrated.update(row[0] for row in _skipping_deleted(read, grouped))
     if unmigrated:
-        print(f"  warning: {len(unmigrated)} AOP results are not {AOP_USAGE_SCHEMA}; their cached "
-              "usage is kept. Run aop migrate-results.", file=sys.stderr)
+        print(f"  warning: {len(unmigrated)} AOP results are not {AOP_USAGE_SCHEMA} with a "
+              "state_root; their cached usage is kept. Run aop migrate-results.", file=sys.stderr)
     return unmigrated
 
 
@@ -1730,26 +1730,43 @@ def _carry_over_vanished_rows(db: duckdb.DuckDBPyConnection, files: dict[str, So
         db.execute("DROP TABLE scanned_sources")
 
 
+AOP_RUN_ID_PATTERNS = (r"/[.]aop/runs/([^/]+)/result[.]json$", r"/aop/results/([^/]+)[.]json$")
+
+
+def _aop_run_id(path: str) -> str:
+    """The run ID in the path of an AOP result, or '' for any other file."""
+    for pattern in AOP_RUN_ID_PATTERNS:
+        if match := re.search(pattern, path):
+            return match.group(1)
+    return ""
+
+
+def _aop_run_id_sql(column: str) -> str:
+    return "coalesce(" + ", ".join(
+        f"nullif(regexp_extract({column}, '{pattern}', 1), '')"
+        for pattern in AOP_RUN_ID_PATTERNS) + ")"
+
+
 def _drop_other_copies_of_aop_runs(db: duckdb.DuckDBPyConnection, read: list[str],
                                    timer: DebugTimer) -> None:
     """Count each AOP run once when its results were copied under another path.
 
-    A run is identified by its run directory name. Rows read just now from `read` replace
-    the rows of the same runs from any other path, such as kept rows of a path that
-    discovery no longer lists.
+    A run is identified by its run ID, which names both its archived result and its run
+    directory under .aop/runs. Rows read just now from `read` replace the rows of the same
+    runs from any other path, such as kept rows of a run directory read before AOP
+    archived its results.
     """
-    read = [path for path in read if "/.aop/runs/" in path]
+    read = [path for path in read if _aop_run_id(path)]
     if not read:
         return
-    run = "regexp_extract(source_file, '/[.]aop/runs/([^/]+)/result[.]json$', 1)"
+    run = _aop_run_id_sql("source_file")
     with timer.span("drop other copies of AOP runs"):
         _path_table(db, "read_results", read)
         db.execute(f"""
             DELETE FROM tokens
             WHERE source_kind = 'aop'
               AND source_file NOT IN (SELECT path FROM read_results)
-              AND {run} IN (SELECT regexp_extract(path, '/[.]aop/runs/([^/]+)/result[.]json$', 1)
-                            FROM read_results)
+              AND {run} IN (SELECT {_aop_run_id_sql("path")} FROM read_results)
         """)
         # Copies read together keep the first path.
         db.execute(f"""

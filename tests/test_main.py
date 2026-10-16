@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -80,7 +81,11 @@ def _write_aop_result(
     cost_usd: float | None = 0.25,
     usage_schema: str = "aop-token-usage-v3",
     accounting_status: str = "complete",
+    state_root: Path | None = None,
 ) -> None:
+    """Write a result, by default in the run directory layout, whose .aop is its state root."""
+    if state_root is None:
+        state_root = path.parents[2]
     counts = (
         input_tokens,
         cached_input_tokens,
@@ -126,6 +131,7 @@ def _write_aop_result(
             "reasoning_output_tokens": reasoning_output_tokens,
         },
         "calculated_cost": calculated_cost,
+        "state_root": state_root.as_posix(),
     }
     result["accounting_status"] = accounting_status
     path.write_text(json.dumps(result))
@@ -619,26 +625,71 @@ class TestSourceLoaders(Case):
 
 
 class TestAOPSourceLoader(Case):
-    def test_discovers_the_results_of_listed_state_roots(self):
+    def test_discovers_the_current_results_in_the_archive(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
-        first = tmp_path / "one" / ".aop" / "runs" / "a" / "result.json"
-        second = tmp_path / "memory" / ".aop" / "runs" / "b" / "result.json"
-        unlisted = tmp_path / "other" / ".aop" / "runs" / "c" / "result.json"
-        for path in (first, second, unlisted):
-            _write_aop_result(path)
-        (first.parent / "result.pre-v3.json").write_text("{}")
-        roots = tmp_path / "state-roots"
-        # AOP may list a root more than once, and a listed root may be gone.
-        roots.write_text("\n".join([str(tmp_path / "one" / ".aop"), str(tmp_path / "memory" / ".aop"),
-                                    str(tmp_path / "one" / ".aop"), str(tmp_path / "gone" / ".aop")]) + "\n")
-        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, roots, "")])
+        archive = tmp_path / "results"
+        first = archive / "a.json"
+        second = archive / "b.json"
+        for path in (first, second):
+            _write_aop_result(path, run_id=path.stem, state_root=tmp_path / "one" / ".aop")
+        # Originals that a migration replaced, and the run directories, are not read.
+        _write_aop_result(archive / "originals" / "a.pre-v3.json", run_id="a",
+                          state_root=tmp_path / "one" / ".aop")
+        _write_aop_result(tmp_path / "one" / ".aop" / "runs" / "a" / "result.json", run_id="a")
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, archive, "")])
         monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
 
         files, dir_count, _ = main_mod.scan_source_files()
 
         assert set(files) == {first.as_posix(), second.as_posix()}
-        assert dir_count == 2
+        assert dir_count == 1
+
+    def test_takes_the_project_from_the_state_root(self):
+        archive = self.tmp_path / "results" / "run-1.json"
+        _write_aop_result(archive, state_root=Path("/code/Sycophant/.aop"))
+
+        relation = duckdb.sql(main_mod._aop_sql(main_mod._sql_literal(archive.as_posix())))
+        row = dict(zip([item[0] for item in relation.description], relation.fetchone()))
+
+        assert row["project"] == "sycophant"
+        assert row["project_path"] == "/code/Sycophant/.aop/worktrees/task-1"
+
+    def test_archived_copy_replaces_cached_rows_of_its_deleted_run_directory(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
+        state_root = tmp_path / "bench" / ".aop"
+        run_dir = state_root / "runs" / "run-1" / "result.json"
+        archive = tmp_path / "aop" / "results"
+        _write_aop_result(run_dir)
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
+        monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
+        monkeypatch.setattr(main_mod, "SOURCES", {"aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql)})
+        monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        def load(tree, refresh=False):
+            monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, tree, "")])
+            db = duckdb.connect()
+            register_macros(db)
+            main_mod.load_tokens(db, refresh=refresh)
+            return db.sql("SELECT count(*), sum(total_tokens), min(project) FROM tokens").fetchone()
+
+        # A cache that read the run directory, as before the archive existed.
+        def scan_run_directory(_root):
+            return {run_dir.as_posix(): run_dir.stat()}
+
+        scan_archive = main_mod._aop_results
+        monkeypatch.setattr(main_mod, "_aop_results", scan_run_directory)
+        assert load(archive) == (1, 110, "bench")
+        monkeypatch.setattr(main_mod, "_aop_results", scan_archive)
+
+        shutil.rmtree(tmp_path / "bench")
+        _write_aop_result(archive / "run-1.json", state_root=state_root)
+        _write_aop_result(archive / "run-2.json", run_id="run-2", state_root=state_root)
+        assert load(archive) == (2, 220, "bench")
+        assert load(archive, refresh=True) == (2, 220, "bench")
 
     def test_uses_provider_independent_token_semantics(self):
         tmp_path = self.tmp_path
@@ -2259,21 +2310,20 @@ class TestDebugHooks(Case):
     def test_aop_run_copied_under_two_roots_counts_once(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
-        copies = [tmp_path / root / ".aop" / "runs" / "run-1" / "result.json"
-                  for root in ("code-memory", "claude-memory")]
+        archives = [tmp_path / root / "aop" / "results" for root in ("code-memory", "claude-memory")]
+        copies = [archive / "run-1.json" for archive in archives]
         for path in copies:
-            _write_aop_result(path)
-        roots = tmp_path / "state-roots"
+            _write_aop_result(path, state_root=tmp_path / "project" / ".aop")
         cache_dir = tmp_path / "cache"
         monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
         monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
         monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
-        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, roots, "")])
         monkeypatch.setattr(main_mod, "SOURCES", {"aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql)})
         monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
 
         def load(listed, refresh=False):
-            roots.write_text("".join(str(path.parents[2]) + "\n" for path in listed))
+            monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+                (main_mod.AOP_RESULT_TOOL, path.parent, "") for path in listed])
             db = duckdb.connect()
             register_macros(db)
             main_mod.load_tokens(db, refresh=refresh)
@@ -2290,21 +2340,20 @@ class TestDebugHooks(Case):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
         project = tmp_path / "project"
-        roots = tmp_path / "state-roots"
-        roots.write_text(str(project / ".aop") + "\n")
+        archive = tmp_path / "results"
         cache_dir = tmp_path / "cache"
         monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
         monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
         monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
-        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, roots, "")])
+        monkeypatch.setattr(main_mod, "SOURCE_TREES", [(main_mod.AOP_RESULT_TOOL, archive, "")])
         monkeypatch.setattr(main_mod, "SOURCES", {"aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql)})
         monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
         monkeypatch.setattr(main_mod, "AOP_BATCH", 2)
 
         def load(runs, refresh=False):
             for run in range(runs):
-                _write_aop_result(project / ".aop" / "runs" / f"run-{run}" / "result.json",
-                                  run_id=f"run-{run}", session_id=f"session-{run}")
+                _write_aop_result(archive / f"run-{run}.json", run_id=f"run-{run}",
+                                  session_id=f"session-{run}", state_root=project / ".aop")
             db = duckdb.connect()
             register_macros(db)
             main_mod.load_tokens(db, refresh=refresh)
@@ -2336,17 +2385,16 @@ class TestDebugHooks(Case):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
         project = tmp_path / "project"
-        first = project / ".aop" / "runs" / "one" / "result.json"
-        _write_aop_result(first, run_id="run-1", session_id="resumed")
-        roots = tmp_path / "state-roots"
-        roots.write_text(str(project / ".aop") + "\n")
+        archive = tmp_path / "results"
+        first = archive / "run-1.json"
+        _write_aop_result(first, run_id="run-1", session_id="resumed", state_root=project / ".aop")
 
         cache_dir = tmp_path / "cache"
         monkeypatch.setattr(main_mod, "CACHE_DIR", cache_dir)
         monkeypatch.setattr(main_mod, "CACHE_FILE", cache_dir / "tokens.parquet")
         monkeypatch.setattr(main_mod, "CACHE_META_FILE", cache_dir / "tokens-meta.json")
         monkeypatch.setattr(main_mod, "SOURCE_TREES", [
-            (main_mod.AOP_RESULT_TOOL, roots, ""),
+            (main_mod.AOP_RESULT_TOOL, archive, ""),
         ])
         monkeypatch.setattr(main_mod, "SOURCES", {
             "aop": (main_mod.AOP_RESULT_TOOL, main_mod._aop_sql),
@@ -2358,9 +2406,10 @@ class TestDebugHooks(Case):
         main_mod.load_tokens(db, refresh=False)
         assert db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (1, 110)
 
-        second = project / ".aop" / "runs" / "two" / "result.json"
+        second = archive / "run-2.json"
         _write_aop_result(
             second,
+            state_root=project / ".aop",
             run_id="run-2",
             session_id="resumed",
             input_tokens=200,
