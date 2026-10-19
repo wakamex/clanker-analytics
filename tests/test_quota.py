@@ -191,7 +191,7 @@ class TestQuota(Case):
         assert (session.provider, session.account_key, session.plan) == ("zai", "3f2a9c1e5b7d4a60", "lite")
         assert (session.bucket_id, session.window_seconds, session.resets_at) == ("5h", 18000, None)
         assert (week.bucket_id, week.window_seconds, week.used_pct) == ("1w", 604800, 20)
-        assert week.resets_at == "2026-09-11T03:38:39.995000Z"
+        assert week.resets_at == "2026-09-11T03:38:40Z"
         assert week.effective_at == "2026-09-05T17:00:00Z"
         assert (week.scope_type, week.window_kind) == ("account", "fixed")
 
@@ -321,6 +321,55 @@ class TestQuota(Case):
         assert [tuple(row) for row in rows] == [
             ("1w", "weekly", 2), ("5h", "5-hour", 1),
             ("GPT-5.3-Codex-Spark:5h", "GPT-5.3-Codex-Spark 5-hour", 1)]
+
+    def test_claude_history_moves_to_usage_v1_names_and_account(self):
+        path = self.tmp_path / "quota.sqlite3"
+        old = normalize_anthropic({
+            "plan": "max_20x", "updated_at": "2026-10-18T12:00:00Z", "account_key": "org-one",
+            "5h": {"pct": 10, "resets_at": "2026-10-18T14:00:00Z"},
+            "7d": {"pct": 40, "resets_at": "2026-10-23T14:00:00Z"},
+            "7d_fable": {"pct": 1, "resets_at": "2026-10-23T14:00:00Z"},
+        }, datetime(2026, 10, 18, 12, tzinfo=timezone.utc))
+        with connect(path) as db:
+            insert_samples(db, old)
+            # As ccusage before 0.4.0 stored them.
+            db.execute("""UPDATE quota_samples SET bucket_id = CASE bucket_id
+                WHEN '5h' THEN 'session' WHEN '1w' THEN '7d' ELSE '7d_fable' END,
+                scope_id = CASE WHEN scope_id = 'Fable' THEN 'fable' ELSE scope_id END""")
+            db.execute("INSERT INTO quota_accounts VALUES ('anthropic', 'org-one', 'one@example.com')")
+            db.execute("PRAGMA user_version = 3")
+        # Printed by ccusage 0.4.0 on this host, with the account replaced.
+        document = {
+            "schema": "usage-v1", "provider": "claude", "account": "e7390f1f00000000",
+            "plan": "max_20x", "status": "live", "error": None,
+            "retrieved_at": "2026-10-19T04:08:01+00:00", "balance": None, "details": {},
+            "windows": [
+                {"name": "5-hour", "seconds": 18000, "scope": None, "used_pct": 22,
+                 "resets_at": "2026-10-19T04:59:59.946776+00:00"},
+                {"name": "weekly", "seconds": 604800, "scope": None, "used_pct": 42,
+                 "resets_at": "2026-10-23T13:59:59.946796+00:00"},
+                {"name": "weekly", "seconds": 604800, "scope": "Fable", "used_pct": 0,
+                 "resets_at": "2026-10-23T14:00:00+00:00"},
+            ],
+        }
+        self.monkeypatch.setattr(quota.subprocess, "run", lambda *args, **kwargs:
+                                 subprocess.CompletedProcess(args, 0, json.dumps(document), ""))
+        self.monkeypatch.setattr(quota, "claude_login", lambda: ("org-one", "one@example.com"))
+
+        quota.record_quota(path, ["anthropic"])
+
+        with connect(path) as db:
+            series = db.execute("""
+                SELECT account_key, bucket_id, scope_id, count(*), max(resets_at)
+                FROM quota_samples GROUP BY 1, 2, 3 ORDER BY 2
+            """).fetchall()
+            labels = db.execute("SELECT * FROM quota_accounts").fetchall()
+        assert [tuple(row) for row in series] == [
+            ("e7390f1f00000000", "1w", "", 2, "2026-10-23T14:00:00Z"),
+            ("e7390f1f00000000", "5h", "", 2, "2026-10-19T05:00:00Z"),
+            ("e7390f1f00000000", "Fable:1w", "Fable", 2, "2026-10-23T14:00:00Z"),
+        ]
+        assert [tuple(row) for row in labels] == [("anthropic", "e7390f1f00000000", "one@example.com")]
 
     def test_unnamed_history_stays_unnamed_when_a_provider_has_two_accounts(self):
         path = self.tmp_path / "quota.sqlite3"
@@ -779,9 +828,9 @@ class TestQuota(Case):
         recorded = periods[("Zcode", "5h", "2026-09-27T20:24:52Z")]
         assert recorded["full_quota_api_equivalent_cost_estimate_usd"] == 0.0
         assert recorded["change_from_previous_estimate_pct"] == -100
-        week = periods[("Claude Code", "7d", "2026-09-29T13:00:00Z")]
+        week = periods[("Claude Code", "1w", "2026-09-29T13:00:00Z")]
         assert week["full_quota_api_equivalent_cost_estimate_usd"] == 100
-        fable = periods[("Claude Code", "7d_fable", "2026-09-29T13:00:00Z")]
+        fable = periods[("Claude Code", "Fable:1w", "2026-09-29T13:00:00Z")]
         assert fable["full_quota_api_equivalent_cost_estimate_usd"] == 50
         assert [item["model"] for item in fable["model_mix"]] == ["claude-fable-5-1"]
 
@@ -818,7 +867,7 @@ class TestQuota(Case):
             ).fetchone())
 
         assert relabeled == ("org-two",)
-        weeks = {item["account"]: item for item in report["periods"] if item["limit_id"].endswith("7d")}
+        weeks = {item["account"]: item for item in report["periods"] if item["limit_id"].split(":")[-1] == "1w"}
         assert set(weeks) == {"default", "org-two"}
         # Each login's week counts only its own usage, split at the first login's last snapshot.
         assert weeks["default"]["api_equivalent_cost_usd"] == 30

@@ -160,6 +160,18 @@ def _make_sample(
     )
 
 
+def _claude_window(bucket_id: str) -> tuple[str, int | None, str]:
+    """The length and model scope of a window ccusage before 0.4.0 named session, 7d or
+    7d_<model>."""
+    if bucket_id == "session":
+        return bucket_id, 5 * 3600, ""
+    if bucket_id == "7d":
+        return bucket_id, 7 * 86400, ""
+    if bucket_id.startswith("7d_"):
+        return bucket_id, 7 * 86400, bucket_id[3:].replace("_", " ").title()
+    return bucket_id, None, ""
+
+
 def normalize_anthropic(data: dict[str, Any], collected_at: datetime) -> list[QuotaSample]:
     effective_at = _time_text(data.get("updated_at"), collected_at)
     account_key = str(data.get("account_key") or "default")
@@ -175,20 +187,17 @@ def normalize_anthropic(data: dict[str, Any], collected_at: datetime) -> list[Qu
     for bucket_id, value in data.items():
         if not isinstance(value, dict) or "pct" not in value:
             continue
-        canonical_id = "session" if bucket_id == "5h" else bucket_id
-        if canonical_id == "session":
-            window_seconds = 5 * 3600
-        elif canonical_id.startswith("7d"):
-            window_seconds = 7 * 86400
-        else:
-            window_seconds = None
+        # Named as ccusage 0.4.0 names the same windows.
+        canonical_id, window_seconds, scope = _claude_window("session" if bucket_id == "5h"
+                                                             else bucket_id)
+        canonical_id, label = window_bucket(scope or None, window_seconds, canonical_id)
         samples.append(_make_sample(
             provider="anthropic",
             account_key=account_key,
             bucket_id=canonical_id,
-            bucket_label=canonical_id.replace("_", " "),
-            scope_type="account" if canonical_id in {"session", "7d"} else "model",
-            scope_id="" if canonical_id in {"session", "7d"} else canonical_id.removeprefix("7d_"),
+            bucket_label=label,
+            scope_type="model" if scope else "account",
+            scope_id=scope,
             window_kind=window_kind,
             window_seconds=window_seconds,
             effective_at=effective_at,
@@ -368,7 +377,8 @@ def normalize_usage_v1(provider: str, data: dict[str, Any],
             effective_at=effective_at,
             collected_at=_time_text(collected_at),
             used_pct=window["used_pct"],
-            resets_at=window.get("resets_at"),
+            # Claude reports one reset a few milliseconds apart from reading to reading.
+            resets_at=_rounded_time(window.get("resets_at"), 1),
             source=str(data.get("status") or "unknown"),
             plan=normalize_plan(plan) if plan else None,
         ))
@@ -512,7 +522,21 @@ def connect(path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
                 WHERE provider = 'openai' AND bucket_id = ? AND scope_id = ?
                   AND window_seconds = ?
             """, (bucket_id, label, old, scope, seconds))
-    connection.execute("PRAGMA user_version = 3")
+    if connection.execute("PRAGMA user_version").fetchone()[0] < 4:
+        # Claude's usage-v1 windows are 5h, 1w and <model>:1w, where earlier snapshots
+        # were session, 7d and 7d_<model>.
+        for (old,) in connection.execute("""
+            SELECT DISTINCT bucket_id FROM quota_samples WHERE provider = 'anthropic'
+        """).fetchall():
+            _, seconds, scope = _claude_window(old)
+            if seconds:
+                bucket_id, label = window_bucket(scope or None, seconds, old)
+                connection.execute("""
+                    UPDATE quota_samples
+                    SET bucket_id = ?, bucket_label = ?, scope_type = ?, scope_id = ?
+                    WHERE provider = 'anthropic' AND bucket_id = ?
+                """, (bucket_id, label, "model" if scope else "account", scope, old))
+    connection.execute("PRAGMA user_version = 4")
     return connection
 
 
@@ -545,10 +569,23 @@ def record_quota(path: Path = DEFAULT_DB_PATH, providers: Iterable[str] | None =
     with connect(path) as connection:
         inserted = insert_samples(connection, samples)
         adopt_unnamed_history(connection, samples)
-        account, email = claude_login()
-        if "anthropic" in selected and account and email:
-            connection.execute("INSERT OR REPLACE INTO quota_accounts VALUES ('anthropic', ?, ?)",
-                               (account, email))
+        organization, email = claude_login()
+        accounts = {sample.account_key for sample in samples if sample.provider == "anthropic"}
+        if "anthropic" in selected and len(accounts) == 1:
+            account = accounts.pop()
+            # Snapshots before ccusage 0.4.0 were stored under the login's organization;
+            # it now names the account itself, so the same login's history moves to it.
+            if organization and organization != account:
+                connection.execute("""
+                    UPDATE quota_samples SET account_key = ?
+                    WHERE provider = 'anthropic' AND account_key = ?
+                """, (account, organization))
+                connection.execute("""
+                    DELETE FROM quota_accounts WHERE provider = 'anthropic' AND account_key = ?
+                """, (organization,))
+            if email:
+                connection.execute("INSERT OR REPLACE INTO quota_accounts VALUES ('anthropic', ?, ?)",
+                                   (account, email))
     return inserted, errors
 
 
@@ -1054,7 +1091,7 @@ def assign_claude_accounts(connection: sqlite3.Connection) -> int:
     labeled: dict[int, str] = {}
     for account, resets_at in connection.execute("""
         SELECT account_key, resets_at FROM quota_samples
-        WHERE provider = 'anthropic' AND bucket_id = '7d' AND account_key != 'default'
+        WHERE provider = 'anthropic' AND bucket_id = '1w' AND account_key != 'default'
     """).fetchall():
         anchor = _weekly_anchor(resets_at)
         if anchor is not None:
@@ -1064,7 +1101,7 @@ def assign_claude_accounts(connection: sqlite3.Connection) -> int:
     changed = 0
     for effective_at, resets_at in connection.execute("""
         SELECT DISTINCT effective_at, resets_at FROM quota_samples
-        WHERE provider = 'anthropic' AND bucket_id = '7d' AND account_key = 'default'
+        WHERE provider = 'anthropic' AND bucket_id = '1w' AND account_key = 'default'
     """).fetchall():
         account = labeled.get(_weekly_anchor(resets_at))
         if account:
@@ -1496,12 +1533,12 @@ def _pace_bucket_label(bucket: dict[str, Any]) -> str:
             return f"{scope} ({frequency})"
         return window_label
     if provider == "anthropic":
-        if bucket["bucket_id"] == "session":
+        if bucket["bucket_id"] == "5h":
             return "Session"
-        if bucket["bucket_id"] == "7d":
+        if bucket["bucket_id"] == "1w":
             return "Week (all models)"
-        if bucket["bucket_id"].startswith("7d_"):
-            return f"Week ({bucket['bucket_id'][3:].replace('_', ' ').title()})"
+        if seconds == 7 * 86400 and scope:
+            return f"Week ({scope})"
     if provider == "zai":
         return {"5h": "Session (5h)", "1w": "Week"}.get(
             bucket["bucket_id"], bucket["bucket_label"]
