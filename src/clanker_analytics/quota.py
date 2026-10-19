@@ -258,14 +258,19 @@ def normalize_antigravity(data: dict[str, Any], collected_at: datetime) -> list[
                 "5h": 5 * 3600,
                 "weekly": 7 * 86400,
             }.get(window)
-            bucket_id = str(value.get("bucket_id") or f"{group_name}:{window}")
+            # Named as agy-usage 0.4.0 names the same windows.
+            renamed = {old: (f"{scope}:{length}", f"{scope} {name}", scope)
+                       for old, scope, length, name in ANTIGRAVITY_RENAMES}
+            bucket_id, bucket_label, scope = renamed.get(
+                str(value.get("bucket_id")),
+                (f"{group_name}:{window}", f"{group_name} {window}".strip(), group_name))
             samples.append(_make_sample(
                 provider="antigravity",
                 account_key=account_key,
                 bucket_id=bucket_id,
-                bucket_label=f"{group_name} {window}".strip(),
-                scope_type="model_group",
-                scope_id=group_name,
+                bucket_label=bucket_label,
+                scope_type="model",
+                scope_id=scope,
                 window_kind="fixed",
                 window_seconds=window_seconds,
                 effective_at=effective_at,
@@ -423,6 +428,14 @@ def collect_provider(provider: str, timeout: int = 30) -> list[QuotaSample]:
     return NORMALIZERS[provider](data, collected_at)
 
 
+ANTIGRAVITY_RENAMES = (
+    ("gemini-5h", "Gemini", "5h", "5-hour"),
+    ("gemini-weekly", "Gemini", "1w", "weekly"),
+    ("3p-5h", "Claude and GPT", "5h", "5-hour"),
+    ("3p-weekly", "Claude and GPT", "1w", "weekly"),
+)
+
+
 def connect(path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     path = Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,7 +477,16 @@ def connect(path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
             PRIMARY KEY (provider, account_key)
         )
     """)
-    connection.execute("PRAGMA user_version = 1")
+    if connection.execute("PRAGMA user_version").fetchone()[0] < 2:
+        # Antigravity's usage-v1 windows are named by scope and length; earlier
+        # snapshots take the same names so each window's history stays one series.
+        for old, scope, length, name in ANTIGRAVITY_RENAMES:
+            connection.execute("""
+                UPDATE quota_samples
+                SET bucket_id = ?, bucket_label = ?, scope_type = 'model', scope_id = ?
+                WHERE provider = 'antigravity' AND bucket_id = ?
+            """, (f"{scope}:{length}", f"{scope} {name}", scope, old))
+    connection.execute("PRAGMA user_version = 2")
     return connection
 
 
@@ -496,11 +518,37 @@ def record_quota(path: Path = DEFAULT_DB_PATH, providers: Iterable[str] | None =
             errors.append(str(error))
     with connect(path) as connection:
         inserted = insert_samples(connection, samples)
+        adopt_unnamed_history(connection, samples)
         account, email = claude_login()
         if "anthropic" in selected and account and email:
             connection.execute("INSERT OR REPLACE INTO quota_accounts VALUES ('anthropic', ?, ?)",
                                (account, email))
     return inserted, errors
+
+
+def adopt_unnamed_history(connection: sqlite3.Connection, samples: Iterable[QuotaSample]) -> int:
+    """Give a provider's snapshots recorded without an account to the account it now names.
+
+    Usage packages that did not report an account were stored as "default". When a
+    provider names one account and has never recorded another, its earlier snapshots are
+    that account's, so its windows continue as one series. Returns the snapshots relabeled.
+    """
+    named: dict[str, set[str]] = {}
+    for sample in samples:
+        named.setdefault(sample.provider, set()).add(sample.account_key)
+    changed = 0
+    for provider, accounts in named.items():
+        if len(accounts) != 1 or "default" in accounts:
+            continue
+        stored = {row[0] for row in connection.execute(
+            "SELECT DISTINCT account_key FROM quota_samples WHERE provider = ?", (provider,))}
+        if stored == {"default", *accounts}:
+            changed += connection.execute("""
+                UPDATE quota_samples SET account_key = ?
+                WHERE provider = ? AND account_key = 'default'
+            """, (next(iter(accounts)), provider)).rowcount
+    connection.commit()
+    return changed
 
 
 def _sample_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -623,10 +671,10 @@ def window_pace(connection: sqlite3.Connection, current: dict[str, Any]) -> dict
 def _model_patterns(bucket: dict[str, Any]) -> list[str]:
     if bucket["scope_type"] == "account" or not bucket["scope_id"]:
         return []
-    scope = bucket["scope_id"].lower()
-    if scope == "gemini models":
+    scope = bucket["scope_id"].lower().removesuffix(" models")
+    if scope == "gemini":
         return ["%gemini%"]
-    if scope == "claude and gpt models":
+    if scope == "claude and gpt":
         return ["%claude%", "%gpt%"]
     normalized = re.sub(r"[^a-z0-9]+", "-", scope).strip("-")
     return [f"%{normalized}%"]

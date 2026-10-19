@@ -242,6 +242,74 @@ class TestQuota(Case):
 
         assert [sample.window_kind for sample in samples] == ["fixed", "fixed"]
         assert [sample.window_seconds for sample in samples] == [18000, 604800]
+        # The same windows as agy-usage 0.4.0's usage-v1 document names them.
+        assert [(sample.bucket_id, sample.scope_type, sample.scope_id) for sample in samples] == [
+            ("Gemini:5h", "model", "Gemini"), ("Gemini:1w", "model", "Gemini")]
+
+    def test_antigravity_history_continues_under_usage_v1_names_and_account(self):
+        path = self.tmp_path / "quota.sqlite3"
+        old = [QuotaSample(
+            provider="antigravity", account_key="default", bucket_id=bucket_id,
+            bucket_label=label, scope_type="model_group", scope_id=scope,
+            window_kind="fixed", window_seconds=seconds, effective_at="2026-10-18T12:00:00Z",
+            collected_at="2026-10-18T12:00:00Z", used_pct=10, resets_at="2026-10-24T15:41:29Z",
+            source="api", source_sample_id=bucket_id)
+            for bucket_id, label, scope, seconds in [
+                ("gemini-5h", "Gemini Models 5h", "Gemini Models", 18000),
+                ("gemini-weekly", "Gemini Models weekly", "Gemini Models", 604800),
+                ("3p-5h", "Claude and GPT models 5h", "Claude and GPT models", 18000),
+                ("3p-weekly", "Claude and GPT models weekly", "Claude and GPT models", 604800)]]
+        with connect(path) as db:
+            insert_samples(db, old)
+            # As stored before the rename.
+            db.execute("PRAGMA user_version = 1")
+        # Printed by agy-usage 0.4.0 on this host, with the account replaced.
+        document = {
+            "schema": "usage-v1", "provider": "agy", "account": "f90eba0000000000",
+            "plan": "Google AI Ultra", "status": "live", "error": None,
+            "retrieved_at": "2026-10-19T03:54:42+00:00", "balance": None, "details": {},
+            "windows": [
+                {"name": "weekly", "seconds": 604800, "scope": "Gemini",
+                 "used_pct": 14.583313, "resets_at": "2026-10-24T15:41:29+00:00"},
+                {"name": "5-hour", "seconds": 18000, "scope": "Gemini",
+                 "used_pct": 2.176905, "resets_at": "2026-10-19T05:11:17+00:00"},
+                {"name": "weekly", "seconds": 604800, "scope": "Claude and GPT",
+                 "used_pct": 0, "resets_at": "2026-10-26T03:54:42+00:00"},
+                {"name": "5-hour", "seconds": 18000, "scope": "Claude and GPT",
+                 "used_pct": 0, "resets_at": "2026-10-19T08:54:42+00:00"},
+            ],
+        }
+        self.monkeypatch.setattr(quota.subprocess, "run", lambda *args, **kwargs:
+                                 subprocess.CompletedProcess(args, 0, json.dumps(document), ""))
+
+        quota.record_quota(path, ["antigravity"])
+
+        with connect(path) as db:
+            series = db.execute("""
+                SELECT account_key, bucket_id, bucket_label, scope_type, scope_id, count(*)
+                FROM quota_samples GROUP BY 1, 2, 3, 4, 5 ORDER BY 2
+            """).fetchall()
+        assert [tuple(row) for row in series] == [
+            ("f90eba0000000000", "Claude and GPT:1w", "Claude and GPT weekly", "model", "Claude and GPT", 2),
+            ("f90eba0000000000", "Claude and GPT:5h", "Claude and GPT 5-hour", "model", "Claude and GPT", 2),
+            ("f90eba0000000000", "Gemini:1w", "Gemini weekly", "model", "Gemini", 2),
+            ("f90eba0000000000", "Gemini:5h", "Gemini 5-hour", "model", "Gemini", 2),
+        ]
+
+    def test_unnamed_history_stays_unnamed_when_a_provider_has_two_accounts(self):
+        path = self.tmp_path / "quota.sqlite3"
+        def sample(account, effective_at):
+            return QuotaSample(
+                provider="zai", account_key=account, bucket_id="1w", bucket_label="1w",
+                scope_type="account", scope_id="", window_kind="fixed", window_seconds=604800,
+                effective_at=effective_at, collected_at=effective_at, used_pct=1,
+                resets_at=None, source="api", source_sample_id=account + effective_at)
+        with connect(path) as db:
+            insert_samples(db, [sample("default", "2026-09-01T00:00:00Z"),
+                                sample("first", "2026-09-02T00:00:00Z")])
+            new = [sample("second", "2026-09-03T00:00:00Z")]
+            insert_samples(db, new)
+            assert quota.adopt_unnamed_history(db, new) == 0
 
     def test_fixed_window_lookback_does_not_cross_reset(self):
         tmp_path = self.tmp_path
