@@ -1533,6 +1533,17 @@ class TestPlanDetection(Case):
             plans = detect_plans()
         assert plans["Zcode"] == ("lite", 18)
 
+    def test_usage_v1_plan(self):
+        document = {"schema": "usage-v1", "provider": "zcode", "plan": "lite", "status": "live",
+                    "windows": []}
+        for status, plan, expected in [("live", "lite", ("lite", 18)), ("cached", "lite", ("lite", 18)),
+                                       ("stale", "lite", None), ("live", None, None)]:
+            with self.subTest(status=status, plan=plan):
+                output = json.dumps({**document, "status": status, "plan": plan})
+                with mock.patch("subprocess.run") as m:
+                    m.return_value = mock.Mock(returncode=0, stdout=output)
+                    assert detect_plans().get("Zcode") == expected
+
     def test_stale_plan_reading_is_ignored(self):
         with mock.patch("subprocess.run") as m:
             m.return_value = mock.Mock(returncode=0, stdout='{"plan":"lite","stale":true}')

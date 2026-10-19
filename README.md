@@ -74,6 +74,8 @@ percentages and stores normalized snapshots in
 includes activity that local session logs may miss. Claude, Antigravity, and Zcode history starts when the
 recorder starts running.
 
+A usage package that prints a usage-v1 document, the shared format of [clanker-usage](https://github.com/wakamex/clanker-usage), is read through one normalizer: each window becomes a bucket named by its length, such as `5h` or `1w`, prefixed by its model scope when it has one, and the document's `plan` becomes the detected plan when the reading is live or cached. Zcode uses it from zcode-cli-usage 0.4.0; the other providers keep their own formats until their packages switch.
+
 Zcode quotas come from [zcode-cli-usage](https://github.com/wakamex/zcode-cli-usage), which needs `ZAI_API_KEY` configured. Its 5-hour and weekly credit buckets are recorded as `5h` and `1w`, using used credits divided by the credit limit because the API's percentage is rounded to whole numbers. When the API is unavailable, zcode-cli-usage returns its last cached reading, which keeps its original timestamp and so does not create a duplicate sample. Codex session logs also retain embedded historical quota observations.
 
 `pace` compares the observed percentage-point change with local token activity over each requested

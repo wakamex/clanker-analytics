@@ -24,7 +24,7 @@ from clanker_analytics.quota import (
     print_report,
 )
 
-from support import Case, approx
+from support import Case, approx, raises
 
 
 def _sample(effective_at: str, used_pct: float) -> QuotaSample:
@@ -165,6 +165,52 @@ class TestQuota(Case):
         assert week.resets_at == "2026-10-04T15:24:38.984000Z"
         assert week.effective_at == "2026-09-28T16:31:42.657428Z"
         assert week.window_kind == "fixed"
+
+    def test_usage_v1_document_gives_samples_for_each_window(self):
+        # Printed by clanker-usage 0.4.0 for its recorded Z.ai quota response.
+        document = {
+            "schema": "usage-v1", "provider": "zcode", "account": "3f2a9c1e5b7d4a60",
+            "plan": "lite", "status": "live", "error": None,
+            "retrieved_at": "2026-09-05T17:00:00+00:00",
+            "windows": [
+                {"name": "5-hour", "seconds": 18000, "scope": None, "used_pct": 1,
+                 "resets_at": None},
+                {"name": "weekly", "seconds": 604800, "scope": None, "used_pct": 20,
+                 "resets_at": "2026-09-11T03:38:39.995000+00:00"},
+            ],
+            "details": {"limits": [
+                {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "used": 1, "limit": 100,
+                 "remaining": 99},
+                {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "used": 2004,
+                 "limit": 10000, "remaining": 7996},
+            ]},
+        }
+        self.monkeypatch.setattr(quota.subprocess, "run", lambda *args, **kwargs:
+                                 subprocess.CompletedProcess(args, 0, json.dumps(document), ""))
+
+        session, week = quota.collect_provider("zai")
+
+        assert (session.provider, session.account_key, session.plan) == ("zai", "3f2a9c1e5b7d4a60", "lite")
+        assert (session.bucket_id, session.window_seconds, session.resets_at) == ("5h", 18000, None)
+        assert (week.bucket_id, week.window_seconds, week.used_pct) == ("1w", 604800, 20)
+        assert week.resets_at == "2026-09-11T03:38:39.995000Z"
+        assert week.effective_at == "2026-09-05T17:00:00Z"
+        assert (week.scope_type, week.window_kind) == ("account", "fixed")
+
+        scoped = {**document, "windows": [{"name": "weekly", "seconds": 604800,
+                                           "scope": "fable", "used_pct": 3, "resets_at": None}]}
+        [sample] = quota.normalize_usage_v1("anthropic", scoped, datetime.now(timezone.utc))
+        assert (sample.bucket_id, sample.scope_type, sample.scope_id) == ("fable:1w", "model", "fable")
+
+    def test_unavailable_usage_v1_document_is_an_error(self):
+        document = {"schema": "usage-v1", "provider": "zcode", "account": None, "plan": None,
+                    "status": "unavailable", "error": "no ZAI_API_KEY found",
+                    "retrieved_at": None, "windows": [], "details": {}}
+        self.monkeypatch.setattr(quota.subprocess, "run", lambda *args, **kwargs:
+                                 subprocess.CompletedProcess(args, 1, json.dumps(document), ""))
+
+        with raises(RuntimeError, match="no ZAI_API_KEY found"):
+            quota.collect_provider("zai")
 
     def test_antigravity_adapter_classifies_reset_windows_as_fixed(self):
         data = {

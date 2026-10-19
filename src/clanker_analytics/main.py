@@ -47,6 +47,12 @@ def detect_plans() -> dict[str, tuple[str, float]]:
             if result.returncode != 0:
                 return tool, None
             data = json.loads(result.stdout)
+            if data.get("schema") == "usage-v1":
+                # Only a fresh reading confirms the plan; null means no plan.
+                if data.get("status") not in ("live", "cached") or not data.get("plan"):
+                    return tool, None
+                plan = normalize_plan(data["plan"])
+                return tool, (plan, plan_price(tool, plan))
             # A cached reading cannot confirm that the subscription is still active.
             if data.get("stale"):
                 return tool, None

@@ -320,6 +320,43 @@ def normalize_zai(data: dict[str, Any], collected_at: datetime) -> list[QuotaSam
     return samples
 
 
+USAGE_SCHEMA = "usage-v1"
+
+
+def normalize_usage_v1(provider: str, data: dict[str, Any],
+                       collected_at: datetime) -> list[QuotaSample]:
+    """Samples from a usage-v1 document, the format every clanker-usage provider prints.
+
+    A window is named by its length, such as 5h or 1w, prefixed by the models it covers
+    when it covers only some, and by its name when it has no fixed length.
+    """
+    effective_at = _time_text(data.get("retrieved_at"), collected_at)
+    plan = data.get("plan")
+    samples = []
+    for window in data.get("windows") or []:
+        seconds = window.get("seconds")
+        scope = window.get("scope")
+        length = format_duration(seconds) if seconds else str(window["name"])
+        bucket_id = f"{scope}:{length}" if scope else length
+        samples.append(_make_sample(
+            provider=provider,
+            account_key=str(data.get("account") or "default"),
+            bucket_id=bucket_id,
+            bucket_label=f"{scope} {window['name']}" if scope else str(window["name"]),
+            scope_type="model" if scope else "account",
+            scope_id=scope or "",
+            window_kind="fixed" if seconds else "unknown",
+            window_seconds=seconds,
+            effective_at=effective_at,
+            collected_at=_time_text(collected_at),
+            used_pct=window["used_pct"],
+            resets_at=window.get("resets_at"),
+            source=str(data.get("status") or "unknown"),
+            plan=normalize_plan(plan) if plan else None,
+        ))
+    return samples
+
+
 NORMALIZERS = {
     "anthropic": normalize_anthropic,
     "openai": normalize_openai,
@@ -367,13 +404,20 @@ def collect_provider(provider: str, timeout: int = 30) -> list[QuotaSample]:
         raise RuntimeError(f"no quota collector found for {provider}")
     collected_at = datetime.now(timezone.utc)
     result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict) and data.get("schema") == USAGE_SCHEMA:
+        # A stale document still carries the last windows the provider returned.
+        if data.get("status") == "unavailable":
+            raise RuntimeError(f"{provider}: {data.get('error') or 'usage unavailable'}")
+        return normalize_usage_v1(provider, data, collected_at)
     if result.returncode != 0:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "collector failed"
         raise RuntimeError(f"{provider}: {detail}")
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"{provider}: collector returned invalid JSON") from error
+    if data is None:
+        raise RuntimeError(f"{provider}: collector returned invalid JSON")
     if provider == "anthropic" and not data.get("account_key"):
         data["account_key"] = claude_account_key()
     return NORMALIZERS[provider](data, collected_at)
