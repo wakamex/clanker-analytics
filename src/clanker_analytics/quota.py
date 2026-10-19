@@ -210,6 +210,10 @@ def normalize_openai(data: dict[str, Any], collected_at: datetime) -> list[Quota
     def add(bucket_id: str, label: str, value: Any, scope_type: str, scope_id: str) -> None:
         if not isinstance(value, dict) or "pct" not in value:
             return
+        seconds = int(value["window_secs"]) if value.get("window_secs") else None
+        if seconds:
+            # Named as codex-cli-usage 0.4.0 names the same windows.
+            bucket_id, label = window_bucket(scope_id or None, seconds, label)
         samples.append(_make_sample(
             provider="openai",
             account_key=account_key,
@@ -218,7 +222,7 @@ def normalize_openai(data: dict[str, Any], collected_at: datetime) -> list[Quota
             scope_type=scope_type,
             scope_id=scope_id,
             window_kind="fixed",
-            window_seconds=int(value["window_secs"]) if value.get("window_secs") else None,
+            window_seconds=seconds,
             effective_at=effective_at,
             collected_at=_time_text(collected_at),
             used_pct=value["pct"],
@@ -326,6 +330,16 @@ def normalize_zai(data: dict[str, Any], collected_at: datetime) -> list[QuotaSam
 
 
 USAGE_SCHEMA = "usage-v1"
+WINDOW_NAMES = {5 * 3600: "5-hour", 7 * 86400: "weekly"}
+
+
+def window_bucket(scope: str | None, seconds: int | None, name: str) -> tuple[str, str]:
+    """The bucket id and label of a quota window: its length, such as 5h or 1w, or its
+    name when it has no fixed length, prefixed by the models it covers when it covers
+    only some."""
+    length = format_duration(seconds) if seconds else name
+    name = WINDOW_NAMES.get(seconds, name) if seconds else name
+    return (f"{scope}:{length}", f"{scope} {name}") if scope else (length, name)
 
 
 def normalize_usage_v1(provider: str, data: dict[str, Any],
@@ -341,13 +355,12 @@ def normalize_usage_v1(provider: str, data: dict[str, Any],
     for window in data.get("windows") or []:
         seconds = window.get("seconds")
         scope = window.get("scope")
-        length = format_duration(seconds) if seconds else str(window["name"])
-        bucket_id = f"{scope}:{length}" if scope else length
+        bucket_id, bucket_label = window_bucket(scope, seconds, str(window["name"]))
         samples.append(_make_sample(
             provider=provider,
             account_key=str(data.get("account") or "default"),
             bucket_id=bucket_id,
-            bucket_label=f"{scope} {window['name']}" if scope else str(window["name"]),
+            bucket_label=bucket_label,
             scope_type="model" if scope else "account",
             scope_id=scope or "",
             window_kind="fixed" if seconds else "unknown",
@@ -486,7 +499,20 @@ def connect(path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
                 SET bucket_id = ?, bucket_label = ?, scope_type = 'model', scope_id = ?
                 WHERE provider = 'antigravity' AND bucket_id = ?
             """, (f"{scope}:{length}", f"{scope} {name}", scope, old))
-    connection.execute("PRAGMA user_version = 2")
+    if connection.execute("PRAGMA user_version").fetchone()[0] < 3:
+        # Codex's usage-v1 windows are named by length and scope, where the stored ids
+        # named their slot, such as primary, whose length depends on the plan.
+        for old, scope, seconds in connection.execute("""
+            SELECT DISTINCT bucket_id, scope_id, window_seconds FROM quota_samples
+            WHERE provider = 'openai' AND window_seconds IS NOT NULL
+        """).fetchall():
+            bucket_id, label = window_bucket(scope or None, seconds, old)
+            connection.execute("""
+                UPDATE quota_samples SET bucket_id = ?, bucket_label = ?
+                WHERE provider = 'openai' AND bucket_id = ? AND scope_id = ?
+                  AND window_seconds = ?
+            """, (bucket_id, label, old, scope, seconds))
+    connection.execute("PRAGMA user_version = 3")
     return connection
 
 

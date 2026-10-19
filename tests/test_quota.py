@@ -84,10 +84,8 @@ class TestQuota(Case):
 
         samples = normalize_openai(data, datetime(2026, 8, 20, 12, tzinfo=timezone.utc))
 
-        assert [sample.bucket_id for sample in samples] == [
-            "primary",
-            "additional:gpt-5-3-codex-spark:primary",
-        ]
+        # Named by length and scope, as codex-cli-usage 0.4.0 names the same windows.
+        assert [sample.bucket_id for sample in samples] == ["1w", "GPT-5.3-Codex-Spark:5h"]
         assert samples[0].window_seconds == 604800
         assert samples[0].window_kind == "fixed"
         assert samples[1].scope_id == "GPT-5.3-Codex-Spark"
@@ -295,6 +293,34 @@ class TestQuota(Case):
             ("f90eba0000000000", "Gemini:1w", "Gemini weekly", "model", "Gemini", 2),
             ("f90eba0000000000", "Gemini:5h", "Gemini 5-hour", "model", "Gemini", 2),
         ]
+
+    def test_codex_history_is_renamed_by_window_length_and_scope(self):
+        path = self.tmp_path / "quota.sqlite3"
+        def sample(bucket_id, scope, seconds, effective_at):
+            return QuotaSample(
+                provider="openai", account_key="default", bucket_id=bucket_id,
+                bucket_label=bucket_id, scope_type="model" if scope else "account",
+                scope_id=scope, window_kind="fixed", window_seconds=seconds,
+                effective_at=effective_at, collected_at=effective_at, used_pct=1,
+                resets_at=None, source="api", source_sample_id=bucket_id + effective_at)
+        with connect(path) as db:
+            insert_samples(db, [
+                # On one plan the weekly window was primary; on the next it is secondary.
+                sample("primary", "", 604800, "2026-10-01T00:00:00Z"),
+                sample("primary", "", 18000, "2026-10-17T00:00:00Z"),
+                sample("secondary", "", 604800, "2026-10-17T00:00:00Z"),
+                sample("additional:gpt-5-3-codex-spark:primary", "GPT-5.3-Codex-Spark", 18000,
+                       "2026-09-01T00:00:00Z"),
+            ])
+            db.execute("PRAGMA user_version = 2")
+        with connect(path) as db:
+            rows = db.execute("""
+                SELECT bucket_id, bucket_label, count(*) FROM quota_samples
+                GROUP BY 1, 2 ORDER BY 1
+            """).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("1w", "weekly", 2), ("5h", "5-hour", 1),
+            ("GPT-5.3-Codex-Spark:5h", "GPT-5.3-Codex-Spark 5-hour", 1)]
 
     def test_unnamed_history_stays_unnamed_when_a_provider_has_two_accounts(self):
         path = self.tmp_path / "quota.sqlite3"
