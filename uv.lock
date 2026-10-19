@@ -3,57 +3,31 @@ revision = 3
 requires-python = ">=3.13"
 
 [[package]]
-name = "agy-usage"
-version = "0.1.9"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/dc/38/08d05999a400c27fe18d44dbd1822e4af86c1f41f7a0b7c9925ada63439d/agy_usage-0.1.9.tar.gz", hash = "sha256:f879c50919fe4805252d941bf1708e0ad0bf9e62194cdaa1d636e1d777cce856", size = 11675, upload-time = "2026-08-15T04:17:35.125Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2d/26/0ec4fdd96610ab55541cbc8ea1983926be9c42a6d7e61b63785816629155/agy_usage-0.1.9-py3-none-any.whl", hash = "sha256:c34928a61dc9e29f2197b4dd967a2183925a8526d61bcdf3c6403e223e3078c0", size = 9283, upload-time = "2026-08-15T04:17:34.365Z" },
-]
-
-[[package]]
-name = "ccusage"
-version = "0.1.12"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9d/ee/ab8c30298f897005f0443bd3f65c71ca15257fd7af7cef7a02cfdb0cf685/ccusage-0.1.12.tar.gz", hash = "sha256:575017d95f1a3673109e8de8d8d0290232f6a4de529e7d7df47577d1844aa2f8", size = 14505, upload-time = "2026-08-15T04:18:41.095Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/2d/508f2ebc9cbeef24c2d6cd4fc17f9a6298276d313ebd3187d7daa50cdcf2/ccusage-0.1.12-py3-none-any.whl", hash = "sha256:b0b321e7f07e9959ccd873f5d4f61c358bd955ca89390f02bdebdbb3c98bafc3", size = 11882, upload-time = "2026-08-15T04:18:40.177Z" },
-]
-
-[[package]]
 name = "clanker-analytics"
 version = "0.5.0"
 source = { editable = "." }
 dependencies = [
-    { name = "agy-usage" },
-    { name = "ccusage" },
-    { name = "codex-cli-usage" },
+    { name = "clanker-usage" },
     { name = "duckdb" },
-    { name = "gemini-cli-usage" },
     { name = "matplotlib" },
     { name = "model-prices" },
-    { name = "zcode-cli-usage" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "agy-usage", specifier = ">=0.1.6" },
-    { name = "ccusage", specifier = ">=0.1.10" },
-    { name = "codex-cli-usage", specifier = ">=0.1.8" },
+    { name = "clanker-usage", specifier = ">=0.4.0" },
     { name = "duckdb", specifier = ">=1.5.0" },
-    { name = "gemini-cli-usage", specifier = ">=0.1.5" },
     { name = "matplotlib", specifier = ">=3.9" },
     { name = "model-prices", specifier = ">=0.0.3" },
-    { name = "zcode-cli-usage", specifier = ">=0.1.0" },
 ]
 
 [[package]]
-name = "codex-cli-usage"
-version = "0.1.10"
+name = "clanker-usage"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7f/3e/f0f925ee47c7249c66cb210439fe0e40e75c9259d6eb19b972312b697f6c/codex_cli_usage-0.1.10.tar.gz", hash = "sha256:2183f345cee8bccba3a864332420d78c0c9a8e2f9b7667041d4b40029c4a6885", size = 13593, upload-time = "2026-08-15T04:19:45.351Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4c/f1/8cb33c965fdd363a5a42b51e7cdcb25af3d80097c1d11108f546bef65d51/clanker_usage-0.4.0.tar.gz", hash = "sha256:504818463b99834c1a5859518ba6741aa98b26f142bdebbb3bbe79a210ce1426", size = 45793, upload-time = "2026-10-19T15:20:54.063Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/0b/18595a502e20d5cf34ee302d47201a110d5468c893a6a9ce0a22af4d780d/codex_cli_usage-0.1.10-py3-none-any.whl", hash = "sha256:c8749c1ed8d8a7f54b9892df0df0d361648093045d1a4f8b1fa8e4fa9dd55ffa", size = 9833, upload-time = "2026-08-15T04:19:44.628Z" },
+    { url = "https://files.pythonhosted.org/packages/94/46/07090d63a32cbcb168544983f9b79953535c225aa6d7c5320bf87c0e57d8/clanker_usage-0.4.0-py3-none-any.whl", hash = "sha256:a9654c9256e7160e7a26df199c174a52d04c27c5844946086a5e511ca66ff7a3", size = 53626, upload-time = "2026-10-19T15:20:52.945Z" },
 ]
 
 [[package]]
@@ -173,15 +147,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/90/aa/dfbbe24c6a6afc5c203d90cc0343e24bcbb09e76d67c4d6eef8c2558d7ba/fonttools-4.62.1-cp314-cp314t-win32.whl", hash = "sha256:b820fcb92d4655513d8402d5b219f94481c4443d825b4372c75a2072aa4b357a", size = 2348021, upload-time = "2026-03-13T13:54:16.98Z" },
     { url = "https://files.pythonhosted.org/packages/13/6f/ae9c4e4dd417948407b680855c2c7790efb52add6009aaecff1e3bc50e8e/fonttools-4.62.1-cp314-cp314t-win_amd64.whl", hash = "sha256:59b372b4f0e113d3746b88985f1c796e7bf830dd54b28374cd85c2b8acd7583e", size = 2414147, upload-time = "2026-03-13T13:54:19.416Z" },
     { url = "https://files.pythonhosted.org/packages/fd/ba/56147c165442cc5ba7e82ecf301c9a68353cede498185869e6e02b4c264f/fonttools-4.62.1-py3-none-any.whl", hash = "sha256:7487782e2113861f4ddcc07c3436450659e3caa5e470b27dc2177cade2d8e7fd", size = 1152647, upload-time = "2026-03-13T13:54:22.735Z" },
-]
-
-[[package]]
-name = "gemini-cli-usage"
-version = "0.1.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/66/c7/065bd35405c1584a4b1a4efe9ff78bb8e96489fb219ddcae98038c19d0b3/gemini_cli_usage-0.1.5.tar.gz", hash = "sha256:cbdddf6f8134f8582993f57df3bde270de98f50e721ad5f3032703a72e2281af", size = 9961, upload-time = "2026-03-17T05:20:33.276Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/10/9f/8b3540317734bb31832cf536b25022649480c76771adf2c027dbdb75269e/gemini_cli_usage-0.1.5-py3-none-any.whl", hash = "sha256:a7c4500b0e78999f0e9c3ca65548c07411dceb9b0c9e9eb5fe3e3fbb73cb69d7", size = 9101, upload-time = "2026-03-17T05:20:32.335Z" },
 ]
 
 [[package]]
@@ -452,13 +417,4 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
-]
-
-[[package]]
-name = "zcode-cli-usage"
-version = "0.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9f/53/5d3dc48350ad12c149a73f1376888e91aa60c497cdff2749f49e25037ff2/zcode_cli_usage-0.1.0.tar.gz", hash = "sha256:cd7cae543b2beee115962b50483d187ca210d53909a16db260ee4a2e7ec9b23c", size = 6849, upload-time = "2026-09-06T03:05:06.921Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/8d/35f5d641f59e780b25225379c6c9ccf699b95f55ca73338a1b40ec9b71ec/zcode_cli_usage-0.1.0-py3-none-any.whl", hash = "sha256:f5b45e6a0c301a0c56c3fd9fafdf9841214f81bf3abb4d4d5563fde31bac0bbe", size = 6062, upload-time = "2026-09-06T03:05:06.009Z" },
 ]

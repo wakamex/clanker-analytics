@@ -30,38 +30,23 @@ from clanker_analytics.pricing import (
 HOME = os.path.expanduser("~").replace("\\", "/")
 
 def detect_plans() -> dict[str, tuple[str, float]]:
-    """Detect subscription plans by shelling out to usage tools. Returns {tool: (plan_name, monthly_cost)}."""
+    """Detect subscription plans from clanker-usage. Returns {tool: (plan_name, monthly_cost)}."""
     import subprocess
+    from clanker_analytics.quota import usage_document
     plans = {}
 
-    cmds = {
-        "Claude Code": [sys.executable, "-m", "ccusage", "json"],
-        "Codex": [sys.executable, "-m", "codex_cli_usage", "json"],
-        "Gemini": [sys.executable, "-m", "gemini_cli_usage", "json"],
-        ZCODE_TOOL: [sys.executable, "-m", "zcode_cli_usage", "json"],
-    }
+    cmds = {"Claude Code": "claude", "Codex": "codex", "Gemini": "gemini", ZCODE_TOOL: "zcode"}
 
-    def fetch_plan(tool: str, cmd: list[str]) -> tuple[str, tuple[str, int] | None]:
+    def fetch_plan(tool: str, provider: str) -> tuple[str, tuple[str, float] | None]:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode != 0:
-                return tool, None
-            data = json.loads(result.stdout)
-            if data.get("schema") == "usage-v1":
-                # Only a fresh reading confirms the plan; null means no plan.
-                if data.get("status") not in ("live", "cached") or not data.get("plan"):
-                    return tool, None
-                plan = normalize_plan(data["plan"])
-                return tool, (plan, plan_price(tool, plan))
-            # A cached reading cannot confirm that the subscription is still active.
-            if data.get("stale"):
-                return tool, None
-            plan = normalize_plan(data.get("plan")
-                                  or data.get("account_quota", {}).get("user_tier")
-                                  or "unknown")
-            return tool, (plan, plan_price(tool, plan))
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
+            data = usage_document(provider, timeout=10)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError):
             return tool, None
+        # Only a fresh reading confirms the plan; null means no plan.
+        if data.get("status") not in ("live", "cached") or not data.get("plan"):
+            return tool, None
+        plan = normalize_plan(data["plan"])
+        return tool, (plan, plan_price(tool, plan))
 
     with ThreadPoolExecutor(max_workers=len(cmds)) as executor:
         futures = [executor.submit(fetch_plan, tool, cmd) for tool, cmd in cmds.items()]
@@ -2083,12 +2068,12 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
     timer = timing or DebugTimer(False)
 
     if args.command == "record-quota":
-        from clanker_analytics.quota import NORMALIZERS, record_quota
+        from clanker_analytics.quota import QUOTA_PROVIDERS, record_quota
         inserted, errors = record_quota(Path(args.quota_db))
         print(f"Recorded {inserted} new quota samples in {Path(args.quota_db).expanduser()}")
         for error in errors:
             print(f"  warning: {error}", file=sys.stderr)
-        return 1 if len(errors) == len(NORMALIZERS) else 0
+        return 1 if len(errors) == len(QUOTA_PROVIDERS) else 0
 
     db = duckdb.connect()
     with timer.span("register macros"):

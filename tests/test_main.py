@@ -1478,106 +1478,61 @@ class TestQueries(Case):
 # ===========================================================================
 
 class TestPlanDetection(Case):
-    def test_claude_max_20x(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"max_20x"}')
-            plans = detect_plans()
-        assert plans["Claude Code"] == ("max_20x", 200)
+    @staticmethod
+    def _run(documents, returncode=0):
+        """Answer `python -m clanker_usage PROVIDER json` with documents[PROVIDER]."""
+        def run(cmd, **kwargs):
+            provider = cmd[3]
+            document = {"schema": "usage-v1", "provider": provider, "account": "a",
+                        "status": "live", "error": None, "windows": [], "details": {},
+                        **documents.get(provider, {"plan": None, "status": "unavailable"})}
+            return subprocess.CompletedProcess(cmd, returncode, json.dumps(document), "")
+        return mock.patch("subprocess.run", side_effect=run)
 
-    def test_claude_pro(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"pro"}')
-            plans = detect_plans()
-        assert plans["Claude Code"] == ("pro", 20)
+    def test_plans_are_priced_by_tool(self):
+        for provider, plan, tool, expected in [
+            ("claude", "max_20x", "Claude Code", ("max_20x", 200)),
+            ("claude", "pro", "Claude Code", ("pro", 20)),
+            ("claude", "max_5x", "Claude Code", ("max_5x", 100)),
+            ("claude", "default_claude_max_5x", "Claude Code", ("max_5x", 100)),
+            ("codex", "pro", "Codex", ("pro", 200)),
+            ("codex", "plus", "Codex", ("plus", 20)),
+            ("gemini", "g1-pro-tier", "Gemini", ("pro", 19.99)),
+            # Google AI Ultra has two tiers that the plan name cannot tell apart.
+            ("gemini", "g1-ultra-tier", "Gemini", ("ultra", 0)),
+            ("zcode", "lite", "Zcode", ("lite", 18)),
+        ]:
+            with self.subTest(provider=provider, plan=plan):
+                with self._run({provider: {"plan": plan}}):
+                    assert detect_plans()[tool] == expected
 
-    def test_claude_max_5x(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"max_5x"}')
-            plans = detect_plans()
-        assert plans["Claude Code"] == ("max_5x", 100)
-
-    def test_codex_pro_is_200(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"pro"}')
-            plans = detect_plans()
-        assert plans["Codex"] == ("pro", 200)
-
-    def test_codex_plus(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"plus"}')
-            plans = detect_plans()
-        assert plans["Codex"] == ("plus", 20)
-
-    def test_gemini_pro_tier_normalized(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"account_quota":{"user_tier":"g1-pro-tier"}}')
-            plans = detect_plans()
-        assert plans["Gemini"] == ("pro", 19.99)
-
-    def test_gemini_ultra_tier_normalized(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"account_quota":{"user_tier":"g1-ultra-tier"}}')
-            plans = detect_plans()
-        # Google AI Ultra has two tiers that the plan name cannot tell apart.
-        assert plans["Gemini"] == ("ultra", 0)
-
-    def test_default_claude_prefix_stripped(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"default_claude_max_5x"}')
-            plans = detect_plans()
-        assert plans["Claude Code"] == ("max_5x", 100)
-
-    def test_zcode_lite(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"lite"}')
-            plans = detect_plans()
-        assert plans["Zcode"] == ("lite", 18)
-
-    def test_usage_v1_plan(self):
-        document = {"schema": "usage-v1", "provider": "zcode", "plan": "lite", "status": "live",
-                    "windows": []}
+    def test_only_a_fresh_reading_names_a_plan(self):
         for status, plan, expected in [("live", "lite", ("lite", 18)), ("cached", "lite", ("lite", 18)),
                                        ("stale", "lite", None), ("live", None, None)]:
             with self.subTest(status=status, plan=plan):
-                output = json.dumps({**document, "status": status, "plan": plan})
-                with mock.patch("subprocess.run") as m:
-                    m.return_value = mock.Mock(returncode=0, stdout=output)
+                with self._run({"zcode": {"plan": plan, "status": status}}):
                     assert detect_plans().get("Zcode") == expected
 
-    def test_stale_plan_reading_is_ignored(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout='{"plan":"lite","stale":true}')
+    def test_unavailable_usage_names_no_plan(self):
+        with self._run({}, returncode=1):
             assert detect_plans() == {}
 
-    def test_tool_not_installed(self):
+    def test_clanker_usage_not_installed(self):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
-            assert detect_plans() == {}
-
-    def test_tool_returns_error(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=1, stdout="")
             assert detect_plans() == {}
 
     def test_tool_timeout(self):
         with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("x", 10)):
             assert detect_plans() == {}
 
-    def test_invalid_json(self):
-        with mock.patch("subprocess.run") as m:
-            m.return_value = mock.Mock(returncode=0, stdout="not json")
+    def test_output_without_a_usage_document(self):
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 1, "not json", "No module named clanker_usage")):
             assert detect_plans() == {}
 
     def test_subscription_cost_sum(self):
-        outputs = {
-            "ccusage": '{"plan":"max_20x"}',
-            "codex_cli_usage": '{"plan":"pro"}',
-            "gemini_cli_usage": '{"account_quota":{"user_tier":"g1-pro-tier"}}',
-        }
-        def fake_run(cmd_list, **kw):
-            # cmd_list is [sys.executable, "-m", "module_name", "json"]
-            module = cmd_list[2] if len(cmd_list) > 2 else ""
-            return mock.Mock(returncode=0, stdout=outputs.get(module, "{}"))
-        with mock.patch("subprocess.run", side_effect=fake_run):
+        with self._run({"claude": {"plan": "max_20x"}, "codex": {"plan": "pro"},
+                        "gemini": {"plan": "g1-pro-tier"}}):
             plans = detect_plans()
         assert sum(c for _, c in plans.values()) == approx(419.99)
 

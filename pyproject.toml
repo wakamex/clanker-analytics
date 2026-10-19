@@ -9,11 +9,7 @@ requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.5.0",
     "matplotlib>=3.9",
-    "ccusage>=0.1.10",
-    "codex-cli-usage>=0.1.8",
-    "gemini-cli-usage>=0.1.5",
-    "agy-usage>=0.1.6",
-    "zcode-cli-usage>=0.1.0",
+    "clanker-usage>=0.4.0",
     "model-prices>=0.0.3",
 ]
 

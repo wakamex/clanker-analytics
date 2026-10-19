@@ -16,10 +16,7 @@ from clanker_analytics.quota import (
     build_value_report,
     connect,
     insert_samples,
-    normalize_antigravity,
-    normalize_anthropic,
-    normalize_openai,
-    normalize_zai,
+    normalize_usage_v1,
     parse_duration,
     print_report,
 )
@@ -46,11 +43,22 @@ def _sample(effective_at: str, used_pct: float) -> QuotaSample:
     )
 
 
+def _usage_samples(provider, when, windows, account=None, plan=None):
+    """Samples from a usage-v1 document with these (name, seconds, scope, used_pct,
+    resets_at) windows."""
+    document = {
+        "schema": "usage-v1", "provider": provider, "account": account, "plan": plan,
+        "status": "live", "error": None, "retrieved_at": when, "details": {},
+        "windows": [{"name": name, "seconds": seconds, "scope": scope, "used_pct": used,
+                     "resets_at": resets_at}
+                    for name, seconds, scope, used, resets_at in windows],
+    }
+    return normalize_usage_v1(provider, document, datetime.fromisoformat(when.replace("Z", "+00:00")))
+
+
 def _claude_snapshot(when, used, resets_at, account=None):
-    data = {"plan": "max_20x", "updated_at": when, "7d": {"pct": used, "resets_at": resets_at}}
-    if account:
-        data["account_key"] = account
-    return normalize_anthropic(data, datetime.fromisoformat(when.replace("Z", "+00:00")))
+    return _usage_samples("anthropic", when, [("weekly", 604800, None, used, resets_at)],
+                          account, "max_20x")
 
 
 def _history_period(tool, resets_at, used_pct, cost, tokens, pricing_flags,
@@ -70,99 +78,12 @@ class TestQuota(Case):
         assert parse_duration("7h") == 25200
         assert parse_duration("2w") == 1209600
 
-    def test_openai_adapter_avoids_legacy_alias_duplicates(self):
-        data = {
-            "updated_at": "2026-08-20T12:00:00Z",
-            "source": "api",
-            "primary": {"pct": 12, "window_secs": 604800, "resets_at": 1787335200},
-            "7d": {"pct": 12, "window_secs": 604800, "resets_at": 1787335200},
-            "additional": [{
-                "name": "GPT-5.3-Codex-Spark",
-                "primary": {"pct": 3, "window_secs": 18000, "resets_at": 1787335200},
-            }],
-        }
-
-        samples = normalize_openai(data, datetime(2026, 8, 20, 12, tzinfo=timezone.utc))
-
-        # Named by length and scope, as codex-cli-usage 0.4.0 names the same windows.
-        assert [sample.bucket_id for sample in samples] == ["1w", "GPT-5.3-Codex-Spark:5h"]
-        assert samples[0].window_seconds == 604800
-        assert samples[0].window_kind == "fixed"
-        assert samples[1].scope_id == "GPT-5.3-Codex-Spark"
-
-    def test_anthropic_adapter_classifies_windows_by_plan(self):
-        for plan, expected in [
-            ("ai", "fixed"),
-            ("pro", "fixed"),
-            ("max_20x", "fixed"),
-            ("enterprise", "rolling"),
-            ("enterprise_premium", "rolling"),
-            ("unknown", "unknown"),
-        ]:
-            with self.subTest(plan=plan, expected=expected):
-                data = {
-                    "plan": plan,
-                    "updated_at": "2026-08-20T12:00:00Z",
-                    "7d": {
-                        "pct": 20,
-                        "resets_at": "2026-08-25T13:00:00.436637Z",
-                    },
-                }
-
-                samples = normalize_anthropic(
-                    data, datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
-                )
-
-                assert samples[0].window_kind == expected
-                assert samples[0].resets_at == "2026-08-25T13:00:00Z"
-
-    def test_claude_snapshots_record_the_logged_in_organization(self):
-        tmp_path = self.tmp_path
-        monkeypatch = self.monkeypatch
-        config = tmp_path / "claude"
-        config.mkdir()
-        (config / ".claude.json").write_text(json.dumps(
-            {"oauthAccount": {"organizationUuid": "org-second", "emailAddress": "x@example.com"}}))
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
-        output = json.dumps({"plan": "max_20x", "updated_at": "2026-10-03T01:14:00Z",
-                             "7d": {"pct": 1, "resets_at": "2026-10-09T14:00:00Z"}})
-        monkeypatch.setattr(quota.subprocess, "run",
-                            lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, output, ""))
-
-        samples = quota.collect_provider("anthropic")
-
-        assert {sample.account_key for sample in samples} == {"org-second"}
-
-    def test_claude_snapshots_without_an_account_file_keep_the_default(self):
+    def test_claude_login_without_an_account_file_is_unknown(self):
         tmp_path = self.tmp_path
         monkeypatch = self.monkeypatch
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
 
-        assert quota.claude_account_key() is None
-
-    def test_zai_adapter_maps_credit_windows_and_keeps_fractional_usage(self):
-        data = {
-            "plan": "lite",
-            "source": "api",
-            "updated_at": "2026-09-28T16:31:42.657428+00:00",
-            "limits": [
-                {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "used": 0, "limit": 2000,
-                 "remaining": 2000, "pct": 0, "resets_at": None},
-                {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "used": 2004, "limit": 10000,
-                 "remaining": 7995, "pct": 20,
-                 "resets_at": "2026-10-04T15:24:38.984000+00:00"},
-            ],
-            "stale": True,
-        }
-
-        session, week = normalize_zai(data, datetime(2026, 9, 30, tzinfo=timezone.utc))
-
-        assert (session.bucket_id, session.window_seconds, session.resets_at) == ("5h", 18000, None)
-        assert (week.bucket_id, week.window_seconds) == ("1w", 604800)
-        assert week.used_pct == approx(20.04)
-        assert week.resets_at == "2026-10-04T15:24:38.984000Z"
-        assert week.effective_at == "2026-09-28T16:31:42.657428Z"
-        assert week.window_kind == "fixed"
+        assert quota.claude_login() == (None, None)
 
     def test_usage_v1_document_gives_samples_for_each_window(self):
         # Printed by clanker-usage 0.4.0 for its recorded Z.ai quota response.
@@ -209,40 +130,6 @@ class TestQuota(Case):
 
         with raises(RuntimeError, match="no ZAI_API_KEY found"):
             quota.collect_provider("zai")
-
-    def test_antigravity_adapter_classifies_reset_windows_as_fixed(self):
-        data = {
-            "updated_at": "2026-08-20T12:00:00Z",
-            "quota_summary": {
-                "groups": [{
-                    "display_name": "Gemini Models",
-                    "buckets": [
-                        {
-                            "bucket_id": "gemini-5h",
-                            "window": "5h",
-                            "remaining_pct": 75,
-                            "reset_time": "2026-08-20T17:00:00Z",
-                        },
-                        {
-                            "bucket_id": "gemini-weekly",
-                            "window": "weekly",
-                            "remaining_pct": 80,
-                            "reset_time": "2026-08-24T20:00:00Z",
-                        },
-                    ],
-                }],
-            },
-        }
-
-        samples = normalize_antigravity(
-            data, datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
-        )
-
-        assert [sample.window_kind for sample in samples] == ["fixed", "fixed"]
-        assert [sample.window_seconds for sample in samples] == [18000, 604800]
-        # The same windows as agy-usage 0.4.0's usage-v1 document names them.
-        assert [(sample.bucket_id, sample.scope_type, sample.scope_id) for sample in samples] == [
-            ("Gemini:5h", "model", "Gemini"), ("Gemini:1w", "model", "Gemini")]
 
     def test_antigravity_history_continues_under_usage_v1_names_and_account(self):
         path = self.tmp_path / "quota.sqlite3"
@@ -324,12 +211,11 @@ class TestQuota(Case):
 
     def test_claude_history_moves_to_usage_v1_names_and_account(self):
         path = self.tmp_path / "quota.sqlite3"
-        old = normalize_anthropic({
-            "plan": "max_20x", "updated_at": "2026-10-18T12:00:00Z", "account_key": "org-one",
-            "5h": {"pct": 10, "resets_at": "2026-10-18T14:00:00Z"},
-            "7d": {"pct": 40, "resets_at": "2026-10-23T14:00:00Z"},
-            "7d_fable": {"pct": 1, "resets_at": "2026-10-23T14:00:00Z"},
-        }, datetime(2026, 10, 18, 12, tzinfo=timezone.utc))
+        old = _usage_samples("anthropic", "2026-10-18T12:00:00Z", [
+            ("5-hour", 18000, None, 10, "2026-10-18T14:00:00Z"),
+            ("weekly", 604800, None, 40, "2026-10-23T14:00:00Z"),
+            ("weekly", 604800, "Fable", 1, "2026-10-23T14:00:00Z"),
+        ], "org-one", "max_20x")
         with connect(path) as db:
             insert_samples(db, old)
             # As ccusage before 0.4.0 stored them.
@@ -501,15 +387,23 @@ class TestQuota(Case):
             {"oauthAccount": {"organizationUuid": "org-second",
                               "emailAddress": "second@example.com"}}))
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-        output = json.dumps({"plan": "max_20x", "updated_at": "2026-10-03T01:14:00Z",
-                             "7d": {"pct": 1, "resets_at": "2026-10-09T14:00:00Z"}})
-        monkeypatch.setattr(quota.subprocess, "run",
-                            lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, output, ""))
+        output = json.dumps({
+            "schema": "usage-v1", "provider": "claude", "account": "account-second",
+            "plan": "max_20x", "status": "live", "error": None,
+            "retrieved_at": "2026-10-03T01:14:00Z", "details": {},
+            "windows": [{"name": "weekly", "seconds": 604800, "scope": None, "used_pct": 1,
+                         "resets_at": "2026-10-09T14:00:00Z"}]})
+        commands = []
+        def run(cmd, **kwargs):
+            commands.append(cmd[1:])
+            return subprocess.CompletedProcess(cmd, 0, output, "")
+        monkeypatch.setattr(quota.subprocess, "run", run)
 
         quota.record_quota(tmp_path / "quota.sqlite3", ["anthropic"])
 
+        assert commands == [["-m", "clanker_usage", "claude", "json"]]
         with connect(tmp_path / "quota.sqlite3") as quota_db:
-            assert quota.account_labels(quota_db) == {("anthropic", "org-second"): "second"}
+            assert quota.account_labels(quota_db) == {("anthropic", "account-second"): "second"}
 
     def test_snapshot_insert_is_idempotent(self):
         tmp_path = self.tmp_path
@@ -801,18 +695,12 @@ class TestQuota(Case):
         )
         with connect(tmp_path / "quota.sqlite3") as connection:
             insert_samples(connection, [
-                *normalize_zai({
-                    "updated_at": "2026-09-27T15:30:00Z",
-                    "limits": [{"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "used": 1000,
-                                "limit": 2000, "pct": 50,
-                                "resets_at": "2026-09-27T20:24:52Z"}],
-                }, datetime(2026, 9, 27, 15, 30, tzinfo=timezone.utc)),
-                *normalize_anthropic({
-                    "plan": "max_20x",
-                    "updated_at": "2026-09-26T00:00:00Z",
-                    "7d": {"pct": 50, "resets_at": "2026-09-29T13:00:00Z"},
-                    "7d_fable": {"pct": 20, "resets_at": "2026-09-29T13:00:00Z"},
-                }, datetime(2026, 9, 26, tzinfo=timezone.utc)),
+                *_usage_samples("zai", "2026-09-27T15:30:00Z", [
+                    ("5-hour", 18000, None, 50, "2026-09-27T20:24:52Z")]),
+                *_usage_samples("anthropic", "2026-09-26T00:00:00Z", [
+                    ("weekly", 604800, None, 50, "2026-09-29T13:00:00Z"),
+                    ("weekly", 604800, "Fable", 20, "2026-09-29T13:00:00Z"),
+                ], plan="max_20x"),
             ])
             db.execute("ALTER TABLE tokens ADD COLUMN pricing VARCHAR DEFAULT 'model-prices'")
             report = build_quota_history(db, "cost_usd", "test-rate-card", connection)

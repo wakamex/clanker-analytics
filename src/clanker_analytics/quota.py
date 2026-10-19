@@ -35,11 +35,9 @@ PROVIDER_SHORT_NAMES = {
     "zai": "zcode",
 }
 
-# Z.ai quota units observed from the coding plan API: 3 is hours and 6 is weeks.
 # Snapshots are recorded every five minutes; a longer gap than this between two of an
 # account's snapshots means it was logged out, or nothing was recording.
 LOGGED_IN_GAP_SECONDS = 900
-ZAI_UNIT_SECONDS = {3: 3600, 6: 7 * 86400}
 
 
 @dataclass(frozen=True)
@@ -172,172 +170,6 @@ def _claude_window(bucket_id: str) -> tuple[str, int | None, str]:
     return bucket_id, None, ""
 
 
-def normalize_anthropic(data: dict[str, Any], collected_at: datetime) -> list[QuotaSample]:
-    effective_at = _time_text(data.get("updated_at"), collected_at)
-    account_key = str(data.get("account_key") or "default")
-    source = str(data.get("source") or "unknown")
-    plan = str(data.get("plan") or "unknown").lower()
-    if "enterprise" in plan:
-        window_kind = "rolling"
-    elif plan in {"ai", "free", "pro", "max", "max_5x", "max_20x"}:
-        window_kind = "fixed"
-    else:
-        window_kind = "unknown"
-    samples = []
-    for bucket_id, value in data.items():
-        if not isinstance(value, dict) or "pct" not in value:
-            continue
-        # Named as ccusage 0.4.0 names the same windows.
-        canonical_id, window_seconds, scope = _claude_window("session" if bucket_id == "5h"
-                                                             else bucket_id)
-        canonical_id, label = window_bucket(scope or None, window_seconds, canonical_id)
-        samples.append(_make_sample(
-            provider="anthropic",
-            account_key=account_key,
-            bucket_id=canonical_id,
-            bucket_label=label,
-            scope_type="model" if scope else "account",
-            scope_id=scope,
-            window_kind=window_kind,
-            window_seconds=window_seconds,
-            effective_at=effective_at,
-            collected_at=_time_text(collected_at),
-            used_pct=value["pct"],
-            resets_at=_rounded_time(value.get("resets_at"), 60),
-            source=source,
-            plan=normalize_plan(plan) if plan != "unknown" else None,
-        ))
-    return samples
-
-
-def normalize_openai(data: dict[str, Any], collected_at: datetime) -> list[QuotaSample]:
-    effective_at = _time_text(data.get("updated_at"), collected_at)
-    account_key = str(data.get("account_key") or "default")
-    source = str(data.get("source") or "unknown")
-    samples = []
-
-    def add(bucket_id: str, label: str, value: Any, scope_type: str, scope_id: str) -> None:
-        if not isinstance(value, dict) or "pct" not in value:
-            return
-        seconds = int(value["window_secs"]) if value.get("window_secs") else None
-        if seconds:
-            # Named as codex-cli-usage 0.4.0 names the same windows.
-            bucket_id, label = window_bucket(scope_id or None, seconds, label)
-        samples.append(_make_sample(
-            provider="openai",
-            account_key=account_key,
-            bucket_id=bucket_id,
-            bucket_label=label,
-            scope_type=scope_type,
-            scope_id=scope_id,
-            window_kind="fixed",
-            window_seconds=seconds,
-            effective_at=effective_at,
-            collected_at=_time_text(collected_at),
-            used_pct=value["pct"],
-            resets_at=value.get("resets_at"),
-            source=source,
-        ))
-
-    if "primary" in data or "secondary" in data:
-        add("primary", "primary", data.get("primary"), "account", "")
-        add("secondary", "secondary", data.get("secondary"), "account", "")
-    else:
-        add("7d", "7d", data.get("7d"), "account", "")
-
-    for group in data.get("additional") or []:
-        if not isinstance(group, dict):
-            continue
-        name = str(group.get("name") or "additional")
-        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-        add(f"additional:{slug}:primary", f"{name} primary", group.get("primary"), "model", name)
-        add(f"additional:{slug}:secondary", f"{name} secondary", group.get("secondary"), "model", name)
-    return samples
-
-
-def normalize_antigravity(data: dict[str, Any], collected_at: datetime) -> list[QuotaSample]:
-    effective_at = _time_text(data.get("updated_at"), collected_at)
-    account_key = str(data.get("account_key") or "default")
-    source = str(data.get("source") or "unknown")
-    samples = []
-    groups = (data.get("quota_summary") or {}).get("groups") or []
-    for group in groups:
-        group_name = str(group.get("display_name") or "models")
-        for value in group.get("buckets") or []:
-            if "remaining_pct" not in value:
-                continue
-            window = str(value.get("window") or "")
-            window_seconds = {
-                "5h": 5 * 3600,
-                "weekly": 7 * 86400,
-            }.get(window)
-            # Named as agy-usage 0.4.0 names the same windows.
-            renamed = {old: (f"{scope}:{length}", f"{scope} {name}", scope)
-                       for old, scope, length, name in ANTIGRAVITY_RENAMES}
-            bucket_id, bucket_label, scope = renamed.get(
-                str(value.get("bucket_id")),
-                (f"{group_name}:{window}", f"{group_name} {window}".strip(), group_name))
-            samples.append(_make_sample(
-                provider="antigravity",
-                account_key=account_key,
-                bucket_id=bucket_id,
-                bucket_label=bucket_label,
-                scope_type="model",
-                scope_id=scope,
-                window_kind="fixed",
-                window_seconds=window_seconds,
-                effective_at=effective_at,
-                collected_at=_time_text(collected_at),
-                used_pct=100.0 - float(value["remaining_pct"]),
-                resets_at=value.get("reset_time"),
-                source=source,
-            ))
-    return samples
-
-
-def normalize_zai(data: dict[str, Any], collected_at: datetime) -> list[QuotaSample]:
-    effective_at = _time_text(data.get("updated_at"), collected_at)
-    account_key = str(data.get("account_key") or "default")
-    source = str(data.get("source") or "unknown")
-    samples = []
-    for value in data.get("limits") or []:
-        if not isinstance(value, dict) or "pct" not in value:
-            continue
-        unit_seconds = ZAI_UNIT_SECONDS.get(value.get("unit"))
-        number = value.get("number")
-        window_seconds = int(unit_seconds * number) if unit_seconds and number else None
-        window = (
-            format_duration(window_seconds) if window_seconds
-            else f"{number}u{value.get('unit')}"
-        )
-        kind = str(value.get("type") or "limit").lower().removesuffix("_limit")
-        bucket_id = window if kind == "credit" else f"{kind}:{window}"
-        # The rounded API percentage hides fractional usage that used/limit retains.
-        limit = value.get("limit")
-        used_pct = (
-            value["used"] / limit * 100
-            if isinstance(limit, (int, float)) and limit > 0
-            and isinstance(value.get("used"), (int, float))
-            else value["pct"]
-        )
-        samples.append(_make_sample(
-            provider="zai",
-            account_key=account_key,
-            bucket_id=bucket_id,
-            bucket_label=bucket_id,
-            scope_type="account",
-            scope_id="",
-            window_kind="fixed",
-            window_seconds=window_seconds,
-            effective_at=effective_at,
-            collected_at=_time_text(collected_at),
-            used_pct=used_pct,
-            resets_at=value.get("resets_at"),
-            source=source,
-        ))
-    return samples
-
-
 USAGE_SCHEMA = "usage-v1"
 WINDOW_NAMES = {5 * 3600: "5-hour", 7 * 86400: "weekly"}
 
@@ -385,11 +217,12 @@ def normalize_usage_v1(provider: str, data: dict[str, Any],
     return samples
 
 
-NORMALIZERS = {
-    "anthropic": normalize_anthropic,
-    "openai": normalize_openai,
-    "antigravity": normalize_antigravity,
-    "zai": normalize_zai,
+# The clanker-usage provider that reports each recorded provider's quota.
+QUOTA_PROVIDERS = {
+    "anthropic": "claude",
+    "openai": "codex",
+    "antigravity": "agy",
+    "zai": "zcode",
 }
 
 
@@ -397,9 +230,8 @@ def claude_login() -> tuple[str | None, str | None]:
     """The organization and email of the Claude login in use, from Claude Code's
     .claude.json.
 
-    ccusage reports quota for whichever login holds Claude Code's credentials but not
-    which one it is, so snapshots from two logins would otherwise share one account.
-    Claude Code keeps .claude.json in CLAUDE_CONFIG_DIR when that is set, else in home.
+    The organization keys Claude snapshots recorded before clanker-usage named the
+    account, and the email labels the account. Claude Code keeps .claude.json in CLAUDE_CONFIG_DIR when that is set, else in home.
     """
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     path = Path(override) / ".claude.json" if override else Path.home() / ".claude.json"
@@ -410,45 +242,28 @@ def claude_login() -> tuple[str | None, str | None]:
     return account.get("organizationUuid") or None, account.get("emailAddress") or None
 
 
-def claude_account_key() -> str | None:
-    return claude_login()[0]
-
-
-def _collector_command(provider: str) -> list[str] | None:
-    if provider == "anthropic":
-        return [sys.executable, "-m", "ccusage", "json"]
-    if provider == "openai":
-        return [sys.executable, "-m", "codex_cli_usage", "json"]
-    if provider == "antigravity":
-        return [sys.executable, "-m", "agy_usage", "json"]
-    if provider == "zai":
-        return [sys.executable, "-m", "zcode_cli_usage", "json"]
-    return None
-
-
-def collect_provider(provider: str, timeout: int = 30) -> list[QuotaSample]:
-    command = _collector_command(provider)
-    if not command:
-        raise RuntimeError(f"no quota collector found for {provider}")
-    collected_at = datetime.now(timezone.utc)
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+def usage_document(name: str, timeout: int = 30) -> dict[str, Any]:
+    """The usage-v1 document clanker-usage prints for a provider, such as claude. It is
+    printed even when the provider's usage is unavailable, which exits with status 1."""
+    result = subprocess.run([sys.executable, "-m", "clanker_usage", name, "json"],
+                            capture_output=True, text=True, timeout=timeout)
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
         data = None
-    if isinstance(data, dict) and data.get("schema") == USAGE_SCHEMA:
-        # A stale document still carries the last windows the provider returned.
-        if data.get("status") == "unavailable":
-            raise RuntimeError(f"{provider}: {data.get('error') or 'usage unavailable'}")
-        return normalize_usage_v1(provider, data, collected_at)
-    if result.returncode != 0:
-        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "collector failed"
-        raise RuntimeError(f"{provider}: {detail}")
-    if data is None:
-        raise RuntimeError(f"{provider}: collector returned invalid JSON")
-    if provider == "anthropic" and not data.get("account_key"):
-        data["account_key"] = claude_account_key()
-    return NORMALIZERS[provider](data, collected_at)
+    if not isinstance(data, dict) or data.get("schema") != USAGE_SCHEMA:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no usage-v1 document"
+        raise RuntimeError(f"{name}: {detail}")
+    return data
+
+
+def collect_provider(provider: str, timeout: int = 30) -> list[QuotaSample]:
+    collected_at = datetime.now(timezone.utc)
+    data = usage_document(QUOTA_PROVIDERS[provider], timeout)
+    # A stale document still carries the last windows the provider returned.
+    if data.get("status") == "unavailable":
+        raise RuntimeError(f"{provider}: {data.get('error') or 'usage unavailable'}")
+    return normalize_usage_v1(provider, data, collected_at)
 
 
 ANTIGRAVITY_RENAMES = (
@@ -558,7 +373,7 @@ def insert_samples(connection: sqlite3.Connection, samples: Iterable[QuotaSample
 
 
 def record_quota(path: Path = DEFAULT_DB_PATH, providers: Iterable[str] | None = None) -> tuple[int, list[str]]:
-    selected = list(providers or NORMALIZERS)
+    selected = list(providers or QUOTA_PROVIDERS)
     samples = []
     errors = []
     for provider in selected:
