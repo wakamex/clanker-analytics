@@ -35,9 +35,13 @@ PROVIDER_SHORT_NAMES = {
     "zai": "zcode",
 }
 
-# Snapshots are recorded every five minutes; a longer gap than this between two of an
-# account's snapshots means it was logged out, or nothing was recording.
+# Snapshots are recorded every five minutes; a rise across a longer gap than this between
+# two snapshots is not counted as use, since nothing recorded when it happened.
 LOGGED_IN_GAP_SECONDS = 900
+# Rises this close together belong to one stretch of use, which covers the flat readings
+# between them while usage stays within one reported percentage point.
+ACTIVE_GAP_SECONDS = 1800
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 
 
 @dataclass(frozen=True)
@@ -372,21 +376,47 @@ def insert_samples(connection: sqlite3.Connection, samples: Iterable[QuotaSample
     return connection.total_changes - before
 
 
+def cached_claude_samples(skip: Iterable[str] = ()) -> list[QuotaSample]:
+    """Samples from the document clanker-usage keeps for each Claude account it has seen,
+    such as one used through another CLAUDE_CONFIG_DIR, other than the accounts in skip.
+
+    A document keeps the time the provider returned it, so an unchanged file gives the
+    same samples as before and adds none.
+    """
+    samples = []
+    collected_at = datetime.now(timezone.utc)
+    for path in sorted((CACHE_DIR / "clanker-usage" / "claude").glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if (isinstance(data, dict) and data.get("schema") == USAGE_SCHEMA and data.get("account")
+                and data.get("account") not in skip and data.get("status") != "unavailable"):
+            samples.extend(normalize_usage_v1("anthropic", data, collected_at))
+    return samples
+
+
 def record_quota(path: Path = DEFAULT_DB_PATH, providers: Iterable[str] | None = None) -> tuple[int, list[str]]:
     selected = list(providers or QUOTA_PROVIDERS)
     samples = []
     errors = []
+    accounts: set[str] = set()
     for provider in selected:
         try:
-            samples.extend(collect_provider(provider))
+            collected = collect_provider(provider)
         except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
             errors.append(str(error))
+            continue
+        samples.extend(collected)
+        if provider == "anthropic":
+            accounts = {sample.account_key for sample in collected}
+    if "anthropic" in selected:
+        samples.extend(cached_claude_samples(skip=accounts))
     with connect(path) as connection:
         inserted = insert_samples(connection, samples)
         adopt_unnamed_history(connection, samples)
         organization, email = claude_login()
-        accounts = {sample.account_key for sample in samples if sample.provider == "anthropic"}
-        if "anthropic" in selected and len(accounts) == 1:
+        if len(accounts) == 1:
             account = accounts.pop()
             # Snapshots before ccusage 0.4.0 were stored under the login's organization;
             # it now names the account itself, so the same login's history moves to it.
@@ -510,40 +540,75 @@ def account_labels(connection: sqlite3.Connection) -> dict[tuple[str, str], str]
 
 
 def window_pace(connection: sqlite3.Connection, current: dict[str, Any]) -> dict[str, Any] | None:
-    """How fast an account used its current fixed quota window while it was logged in.
+    """How fast an account used its current fixed quota window while it was in use.
 
-    Logged-in time is the stretches the account's own snapshots cover, so time spent on
-    another login of the same provider does not dilute the rate. The rate is compared
-    with using the whole window evenly.
+    Every account is recorded whether or not it is in use, so use is read from the
+    snapshots themselves: an account is in use over the stretches where any of its
+    windows rose, joined when rises come within ACTIVE_GAP_SECONDS of each other. The rate
+    is this window's rise over those hours, compared with using the whole window evenly.
     """
     if current["window_kind"] != "fixed" or not current["window_seconds"] or not current["resets_at"]:
         return None
-    samples = connection.execute("""
-        SELECT effective_at, used_pct FROM quota_samples
-        WHERE provider = ? AND account_key = ? AND bucket_id = ?
-          AND scope_type = ? AND scope_id = ?
-          AND abs((julianday(resets_at) - julianday(?)) * 86400.0) <= 60.0
-        ORDER BY effective_at, id
-    """, (current["provider"], current["account_key"], current["bucket_id"],
-          current["scope_type"], current["scope_id"], current["resets_at"])).fetchall()
-    logged_in_seconds = 0.0
+    reset = _parse_time(current["resets_at"])
+    start = _time_text(reset - timedelta(seconds=current["window_seconds"]))
+    rows = connection.execute("""
+        SELECT bucket_id, scope_type, scope_id, effective_at, used_pct, resets_at
+        FROM quota_samples
+        WHERE provider = ? AND account_key = ? AND effective_at >= ?
+        ORDER BY bucket_id, scope_type, scope_id, effective_at, id
+    """, (current["provider"], current["account_key"], start)).fetchall()
+    key = (current["bucket_id"], current["scope_type"], current["scope_id"])
+
+    def this_window(row: sqlite3.Row) -> bool:
+        resets = _parse_time(row[5])
+        return tuple(row[:3]) == key and resets is not None and abs((resets - reset).total_seconds()) <= 60
+
+    rises = []
     gained = 0.0
-    for (earlier_at, earlier_pct), (later_at, later_pct) in zip(samples, samples[1:]):
-        gap = (_parse_time(later_at) - _parse_time(earlier_at)).total_seconds()
-        if gap <= LOGGED_IN_GAP_SECONDS:
-            logged_in_seconds += gap
-            gained += later_pct - earlier_pct
-    if not logged_in_seconds:
+    for earlier, later in zip(rows, rows[1:]):
+        if tuple(earlier[:3]) != tuple(later[:3]) or later[4] <= earlier[4]:
+            continue
+        began, ended = _parse_time(earlier[3]), _parse_time(later[3])
+        if (ended - began).total_seconds() > LOGGED_IN_GAP_SECONDS:
+            continue
+        rises.append((began, ended))
+        if this_window(earlier) and this_window(later):
+            gained += later[4] - earlier[4]
+    active_seconds = 0.0
+    stretch: list[datetime] | None = None
+    for began, ended in sorted(rises):
+        if stretch and (began - stretch[1]).total_seconds() <= ACTIVE_GAP_SECONDS:
+            stretch[1] = max(stretch[1], ended)
+            continue
+        if stretch:
+            active_seconds += (stretch[1] - stretch[0]).total_seconds()
+        stretch = [began, ended]
+    if stretch:
+        active_seconds += (stretch[1] - stretch[0]).total_seconds()
+    if not active_seconds:
         return None
-    rate = gained / (logged_in_seconds / 3600)
+    rate = gained / (active_seconds / 3600)
     even_rate = 100.0 / (current["window_seconds"] / 3600)
     return {
-        "logged_in_hours": logged_in_seconds / 3600,
+        "active_hours": active_seconds / 3600,
         "quota_gained_pct": gained,
         "quota_pp_per_hour": rate,
         "even_pp_per_hour": even_rate,
         "pace_ratio": rate / even_rate,
     }
+
+
+def last_used(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """When each account's quota last rose, in any of its windows."""
+    return {(provider, account): when for provider, account, when in connection.execute("""
+        SELECT provider, account_key, max(effective_at) FROM (
+            SELECT provider, account_key, effective_at, used_pct, lag(used_pct) OVER (
+                PARTITION BY provider, account_key, bucket_id, scope_type, scope_id
+                ORDER BY effective_at, id) AS previous
+            FROM quota_samples)
+        WHERE used_pct > previous
+        GROUP BY 1, 2
+    """)}
 
 
 def _model_patterns(bucket: dict[str, Any]) -> list[str]:
@@ -599,37 +664,38 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
     assign_claude_accounts(connection)
     requested = sorted(set(lookbacks))
     buckets = []
-    logged_out_buckets = []
+    inactive_buckets = []
     hidden_bucket_count = 0
     collecting_bucket_count = 0
     current_samples = latest_samples(connection)
     labels = account_labels(connection)
-    # Only the login in use is paced: another account of the same provider with newer
-    # snapshots means this one was switched away from, and local usage is no longer its own.
-    newest = {}
+    # Only the account in use is paced against local usage, which is the one whose quota
+    # rose most recently; the others' local usage is not their own.
+    used = last_used(connection)
+    newest: dict[str, str] = {}
+    in_use: dict[str, tuple[str, str, str]] = {}
     for sample in current_samples:
-        newest[sample["provider"]] = max(newest.get(sample["provider"], ""), sample["effective_at"])
+        provider, account = sample["provider"], sample["account_key"]
+        newest[provider] = max(newest.get(provider, ""), sample["effective_at"])
+        candidate = (used.get((provider, account), ""), sample["effective_at"], account)
+        in_use[provider] = max(in_use.get(provider, candidate), candidate)
     for current in current_samples:
         now = _parse_time(current["effective_at"])
         if now is None:
             continue
-        if current["effective_at"] < newest[current["provider"]] and any(
-                other["provider"] == current["provider"]
-                and other["account_key"] != current["account_key"]
-                and other["effective_at"] > current["effective_at"]
-                for other in current_samples):
+        if current["account_key"] != in_use[current["provider"]][2]:
             hidden_bucket_count += 1
             reset = _parse_time(current["resets_at"])
             pace = window_pace(connection, current)
             # Its window is still running, so the quota it has left is still usable.
             if (pace and reset and reset > _parse_time(newest[current["provider"]])
                     and (include_inactive or pace["quota_gained_pct"] > 0)):
-                logged_out_buckets.append({
+                inactive_buckets.append({
                     **{key: current[key] for key in (
                         "provider", "account_key", "bucket_id", "bucket_label", "scope_type",
                         "scope_id", "window_kind", "window_seconds", "used_pct", "resets_at")},
                     "account_label": labels.get((current["provider"], current["account_key"])),
-                    "logged_out_since": current["effective_at"],
+                    "last_used_at": used.get((current["provider"], current["account_key"])),
                     "window_pace": pace,
                 })
             continue
@@ -835,7 +901,7 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
         "hidden_bucket_count": hidden_bucket_count,
         "collecting_bucket_count": collecting_bucket_count,
         "buckets": buckets,
-        "logged_out_buckets": logged_out_buckets,
+        "inactive_buckets": inactive_buckets,
     }
 
 
@@ -1434,27 +1500,28 @@ def print_report(report: dict[str, Any], show_model_mix: bool = False) -> None:
     else:
         print("No complete lookbacks yet.")
     window_rows = []
-    for bucket in [*report["buckets"], *report.get("logged_out_buckets", [])]:
+    for bucket in [*report["buckets"], *report.get("inactive_buckets", [])]:
         pace = bucket.get("window_pace")
         # Shorter windows are already covered by the lookback periods above.
         if not pace or bucket["window_seconds"] < 86400:
             continue
-        logged_out = _parse_time(bucket.get("logged_out_since"))
+        last = _parse_time(bucket.get("last_used_at"))
         window_rows.append([
             PROVIDER_SHORT_NAMES.get(bucket["provider"], bucket["provider"]),
             bucket.get("account_label") or bucket["account_key"][:8],
             _pace_bucket_label(bucket),
             f"{bucket['used_pct']:.1f}%",
-            f"{pace['logged_in_hours']:.1f}",
+            f"{pace['active_hours']:.1f}",
             f"{pace['quota_pp_per_hour']:.3f}",
             f"{pace['pace_ratio']:.2f}x",
-            f"logged out since {logged_out:%Y-%m-%d %H:%MZ}" if logged_out else "logged in",
+            "in use" if "last_used_at" not in bucket
+            else f"last used {last:%Y-%m-%d %H:%MZ}" if last else "not used",
         ])
     if window_rows:
-        print("\nThis window by account, over logged-in time only (1.00x uses the whole window "
-              "evenly):")
+        print("\nThis window by account, over the time its quota was rising (1.00x uses the "
+              "whole window evenly):")
         for line in _format_table(
-                ["provider", "account", "bucket", "used", "logged-in h", "quota pp/h",
+                ["provider", "account", "bucket", "used", "active h", "quota pp/h",
                  "vs even", "status"], window_rows, {3, 4, 5, 6}):
             print(line)
     for reason, identities in projection_unavailable.items():

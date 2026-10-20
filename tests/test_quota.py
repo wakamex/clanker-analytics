@@ -242,6 +242,7 @@ class TestQuota(Case):
                                  subprocess.CompletedProcess(args, 0, json.dumps(document), ""))
         self.monkeypatch.setattr(quota, "claude_login", lambda: ("org-one", "one@example.com"))
 
+        self.monkeypatch.setattr(quota, "CACHE_DIR", self.tmp_path / "cache")
         quota.record_quota(path, ["anthropic"])
 
         with connect(path) as db:
@@ -329,7 +330,7 @@ class TestQuota(Case):
 
         assert {bucket["account_key"] for bucket in report["buckets"]} == {"org-two"}
 
-    def test_pace_measures_each_account_over_its_logged_in_time(self):
+    def test_pace_measures_each_account_over_the_time_its_quota_rose(self):
         tmp_path = self.tmp_path
         capsys = self.capsys
 
@@ -339,12 +340,12 @@ class TestQuota(Case):
 
         with connect(tmp_path / "quota.sqlite3") as quota_db:
             insert_samples(quota_db, [
-                # Logged in for 10 minutes, then switched away from with its week still open.
+                # Used for 10 minutes, then switched away from with its week still open.
                 *snapshots("org-one", "2026-10-13T13:00:00Z", [
                     ("2026-10-10T23:30:00Z", 98), ("2026-10-10T23:35:00Z", 99),
                     ("2026-10-10T23:40:00Z", 100)]),
-                # A day into its week before its first login, then two 10-minute stretches
-                # with five hours logged out between them.
+                # A day into its week before its first use, then two 10-minute stretches
+                # of use with five idle hours between them.
                 *snapshots("org-two", "2026-10-16T14:00:00Z", [
                     ("2026-10-10T23:45:00Z", 1), ("2026-10-10T23:50:00Z", 2),
                     ("2026-10-10T23:55:00Z", 3), ("2026-10-11T05:00:00Z", 3),
@@ -364,21 +365,91 @@ class TestQuota(Case):
 
         current = report["buckets"][0]
         assert current["account_label"] == "second"
-        # 4 points in 20 logged-in minutes is 12 points an hour; even use is 100 in 168 hours.
-        assert current["window_pace"]["logged_in_hours"] == approx(20 / 60)
+        # 4 points in 20 minutes of use is 12 points an hour; even use is 100 in 168 hours.
+        assert current["window_pace"]["active_hours"] == approx(20 / 60)
         assert current["window_pace"]["quota_pp_per_hour"] == approx(12)
         assert current["window_pace"]["pace_ratio"] == approx(12 * 168 / 100)
-        away = report["logged_out_buckets"][0]
+        away = report["inactive_buckets"][0]
         assert away["account_key"] == "org-one"
-        assert away["logged_out_since"] == "2026-10-10T23:40:00Z"
+        assert away["last_used_at"] == "2026-10-10T23:40:00Z"
         assert away["window_pace"]["quota_pp_per_hour"] == approx(12)
 
         print_report(report)
         output = capsys.readouterr().out
         assert re.search(r"claude\s+second\s+Week \(all models\)\s+5\.0%\s+0\.3\s+12\.000\s+"
-                         r"20\.16x\s+logged in", output)
+                         r"20\.16x\s+in use", output)
         assert re.search(r"claude\s+org-one\s+Week \(all models\)\s+100\.0%.*"
-                         r"logged out since 2026-10-10 23:40Z", output)
+                         r"last used 2026-10-10 23:40Z", output)
+
+    def test_pace_counts_only_the_time_an_account_was_used_when_every_account_is_recorded(self):
+        def snapshots(account, resets_at, readings):
+            return [sample for when, used in readings
+                    for sample in _claude_snapshot(when, used, resets_at, account)]
+
+        times = [f"2026-10-11T{hour:02d}:{minute:02d}:00Z"
+                 for hour in range(10, 13) for minute in range(0, 60, 5)]
+        with connect(self.tmp_path / "quota.sqlite3") as quota_db:
+            insert_samples(quota_db, [
+                # Recorded all along but idle, with quota left from earlier in its week.
+                *snapshots("idle", "2026-10-13T13:00:00Z", [(when, 40) for when in times]),
+                # In use for its first hour, rising a point every 15 minutes, then idle.
+                *snapshots("busy", "2026-10-16T14:00:00Z", [
+                    (when, 10 + min(index, 12) // 3) for index, when in enumerate(times)]),
+            ])
+            token_db = duckdb.connect()
+            token_db.execute("""
+                CREATE TABLE tokens (
+                    tool VARCHAR, model VARCHAR, rate_mode VARCHAR,
+                    total_tokens BIGINT, cost_usd DOUBLE, timestamp VARCHAR
+                )
+            """)
+            report = build_report(quota_db, token_db, [parse_duration("5m")], "cost_usd",
+                                  include_inactive=True)
+
+        [current] = report["buckets"]
+        assert current["account_key"] == "busy"
+        # Rises at 10:15, 10:30, 10:45 and 11:00 join into one stretch from 10:10 to 11:00.
+        assert current["window_pace"]["active_hours"] == approx(50 / 60)
+        assert current["window_pace"]["quota_gained_pct"] == 4
+        # An account whose quota never rose has no time in use to pace.
+        assert report["inactive_buckets"] == []
+
+    def test_recording_reads_every_cached_claude_account(self):
+        tmp_path = self.tmp_path
+        monkeypatch = self.monkeypatch
+        cache = tmp_path / "cache" / "clanker-usage" / "claude"
+        cache.mkdir(parents=True)
+
+        def document(account, status, used):
+            return {"schema": "usage-v1", "provider": "claude", "account": account,
+                    "plan": "max_20x", "status": status, "error": None,
+                    "retrieved_at": "2026-10-20T12:08:04+00:00", "details": {},
+                    "windows": [{"name": "weekly", "seconds": 604800, "scope": None,
+                                 "used_pct": used, "resets_at": "2026-10-20T13:00:00+00:00"}]}
+
+        for account, status, used in [("default-login", "live", 1), ("second", "cached", 100),
+                                      ("third", "stale", 50), ("gone", "unavailable", 0)]:
+            (cache / f"{account}.json").write_text(json.dumps(document(account, status, used)))
+        (cache / "broken.json").write_text("{")
+        live = document("default-login", "live", 2)
+        live["retrieved_at"] = "2026-10-20T12:10:00+00:00"
+        monkeypatch.setattr(quota, "CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr(quota.subprocess, "run", lambda *args, **kwargs:
+                            subprocess.CompletedProcess(args, 0, json.dumps(live), ""))
+        monkeypatch.setattr(quota, "claude_login", lambda: (None, None))
+        path = tmp_path / "quota.sqlite3"
+
+        assert quota.record_quota(path, ["anthropic"]) == (3, [])
+        # An unchanged cached document adds nothing the next time.
+        assert quota.record_quota(path, ["anthropic"]) == (0, [])
+        with connect(path) as db:
+            rows = db.execute("""
+                SELECT account_key, effective_at, used_pct FROM quota_samples ORDER BY 1
+            """).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("default-login", "2026-10-20T12:10:00Z", 2),
+            ("second", "2026-10-20T12:08:04Z", 100),
+            ("third", "2026-10-20T12:08:04Z", 50)]
 
     def test_recording_stores_the_claude_login_email(self):
         tmp_path = self.tmp_path
@@ -399,6 +470,7 @@ class TestQuota(Case):
             return subprocess.CompletedProcess(cmd, 0, output, "")
         monkeypatch.setattr(quota.subprocess, "run", run)
 
+        monkeypatch.setattr(quota, "CACHE_DIR", tmp_path / "cache")
         quota.record_quota(tmp_path / "quota.sqlite3", ["anthropic"])
 
         assert commands == [["-m", "clanker_usage", "claude", "json"]]
