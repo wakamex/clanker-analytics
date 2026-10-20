@@ -150,7 +150,7 @@ class TestQuota(Case):
             db.execute("PRAGMA user_version = 1")
         # Printed by agy-usage 0.4.0 on this host, with the account replaced.
         document = {
-            "schema": "usage-v1", "provider": "agy", "account": "f90eba0000000000",
+            "schema": "usage-v1", "provider": "agy", "account": "0123456789abcdef",
             "plan": "Google AI Ultra", "status": "live", "error": None,
             "retrieved_at": "2026-10-19T03:54:42+00:00", "balance": None, "details": {},
             "windows": [
@@ -175,10 +175,10 @@ class TestQuota(Case):
                 FROM quota_samples GROUP BY 1, 2, 3, 4, 5 ORDER BY 2
             """).fetchall()
         assert [tuple(row) for row in series] == [
-            ("f90eba0000000000", "Claude and GPT:1w", "Claude and GPT weekly", "model", "Claude and GPT", 2),
-            ("f90eba0000000000", "Claude and GPT:5h", "Claude and GPT 5-hour", "model", "Claude and GPT", 2),
-            ("f90eba0000000000", "Gemini:1w", "Gemini weekly", "model", "Gemini", 2),
-            ("f90eba0000000000", "Gemini:5h", "Gemini 5-hour", "model", "Gemini", 2),
+            ("0123456789abcdef", "Claude and GPT:1w", "Claude and GPT weekly", "model", "Claude and GPT", 2),
+            ("0123456789abcdef", "Claude and GPT:5h", "Claude and GPT 5-hour", "model", "Claude and GPT", 2),
+            ("0123456789abcdef", "Gemini:1w", "Gemini weekly", "model", "Gemini", 2),
+            ("0123456789abcdef", "Gemini:5h", "Gemini 5-hour", "model", "Gemini", 2),
         ]
 
     def test_codex_history_is_renamed_by_window_length_and_scope(self):
@@ -226,7 +226,7 @@ class TestQuota(Case):
             db.execute("PRAGMA user_version = 3")
         # Printed by ccusage 0.4.0 on this host, with the account replaced.
         document = {
-            "schema": "usage-v1", "provider": "claude", "account": "e7390f1f00000000",
+            "schema": "usage-v1", "provider": "claude", "account": "fedcba9876543210",
             "plan": "max_20x", "status": "live", "error": None,
             "retrieved_at": "2026-10-19T04:08:01+00:00", "balance": None, "details": {},
             "windows": [
@@ -252,11 +252,11 @@ class TestQuota(Case):
             """).fetchall()
             labels = db.execute("SELECT * FROM quota_accounts").fetchall()
         assert [tuple(row) for row in series] == [
-            ("e7390f1f00000000", "1w", "", 2, "2026-10-23T14:00:00Z"),
-            ("e7390f1f00000000", "5h", "", 2, "2026-10-19T05:00:00Z"),
-            ("e7390f1f00000000", "Fable:1w", "Fable", 2, "2026-10-23T14:00:00Z"),
+            ("fedcba9876543210", "1w", "", 2, "2026-10-23T14:00:00Z"),
+            ("fedcba9876543210", "5h", "", 2, "2026-10-19T05:00:00Z"),
+            ("fedcba9876543210", "Fable:1w", "Fable", 2, "2026-10-23T14:00:00Z"),
         ]
-        assert [tuple(row) for row in labels] == [("anthropic", "e7390f1f00000000", "one@example.com")]
+        assert [tuple(row) for row in labels] == [("anthropic", "fedcba9876543210", "one@example.com")]
 
     def test_unnamed_history_stays_unnamed_when_a_provider_has_two_accounts(self):
         path = self.tmp_path / "quota.sqlite3"
