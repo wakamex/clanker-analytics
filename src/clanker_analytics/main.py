@@ -81,9 +81,29 @@ AOP_RESULT_TOOL = "AOP result"
 ZCODE_TOOL = "Zcode"
 ZCODE_USAGE_TABLE = "zcode_model_usage"
 
+def _claude_config_dirs() -> list[Path]:
+    """Claude Code homes other than ~/.claude: CLAUDE_CONFIG_DIR, and the config
+    directories added to clanker-usage with `clanker-usage claude configure --config-dir`,
+    each of which holds its own account's transcripts."""
+    config = Path(os.environ.get("XDG_CONFIG_HOME", Path(HOME) / ".config"))
+    try:
+        listed = json.loads((config / "clanker-usage" / "config.json").read_text())["claude"]["config_dirs"]
+    except (OSError, ValueError, KeyError, TypeError):
+        listed = []
+    selected = [os.environ.get("CLAUDE_CONFIG_DIR"), *(listed if isinstance(listed, list) else [])]
+    homes: dict[Path, Path] = {(Path(HOME) / ".claude").resolve(): Path(HOME) / ".claude"}
+    for directory in selected:
+        if isinstance(directory, str) and directory:
+            homes.setdefault(Path(directory).expanduser().resolve(), Path(directory).expanduser())
+    return list(homes.values())[1:]
+
+
 SOURCE_TREES = [
     ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
+    *(("Claude Code", home / "projects", "*.jsonl") for home in _claude_config_dirs()),
     ("Codex", Path(HOME) / ".codex" / "sessions", "*.jsonl"),
+    # Codex moves a conversation's log here when it is archived.
+    ("Codex", Path(HOME) / ".codex" / "archived_sessions", "*.jsonl"),
     ("Gemini", Path(HOME) / ".gemini" / "tmp", "chats/*.json"),
     ("Agy", Path(HOME) / ".gemini" / "antigravity-cli" / "brain",
      "*/.system_generated/logs/transcript_full.jsonl"),
@@ -1407,6 +1427,7 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
         trees.extend([
             ("Claude Code", Path(wsl_home) / ".claude" / "projects", "*.jsonl"),
             ("Codex", Path(wsl_home) / ".codex" / "sessions", "*.jsonl"),
+            ("Codex", Path(wsl_home) / ".codex" / "archived_sessions", "*.jsonl"),
             ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.json"),
             ("Agy", Path(wsl_home) / ".gemini" / "antigravity-cli" / "brain",
              "*/.system_generated/logs/transcript_full.jsonl"),
@@ -1688,6 +1709,7 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
         _insert_source_files(db, files)
     _carry_over_vanished_rows(db, files, timer)
     _drop_other_copies_of_aop_runs(db, list(files), timer)
+    _drop_moved_codex_logs(db, files, timer)
     _name_claude_projects(db, timer)
     _deduplicate_aop(db, timer)
     with timer.span("price rows"):
@@ -1771,6 +1793,28 @@ def _drop_other_copies_of_aop_runs(db: duckdb.DuckDBPyConnection, read: list[str
                 WHERE source_file != kept)
         """)
         db.execute("DROP TABLE read_results")
+
+
+def _drop_moved_codex_logs(db: duckdb.DuckDBPyConnection, read: dict[str, SourceSnapshot],
+                           timer: DebugTimer) -> None:
+    """Count a Codex log once after Codex moves it from sessions to archived_sessions.
+
+    A log keeps its file name, which ends in its thread id, so rows read just now replace
+    the kept rows of a log with the same name at another path.
+    """
+    logs = [path for path, snapshot in read.items() if snapshot.tool == "Codex"]
+    if not logs:
+        return
+    name = "regexp_extract(source_file, '[^/]+$')"
+    with timer.span("drop moved Codex logs"):
+        _path_table(db, "read_logs", logs)
+        db.execute(f"""
+            DELETE FROM tokens
+            WHERE tool = 'Codex' AND coalesce(source_kind, 'native') = 'native'
+              AND source_file NOT IN (SELECT path FROM read_logs)
+              AND {name} IN (SELECT regexp_extract(path, '[^/]+$') FROM read_logs)
+        """)
+        db.execute("DROP TABLE read_logs")
 
 
 def _name_claude_projects(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
@@ -2028,6 +2072,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         changed = [path for path in changed if path not in unread]
         _read_changed_files(db, {path: files[path] for path in changed}, positions, timer)
         _drop_other_copies_of_aop_runs(db, changed, timer)
+        _drop_moved_codex_logs(db, {path: files[path] for path in changed}, timer)
         _name_claude_projects(db, timer)
         _deduplicate_aop(db, timer)
         with timer.span("price rows"):

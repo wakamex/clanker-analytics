@@ -59,8 +59,8 @@ The option-style form of version 0.4, such as `--table`, `--record-quota` or `--
 
 ## How it works
 
-DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, and
-`~/.gemini/tmp/`, and per-request Zcode usage from `~/.zcode/cli/db/db.sqlite`. It also reads AOP's archive of run results, `$XDG_STATE_HOME/aop/results/*.json` (default `~/.local/state/aop/results/`), which AOP 0.3.0 and later writes with every result, so a run's usage is found even after the project holding its `.aop` is deleted. Each AOP run is attributed to the directory that owns the `.aop` named in its `state_root`. Run `aop migrate-results` once to archive results written before 0.3.0. Results
+DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, `~/.codex/archived_sessions/`, and
+`~/.gemini/tmp/`, and per-request Zcode usage from `~/.zcode/cli/db/db.sqlite`. Codex moves a conversation's log to `archived_sessions` when it is archived; the log keeps its file name, so a log read before and after the move is counted once. Claude Code transcripts are also read from the `projects/` directory of every other Claude Code home: `CLAUDE_CONFIG_DIR` when it is set, and each directory added to clanker-usage with `clanker-usage claude configure --config-dir`. It also reads AOP's archive of run results, `$XDG_STATE_HOME/aop/results/*.json` (default `~/.local/state/aop/results/`), which AOP 0.3.0 and later writes with every result, so a run's usage is found even after the project holding its `.aop` is deleted. Each AOP run is attributed to the directory that owns the `.aop` named in its `state_root`. Run `aop migrate-results` once to archive results written before 0.3.0. Results
 are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest
 at `~/.cache/clanker-analytics/tokens-meta.json`.
 

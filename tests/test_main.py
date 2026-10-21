@@ -1718,6 +1718,28 @@ def _claude_line(timestamp, output):
     }) + "\n"
 
 
+class TestClaudeHomes(Case):
+    def test_claude_homes_come_from_the_environment_and_clanker_usage(self):
+        home = self.tmp_path / "home"
+        config = self.tmp_path / "config" / "clanker-usage"
+        config.mkdir(parents=True)
+        for name in (".claude", ".claude-b", ".claude-c", "elsewhere"):
+            (home / name).mkdir(parents=True)
+        (config / "config.json").write_text(json.dumps({"claude": {"config_dirs": [
+            str(home / ".claude-b"), str(home / ".claude-c"), str(home / ".claude")]}}))
+        self.monkeypatch.setattr(main_mod, "HOME", home.as_posix())
+        self.monkeypatch.setenv("XDG_CONFIG_HOME", str(self.tmp_path / "config"))
+        self.monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "elsewhere"))
+
+        # ~/.claude is scanned already; each other home once.
+        assert main_mod._claude_config_dirs() == [
+            home / "elsewhere", home / ".claude-b", home / ".claude-c"]
+
+        self.monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+        (config / "config.json").write_text("{")
+        assert main_mod._claude_config_dirs() == []
+
+
 class TestAppendOnlyLogs(Case):
     def setUp(self):
         super().setUp()
@@ -1758,6 +1780,32 @@ class TestAppendOnlyLogs(Case):
     def append(self, path, text):
         with open(path, "a") as log:
             log.write(text)
+
+    def test_codex_log_moved_to_archived_sessions_counts_once(self):
+        archived = self.tmp_path / "archived" / self.codex.name
+        archived.parent.mkdir()
+        self.monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            ("Codex", self.tmp_path / "codex", "*.jsonl"),
+            ("Codex", archived.parent, "*.jsonl"),
+        ])
+        self.codex.write_text(
+            _codex_line("2026-10-08T10:00:00Z", "session_meta",
+                        {"id": "019fd3f1-91fd-7902-8893-028d79084e33", "cwd": "/code/beta"})
+            + _codex_line("2026-10-08T10:00:01Z", "turn_context", {"model": "gpt-5.5"})
+            + _codex_tokens("2026-10-08T10:00:20Z", 100, 100)
+            + _codex_tokens("2026-10-08T10:01:20Z", 250, 150))
+        rows, _ = self.load()
+        assert len(rows) == 2
+
+        self.codex.rename(archived)
+        moved, _ = self.load()
+        assert len(moved) == 2
+        assert {row[-1] for row in moved} == {row[-1] for row in rows}
+        assert len(self.load(refresh=True)[0]) == 2
+        # Once archived logs are deleted too, their rows are kept.
+        archived.unlink()
+        assert len(self.load()[0]) == 2
+        assert len(self.load(refresh=True)[0]) == 2
 
     def test_new_lines_parse_as_the_whole_log_does(self):
         self.claude.write_text(_claude_line("2026-10-08T10:00:01Z", 10)
