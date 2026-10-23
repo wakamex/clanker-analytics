@@ -606,6 +606,62 @@ class TestSourceLoaders(Case):
 
         assert [row[2] for row in rows] == [kept]
 
+    def test_gemini_jsonl_chat_counts_the_last_version_of_each_message(self):
+        chat = self.tmp_path / "tmp" / "my-project" / "chats" / "session-2026-06-12T12-50-1a.jsonl"
+        chat.parent.mkdir(parents=True)
+
+        def reply(total, model="gemini-3-flash-preview", message_id="m1"):
+            return {"id": message_id, "timestamp": "2026-06-12T12:50:46.864Z", "type": "gemini",
+                    "content": "", "model": model,
+                    "tokens": {"input": total - 10, "output": 10, "cached": 5, "thoughts": 0,
+                               "tool": 0, "total": total}}
+
+        # As Gemini CLI 0.66 writes them: a session line, messages, $set updates, and a
+        # rewritten message appended again with the same id.
+        lines = [
+            {"sessionId": "session-1", "projectHash": "c91a", "startTime": "2026-06-12T12:50:40Z",
+             "lastUpdated": "2026-06-12T12:50:40Z", "kind": "main"},
+            {"id": "u1", "timestamp": "2026-06-12T12:50:40.769Z", "type": "user",
+             "content": [{"text": "hi"}]},
+            {"$set": {"lastUpdated": "2026-06-12T12:50:40.769Z"}},
+            reply(100),
+            reply(150),
+            reply(40, message_id="m2"),
+            {"$set": {"lastUpdated": "2026-06-12T12:51:00Z"}},
+        ]
+        chat.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+        relation = duckdb.sql(main_mod._gemini_jsonl_sql(main_mod._sql_literal(chat.as_posix())))
+        columns = [item[0] for item in relation.description]
+        rows = sorted((dict(zip(columns, row)) for row in relation.fetchall()),
+                      key=lambda row: row["total_tokens"])
+
+        assert [(row["session"], row["total_tokens"], row["input_tokens"],
+                 row["cache_read_tokens"]) for row in rows] == [
+            ("session-1", 40, 30, 5), ("session-1", 150, 140, 5)]
+        assert {(row["project"], row["date"], row["model"], row["timestamp"]) for row in rows} == {
+            ("my-project", "2026-06-12", "gemini-3-flash-preview", "2026-06-12T12:50:46.864Z")}
+
+    def test_gemini_chats_in_both_formats_are_scanned(self):
+        tmp = self.tmp_path / ".gemini" / "tmp" / "p" / "chats"
+        tmp.mkdir(parents=True)
+        (tmp / "old.json").write_text("{}")
+        (tmp / "new.jsonl").write_text("{}\n")
+        self.monkeypatch.setattr(main_mod, "SOURCE_TREES", [
+            tree[:1] + (self.tmp_path / ".gemini" / "tmp",) + tree[2:]
+            for tree in main_mod.SOURCE_TREES if tree[0] == "Gemini"])
+        self.monkeypatch.setattr(main_mod, "_WSL_HOMES", [])
+
+        files, _, _ = main_mod.scan_source_files()
+
+        assert sorted(Path(path).name for path in files) == ["new.jsonl", "old.json"]
+
+    def test_gemini_home_follows_gemini_cli_home(self):
+        self.monkeypatch.setenv("GEMINI_CLI_HOME", str(self.tmp_path))
+        assert main_mod._gemini_home() == self.tmp_path
+        self.monkeypatch.delenv("GEMINI_CLI_HOME")
+        assert main_mod._gemini_home() == Path(main_mod.HOME)
+
     def test_gemini_timestamp_schema_shape_is_cast_before_slicing(self):
         tmp_path = self.tmp_path
         chat = tmp_path / "tmp" / ("a" * 64) / "chats" / "session.json"

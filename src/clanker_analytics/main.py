@@ -81,6 +81,10 @@ AOP_RESULT_TOOL = "AOP result"
 ZCODE_TOOL = "Zcode"
 ZCODE_USAGE_TABLE = "zcode_model_usage"
 
+def _gemini_home() -> Path:
+    return Path(os.environ.get("GEMINI_CLI_HOME") or HOME).expanduser()
+
+
 def _claude_config_dirs() -> list[Path]:
     """Claude Code homes other than ~/.claude: CLAUDE_CONFIG_DIR, and the config
     directories added to clanker-usage with `clanker-usage claude configure --config-dir`,
@@ -104,7 +108,10 @@ SOURCE_TREES = [
     ("Codex", Path(HOME) / ".codex" / "sessions", "*.jsonl"),
     # Codex moves a conversation's log here when it is archived.
     ("Codex", Path(HOME) / ".codex" / "archived_sessions", "*.jsonl"),
-    ("Gemini", Path(HOME) / ".gemini" / "tmp", "chats/*.json"),
+    # Gemini CLI keeps its home in GEMINI_CLI_HOME when set, and writes chats as JSON Lines
+    # since April 2026, after a single JSON document each before.
+    ("Gemini", _gemini_home() / ".gemini" / "tmp", "chats/*.json"),
+    ("Gemini", _gemini_home() / ".gemini" / "tmp", "chats/*.jsonl"),
     ("Agy", Path(HOME) / ".gemini" / "antigravity-cli" / "brain",
      "*/.system_generated/logs/transcript_full.jsonl"),
     (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
@@ -474,11 +481,80 @@ WHERE (t.cum_total IS NULL OR t.cum_total != coalesce(t.prev_cum, -1))
 """
 
 
+# Gemini CLI names a project's directory under tmp/ by the name projects.json gives the
+# project path, or in older homes by the path's SHA-256, shortened here to 8 characters.
+GEMINI_PROJECT = """CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
+         THEN left(cast(project_raw as VARCHAR), 8) ELSE lower(cast(project_raw as VARCHAR)) END"""
+
+
+def _gemini_jsonl_sql(source_expr: str) -> str:
+    """Gemini CLI chats as JSON Lines: a session line, then one line per message. A message
+    Gemini CLI rewrites is appended again with the same id, so its last line counts;
+    lines that only $set session fields carry no usage."""
+    return f"""
+WITH lines AS (
+    SELECT replace(filename, '\\', '/') as filename, json, row_number() OVER () as line
+    FROM read_json_objects({source_expr}, format='newline_delimited', filename=true,
+                           ignore_errors=true, maximum_object_size=67108864)
+),
+sessions AS (
+    SELECT filename, arg_min(json_extract_string(json, '$.sessionId'), line) as session
+    FROM lines WHERE json_extract_string(json, '$.sessionId') IS NOT NULL
+    GROUP BY filename
+),
+messages AS (
+    SELECT filename, json as m FROM lines
+    WHERE json_extract_string(json, '$.type') = 'gemini'
+      AND json_extract(json, '$.tokens') IS NOT NULL
+    QUALIFY row_number() OVER (
+        PARTITION BY filename, json_extract_string(json, '$.id') ORDER BY line DESC) = 1
+),
+raw AS (
+    SELECT messages.filename,
+           regexp_extract(messages.filename, '.*/tmp/([^/]+)/chats/', 1) as project_raw,
+           session, m,
+           json_extract_string(m, '$.timestamp') as ts,
+           coalesce(try_cast(json_extract_string(m, '$.tokens.input') as INT), 0) as input,
+           coalesce(try_cast(json_extract_string(m, '$.tokens.output') as INT), 0) as output,
+           coalesce(try_cast(json_extract_string(m, '$.tokens.cached') as INT), 0) as cached,
+           coalesce(try_cast(json_extract_string(m, '$.tokens.total') as INT), 0) as total
+    FROM messages LEFT JOIN sessions USING (filename)
+)
+SELECT
+    'Gemini' as tool,
+    {GEMINI_PROJECT} as project,
+    session,
+    left(ts, 10) as date,
+    json_extract_string(m, '$.model') as model,
+    input as input_tokens,
+    output as output_tokens,
+    0 as cache_write_tokens,
+    cached as cache_read_tokens,
+    total as total_tokens,
+    'interactive' as execution_type,
+    {GEMINI_PROJECT} as project_path,
+    'exact' as token_count_type,
+    1 as turn_count,
+    NULL::BIGINT as retained_tokens,
+    'native' as source_kind,
+    NULL::DOUBLE as cost_usd,
+    filename as source_file,
+    {_utc_timestamp("ts")} as timestamp,
+    '' as rate_mode,
+    NULL::DOUBLE as quota_used_pct,
+    NULL::BIGINT as quota_resets_at,
+    NULL::INTEGER as quota_window_minutes,
+    NULL::VARCHAR as quota_limit_id
+FROM raw
+WHERE total > 0
+"""
+
+
 def _gemini_sql(source_expr: str) -> str:
     return f"""
 WITH raw AS (
     SELECT replace(filename, '\\', '/') as filename,
-           regexp_extract(replace(filename, '\\', '/'), 'tmp/([^/]+)/', 1) as project_raw,
+           regexp_extract(replace(filename, '\\', '/'), '.*/tmp/([^/]+)/chats/', 1) as project_raw,
            cast(sessionId as VARCHAR) as session,
            unnest(messages) as m
     FROM read_json({source_expr},
@@ -487,8 +563,7 @@ WITH raw AS (
 )
 SELECT
     'Gemini' as tool,
-    CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
-         THEN left(cast(project_raw as VARCHAR), 8) ELSE lower(cast(project_raw as VARCHAR)) END as project,
+    {GEMINI_PROJECT} as project,
     session,
     left(cast(m.timestamp as VARCHAR), 10) as date,
     cast(m.model as VARCHAR) as model,
@@ -498,8 +573,7 @@ SELECT
     coalesce(m.tokens.cached::INT, 0) as cache_read_tokens,
     coalesce(m.tokens.total::INT, 0) as total_tokens,
     'interactive' as execution_type,
-    CASE WHEN length(project_raw) = 64 AND regexp_matches(project_raw, '^[0-9a-f]+$')
-         THEN left(cast(project_raw as VARCHAR), 8) ELSE lower(cast(project_raw as VARCHAR)) END as project_path,
+    {GEMINI_PROJECT} as project_path,
     'exact' as token_count_type,
     1 as turn_count,
     NULL::BIGINT as retained_tokens,
@@ -1429,6 +1503,7 @@ def _iter_source_trees() -> list[tuple[str, Path, str]]:
             ("Codex", Path(wsl_home) / ".codex" / "sessions", "*.jsonl"),
             ("Codex", Path(wsl_home) / ".codex" / "archived_sessions", "*.jsonl"),
             ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.json"),
+            ("Gemini", Path(wsl_home) / ".gemini" / "tmp", "chats/*.jsonl"),
             ("Agy", Path(wsl_home) / ".gemini" / "antigravity-cli" / "brain",
              "*/.system_generated/logs/transcript_full.jsonl"),
             (AGY_METADATA_TOOL,
@@ -1632,6 +1707,13 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
         if paths:
             if tool_name == ZCODE_TOOL:
                 _load_zcode_usage(db, paths)
+            if tool_name == "Gemini":
+                # Chats in the older single-document format and in JSON Lines.
+                for builder, chats in ((_gemini_sql, [p for p in paths if not p.endswith(".jsonl")]),
+                                       (_gemini_jsonl_sql, [p for p in paths if p.endswith(".jsonl")])):
+                    if chats:
+                        parts.append(builder(_sql_file_list(chats)))
+                continue
             if tool_name == "Agy":
                 _load_agy_models(db, paths)
                 parts.append(builder(_sql_file_list(paths), models_table=AGY_MODELS_TABLE))
