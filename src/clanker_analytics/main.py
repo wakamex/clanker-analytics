@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Iterable
 
 import duckdb
 
@@ -1586,7 +1587,9 @@ def sources_mtime() -> tuple[float, int, int, float]:
 
 
 def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot], str,
-                                dict[str, ReadPosition]] | None:
+                                dict[str, ReadPosition], set[str] | None] | None:
+    """The cache's version, known files, pricing basis, read positions, and the known files
+    the scan before it did not find, or None when the cache did not record them."""
     if not CACHE_META_FILE.exists():
         return None
     try:
@@ -1610,19 +1613,21 @@ def _load_cache_meta() -> tuple[int, dict[str, SourceSnapshot], str,
                                tuple(tuple(map(int, span)) for span in position["context"]))
             for path, position in data.get("positions", {}).items()
         }
+        missing = set(map(str, data["missing"])) if "missing" in data else None
     except (KeyError, TypeError, ValueError):
         return None
-    return version, files, str(data.get("pricing_basis", "")), positions
+    return version, files, str(data.get("pricing_basis", "")), positions, missing
 
 
 def _write_cache_meta(files: dict[str, SourceSnapshot],
-                      positions: dict[str, ReadPosition]) -> None:
+                      positions: dict[str, ReadPosition], missing: Iterable[str] = ()) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": CACHE_SCHEMA_VERSION,
         "pricing_basis": pricing_basis(),
         "files": {path: meta.to_json() for path, meta in sorted(files.items())},
         "positions": {path: position.to_json() for path, position in sorted(positions.items())},
+        "missing": sorted(missing),
     }
     CACHE_META_FILE.write_text(json.dumps(payload, separators=(",", ":")))
 
@@ -1737,13 +1742,13 @@ def _expand_dependency_changes(
 
 def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot],
                  positions: dict[str, ReadPosition], timer: DebugTimer, action: str,
-                 detail: str = "") -> int:
+                 detail: str = "", missing: Iterable[str] = ()) -> int:
     with timer.span("count token rows"):
         row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with timer.span("write parquet cache", CACHE_FILE.as_posix()):
         db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-    _write_cache_meta(files, positions)
+    _write_cache_meta(files, positions, missing)
     detail_part = f"{detail}; " if detail else ""
     print(f"  {action}: {detail_part}{row_count} rows → {CACHE_FILE}", file=sys.stderr)
     return row_count
@@ -2088,11 +2093,23 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
 
     meta = _load_cache_meta()
     positions = dict(meta[3]) if meta else {}
+    # Known files this scan did not find; their rows are kept. Only those missing since the
+    # last cache write are reported, since most stay missing for good.
+    missing = sorted(path for path in (meta[1] if meta else {}) if path not in files)
+    previously_missing = meta[4] if meta else None
+    newly_missing = ([] if previously_missing is None
+                     else [path for path in missing if path not in previously_missing])
+
+    def with_missing(detail: str) -> str:
+        if not newly_missing:
+            return detail
+        note = f"{len(newly_missing)} files no longer on disk, their rows kept"
+        return f"{detail}, {note}" if detail else note
 
     def rebuild(detail: str = "") -> None:
         unread = _rebuild_tokens(db, files, timer)
         _write_cache(db, known(unread), _positions_after_full_read(files), timer,
-                     "rebuilt cache", detail)
+                     "rebuilt cache", with_missing(detail), missing)
 
     def known(unread: set[str]) -> dict[str, SourceSnapshot]:
         # Files a scan no longer finds, or could not read, stay known with their last
@@ -2110,14 +2127,13 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     newest_source = max((meta.mtime_ns / 1e9 for meta in files.values()), default=0.0)
 
     if CACHE_FILE.exists() and meta and meta[0] == CACHE_SCHEMA_VERSION:
-        _, cached_files, cached_basis, _ = meta
+        _, cached_files, cached_basis, _, _ = meta
         # Price data changed since the cache was written: reprice every row.
         reprice = cached_basis != pricing_basis()
         changed = sorted(
             path for path, snapshot in files.items()
             if cached_files.get(path) != snapshot
         )
-        vanished = sorted(path for path in cached_files if path not in files)
         changed = _expand_dependency_changes(files, changed)
         if not changed:
             with timer.span("load parquet cache", CACHE_FILE.as_posix()):
@@ -2126,7 +2142,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
                 with timer.span("reprice rows", pricing_basis()):
                     price_tokens(db, all_rows=True)
                 _write_cache(db, known(set()), positions, timer, "repriced cache",
-                             pricing_basis())
+                             with_missing(pricing_basis()), missing)
                 return
             print("  (cached)", file=sys.stderr)
             timer.note(
@@ -2148,7 +2164,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             return
 
         timer.note(
-            f"incremental update: {len(changed)} changed, {len(vanished)} vanished and kept; newest source {_fmt_debug_ts(newest_source)}"
+            f"incremental update: {len(changed)} changed, {len(missing)} known files missing and kept; newest source {_fmt_debug_ts(newest_source)}"
         )
         unread = _unmigrated_aop_results(db, {path: files[path] for path in changed})
         changed = [path for path in changed if path not in unread]
@@ -2165,7 +2181,8 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
             positions,
             timer,
             "updated cache",
-            f"{len(changed)} changed, {len(vanished)} vanished and kept",
+            with_missing(f"{len(changed)} changed"),
+            missing,
         )
         return
 
@@ -2240,15 +2257,16 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
 
     if args.command in ("quota-history", "value"):
         from clanker_analytics.quota import (
-            build_quota_history, build_value_report, connect, print_quota_history,
+            account_labels, build_quota_history, build_value_report, connect, print_quota_history,
             print_value_report,
         )
         with connect(Path(args.quota_db)) as quota_db:
             report = build_quota_history(db, COST_PER_ROW, basis, quota_db)
+            labels = account_labels(quota_db)
         if args.command == "value":
             with timer.span("detect plans"):
                 plans = plans_for(args)
-            report = build_value_report(report, plans, {tool for tool, _ in args.plan})
+            report = build_value_report(report, plans, {tool for tool, _ in args.plan}, labels)
             if args.json:
                 print(json.dumps(report, indent=2))
             elif report["tools"]:

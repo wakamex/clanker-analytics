@@ -19,6 +19,7 @@ from clanker_analytics.quota import (
     normalize_usage_v1,
     parse_duration,
     print_report,
+    print_value_report,
 )
 
 from support import Case, approx, raises
@@ -832,9 +833,15 @@ class TestQuota(Case):
         # Each login's week counts only its own usage, split at the first login's last snapshot.
         assert weeks["default"]["api_equivalent_cost_usd"] == 30
         assert weeks["org-two"]["api_equivalent_cost_usd"] == 10
-        value = build_value_report(report, {"Claude Code": ("max_20x", 200.0)})
-        assert [(item["account"], item["full_week_api_equivalent_usd"]) for item in value["tools"]] == [
-            ("default", 50.0), ("org-two", 40.0)]
+        value = build_value_report(report, {"Claude Code": ("max_20x", 200.0)},
+                                   labels={("anthropic", "org-two"): "second"})
+        assert [(item["account"], item["account_label"], item["full_week_api_equivalent_usd"])
+                for item in value["tools"]] == [("default", None, 50.0), ("org-two", "second", 40.0)]
+        capsys = self.capsys
+        print_value_report(value)
+        output = capsys.readouterr().out
+        assert re.search(r"Claude Code\s+second\s+max_20x", output)
+        assert re.search(r"Claude Code\s+default\s+max_20x", output)
 
     def test_quota_history_counts_aop_runs_on_the_same_subscription(self):
         db = duckdb.connect()

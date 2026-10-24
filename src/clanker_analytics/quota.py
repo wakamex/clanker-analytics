@@ -1269,10 +1269,13 @@ def _period_plan(tool: str, period: dict[str, Any],
 
 
 def build_value_report(history: dict[str, Any], plans: dict[str, tuple[str, float]],
-                       forced: Iterable[str] = ()) -> dict[str, Any]:
+                       forced: Iterable[str] = (),
+                       labels: dict[tuple[str, str], str] | None = None) -> dict[str, Any]:
     """Compare each tool's latest weekly full-quota API value with the price of the plan
     that week ran on, for each account the tool was used with. Tools in `forced` use the
-    plan in `plans` whatever the week's snapshots reported."""
+    plan in `plans` whatever the week's snapshots reported. `labels` names accounts as
+    account_labels does."""
+    providers = {tool: provider for provider, tool in PROVIDER_TO_TOOL.items()}
     latest: dict[tuple[str, str], dict[str, Any]] = {}
     for period in history["periods"]:
         if (period["window_minutes"] != 7 * 24 * 60 or period["total_tokens"] <= 0
@@ -1301,6 +1304,7 @@ def build_value_report(history: dict[str, Any], plans: dict[str, tuple[str, floa
         tools.append({
             "tool": tool,
             "account": account,
+            "account_label": (labels or {}).get((providers.get(tool, ""), account)),
             "plan": plan,
             "plan_usd_per_month": price,
             "limit_id": period["limit_id"],
@@ -1335,7 +1339,7 @@ def print_value_report(report: dict[str, Any]) -> None:
         account = item.get("account") or "default"
         rows.append([
             item["tool"],
-            account if account == "default" else account[:8],
+            item.get("account_label") or (account if account == "default" else account[:8]),
             item["plan"] or "-",
             money(item["plan_usd_per_month"]),
             item["resets_at"][:10],

@@ -1,5 +1,6 @@
 """Tests for clanker-analytics."""
 
+import io
 import json
 import os
 import shutil
@@ -2168,6 +2169,16 @@ class TestDebugHooks(Case):
 
         expected = [("alpha", 3), ("beta", 9)]
         assert load() == expected
+        # A missing file is reported once, at the first cache write after it disappears.
+        line = file_a.read_text()
+        outputs = []
+        for copies in (2, 1):
+            file_a.write_text(line * copies)
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                assert load() == [("alpha", 3)] * copies + [("beta", 9)]
+            outputs.append(stderr.getvalue())
+        assert "1 changed, 1 files no longer on disk, their rows kept" in outputs[0]
+        assert "no longer on disk" not in outputs[1]
         assert load(refresh=True) == expected
         monkeypatch.setattr(main_mod, "CACHE_SCHEMA_VERSION", main_mod.CACHE_SCHEMA_VERSION + 1)
         assert load() == expected
