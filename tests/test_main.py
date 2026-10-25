@@ -749,15 +749,26 @@ class TestSourceLoaders(Case):
                           "cache_read_tokens": cached, "cache_write_tokens": 0,
                           "output_tokens": output, "reasoning_tokens": 1, **usage}}})
 
-        # As Muse Code 1.4.12 writes them. Attribution records repeat each call's usage,
-        # and a review's usage is in the session log and again in approval-review/.
-        attribution = record("runtime.session", {"kind": "run", "event": {
-            "kind": "goal_usage_attribution", "record": {"usage_family": "provider",
-            "quantity": {"input_tokens": 34317, "cached_tokens": 0, "output_tokens": 151}}}})
+        # As Muse Code 1.4.12 writes them. The session log attributes every call to its
+        # owner: the main agent's and subagents' calls, which have model_completed events,
+        # and the in-process skill reminder's, which do not. A review's usage is in the
+        # session log and again in approval-review/.
+        def attributed(owner_type, owner_id, input_tokens, cached, output, reported=True):
+            return record("runtime.session", {"kind": "run", "event": {
+                "kind": "goal_usage_attribution", "record": {
+                    "usage_family": "provider",
+                    "owner": {"owner_type": owner_type, "owner_id": owner_id},
+                    "quantity": {"input_tokens": input_tokens, "cached_tokens": cached,
+                                 "output_tokens": output, "reported": reported}}}})
+
+        attribution = attributed("main_root", "main-root", 34317, 0, 151)
         (session / "session.jsonl").write_text(
             record("runtime.session.metadata", {"kind": "metadata",
                    "record": {"workspace_root": "/code/My-Project"}})
             + attribution + call("muse-wonder-1.0", 34317, 0, 151)
+            + attributed("reminder_child", "01a1739f-reminder", 16541, 16369, 598)
+            + attributed("reminder_child", "01a1739f-child", 5083, 0, 814)
+            + attributed("reminder_child", "01a1739f-unreported", 0, 0, 0, reported=False)
             + call("muse-wonder-1.0", 36017, 35828, 494)
             + record("runtime.session", {"kind": "run", "event": {
                 "kind": "automated_review_completed",
@@ -771,6 +782,7 @@ class TestSourceLoaders(Case):
         for read in (paths, paths[1:]):
             with self.subTest(read=len(read)):
                 main_mod._path_table(db, "muse_logs", read)
+                main_mod._path_table(db, "muse_subagents", main_mod._muse_subagents(read))
                 relation = db.sql(main_mod._muse_sql(main_mod._sql_file_list(
                     [*read, *main_mod._muse_parent_logs(read)])))
                 columns = [item[0] for item in relation.description]
@@ -779,13 +791,15 @@ class TestSourceLoaders(Case):
                     "output_tokens", "total_tokens", "project", "session"))
                     for row in relation.fetchall())
                 expected = [
+                    # The skill reminder; the subagent's attribution is its own log's call.
+                    ("muse-spark-1.3", "subagent", 172, 16369, 598, 17139, "my-project", "01a1739f-session"),
                     ("muse-spark-1.3", "subagent", 5083, 0, 814, 5897, "my-project", "01a1739f-session"),
                     ("muse-spark-1.3", "subagent", 17740, 0, 526, 18266, "my-project", "01a1739f-session"),
                     ("muse-wonder-1.0", "interactive", 189, 35828, 494, 36511, "my-project", "01a1739f-session"),
                     ("muse-wonder-1.0", "interactive", 34317, 0, 151, 34468, "my-project", "01a1739f-session"),
                 ]
                 # A subagent log read alone still takes the session's project.
-                assert rows == (expected if len(read) == 2 else expected[:1])
+                assert rows == (expected if len(read) == 2 else expected[1:2])
 
     def test_gemini_timestamp_schema_shape_is_cast_before_slicing(self):
         tmp_path = self.tmp_path

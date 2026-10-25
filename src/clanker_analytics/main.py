@@ -1182,10 +1182,25 @@ def _muse_parent_logs(paths: list[str]) -> list[str]:
     return sorted(parent for parent in parents if parent not in paths and os.path.exists(parent))
 
 
+# Muse runs its skill reminder in the main process, so the reminder's calls have no log
+# or model_completed event of their own; the proxied requests ask for this model.
+MUSE_REMINDER_MODEL = "muse-spark-1.3"
+
+
+def _muse_subagents(paths: list[str]) -> list[str]:
+    """The ids of the subagents whose logs sit beside the session logs in paths."""
+    return sorted({child.name for path in paths if "/subagent/" not in path
+                   for child in (Path(path).parent / "subagent").glob("*")
+                   if (child / "session.jsonl").exists()})
+
+
 def _muse_sql(source_expr: str) -> str:
     """Muse Code usage: one row per model call. A call records a model_completed event in
     its session's or subagent's log; an automated approval review records its usage once,
-    as automated_review_completed in the session's log. Input counts include cached input."""
+    as automated_review_completed in the session's log. The session's log also attributes
+    every call to its owner; reminder calls of owners without a log of their own, the
+    in-process skill reminder, are counted from those records. Input counts include
+    cached input."""
     return f"""
 WITH lines AS (
     SELECT replace(filename, '\\', '/') as filename, json,
@@ -1218,6 +1233,21 @@ calls AS (
            OR (json_extract_string(json, '$.payload.event.kind') = 'automated_review_completed'
                AND filename NOT LIKE '%/subagent/%'))
       AND json_extract(json, '$.payload.event.usage') IS NOT NULL
+    UNION ALL
+    SELECT filename, session, 'reminder' as kind, '{MUSE_REMINDER_MODEL}' as model,
+        try_cast(json_extract_string(json, '$.recorded_at') as BIGINT) as recorded_us,
+        coalesce(try_cast(json_extract_string(json, '$.payload.event.record.quantity.input_tokens') as BIGINT), 0),
+        coalesce(try_cast(json_extract_string(json, '$.payload.event.record.quantity.cached_tokens') as BIGINT), 0),
+        0,
+        coalesce(try_cast(json_extract_string(json, '$.payload.event.record.quantity.output_tokens') as BIGINT), 0)
+    FROM lines
+    WHERE json_extract_string(json, '$.payload.event.kind') = 'goal_usage_attribution'
+      AND json_extract_string(json, '$.payload.event.record.usage_family') = 'provider'
+      AND json_extract_string(json, '$.payload.event.record.owner.owner_type') = 'reminder_child'
+      AND coalesce(json_extract_string(json, '$.payload.event.record.quantity.reported'), 'true') = 'true'
+      AND filename NOT LIKE '%/subagent/%'
+      AND json_extract_string(json, '$.payload.event.record.owner.owner_id')
+          NOT IN (SELECT path FROM muse_subagents)
 ),
 timed AS (
     SELECT calls.*, strftime(make_timestamp(recorded_us), '%Y-%m-%dT%H:%M:%S.%gZ') as ts,
@@ -1235,7 +1265,7 @@ SELECT
     cache_write::INT as cache_write_tokens,
     cached::INT as cache_read_tokens,
     (input + output)::BIGINT as total_tokens,
-    CASE WHEN filename LIKE '%/subagent/%' OR kind = 'automated_review_completed'
+    CASE WHEN filename LIKE '%/subagent/%' OR kind IN ('automated_review_completed', 'reminder')
          THEN 'subagent' ELSE 'interactive' END as execution_type,
     workspace as project_path,
     'exact' as token_count_type,
@@ -1912,6 +1942,7 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
                 # A subagent's log names no workspace; its session's log does, so that
                 # is read alongside without adding its rows.
                 _path_table(db, "muse_logs", paths)
+                _path_table(db, "muse_subagents", _muse_subagents(paths))
                 parts.append(builder(_sql_file_list([*paths, *_muse_parent_logs(paths)])))
                 continue
             if tool_name == "Gemini":
