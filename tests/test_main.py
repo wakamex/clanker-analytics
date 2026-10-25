@@ -512,6 +512,75 @@ class TestSourceLoaders(Case):
 
         assert self._agy_session_model(tmp_path, [served, mention, mention]) == "gemini-3.7-flash"
 
+    @staticmethod
+    def _protobuf(*fields):
+        """A protobuf message of (field, value) pairs: ints as varints, else bytes."""
+        def varint(value):
+            out = b""
+            while True:
+                byte, value = value & 0x7F, value >> 7
+                out += bytes([byte | (0x80 if value else 0)])
+                if not value:
+                    return out
+        out = b""
+        for field, value in fields:
+            if isinstance(value, int):
+                out += varint(field << 3) + varint(value)
+            else:
+                value = value.encode() if isinstance(value, str) else value
+                out += varint(field << 3 | 2) + varint(len(value)) + value
+        return out
+
+    def test_agy_counts_each_model_call_from_its_recorded_usage(self):
+        pb = self._protobuf
+        session = "11111111-2222-3333-4444-555555555555"
+        root = self.tmp_path / "antigravity-cli"
+        transcript = root / "brain" / session / ".system_generated" / "logs" / "transcript_full.jsonl"
+        transcript.parent.mkdir(parents=True)
+        # Four steps; the transcript alone would charge each response every earlier step.
+        transcript.write_text("".join(json.dumps({
+            "step_index": index, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+            "created_at": f"2026-10-20T12:00:0{index}Z", "content": "x" * 400_000,
+        }) + "\n" for index in range(4)))
+
+        def call(step, uncached, output, cached):
+            # As Antigravity records a call: usage in field 4 with uncached input in 2,
+            # output in 3 and cache reads in 5, and last_step_index among field 20's pairs.
+            return pb((1, pb((3, 1418),
+                             (4, pb((1, 1418), (2, uncached), (3, output), (5, cached), (6, 24))),
+                             (19, "gemini-4-argon"),
+                             (20, pb((1, "root_cascade_id"), (2, session))),
+                             (20, pb((1, "last_step_index"), (2, str(step)))))),
+                      (4, "a55925b3"))
+
+        (root / "conversations").mkdir()
+        database = sqlite3.connect(root / "conversations" / f"{session}.db")
+        database.execute("CREATE TABLE gen_metadata (idx integer, data blob, size integer)")
+        blobs = [call(1, 7586, 788, 16305), call(3, 4735, 728, 32638), b"no usage"]
+        database.executemany("INSERT INTO gen_metadata VALUES (?, ?, ?)",
+                             [(index, blob, len(blob)) for index, blob in enumerate(blobs)])
+        database.commit()
+        database.close()
+        metadata = self.tmp_path / "conversation_metadata.json"
+        metadata.write_text(json.dumps({"conversations": {"id": {"summary": {
+            "ID": session, "WorkspaceURIs": ["file:///code/concord"]}}}}))
+
+        db = duckdb.connect()
+        main_mod._load_agy_models(db, [transcript.as_posix()])
+        relation = db.sql(main_mod._agy_sql(
+            main_mod._sql_literal(transcript.as_posix()),
+            main_mod._sql_literal(metadata.as_posix()),
+            models_table=main_mod.AGY_MODELS_TABLE, usage_table=main_mod.AGY_USAGE_TABLE))
+        columns = [item[0] for item in relation.description]
+        rows = sorted(tuple(dict(zip(columns, row))[key] for key in (
+            "timestamp", "input_tokens", "cache_read_tokens", "output_tokens", "total_tokens",
+            "token_count_type", "project")) for row in relation.fetchall())
+
+        assert rows == [
+            ("2026-10-20T12:00:01.000Z", 7586, 16305, 788, 24679, "exact", "concord"),
+            ("2026-10-20T12:00:03.000Z", 4735, 32638, 728, 38101, "exact", "concord"),
+        ]
+
     def test_agy_estimates_cumulative_turns_and_classifies_tool_results(self):
         tmp_path = self.tmp_path
         session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

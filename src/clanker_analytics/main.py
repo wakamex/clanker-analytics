@@ -71,7 +71,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 29
+CACHE_SCHEMA_VERSION = 30
 
 AGY_METADATA_TOOL = "Agy metadata"
 # AOP 0.3.0 and later copies every result it writes here as <run_id>.json, so a run's
@@ -625,13 +625,82 @@ AGY_SELECTION_SETTING = re.compile(
 )
 
 
+AGY_USAGE_TABLE = "agy_generation_usage"
+
+
+def _protobuf_fields(data: bytes) -> list[tuple[int, int | bytes]]:
+    """The top-level (field, value) pairs of a protobuf message: varints as ints and
+    length-delimited fields as bytes. Fixed-width fields are skipped. A malformed
+    message gives the fields read before the error."""
+    fields: list[tuple[int, int | bytes]] = []
+    position = 0
+
+    def varint() -> int:
+        nonlocal position
+        value = shift = 0
+        while True:
+            byte = data[position]
+            position += 1
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if byte < 0x80:
+                return value
+
+    try:
+        while position < len(data):
+            key = varint()
+            field, wire = key >> 3, key & 7
+            if wire == 0:
+                fields.append((field, varint()))
+            elif wire == 2:
+                length = varint()
+                fields.append((field, data[position:position + length]))
+                position += length
+            elif wire in (1, 5):
+                position += 8 if wire == 1 else 4
+            else:
+                break
+    except IndexError:
+        pass
+    return fields
+
+
+def _agy_generation_usage(data: bytes) -> tuple[int, int, int, int] | None:
+    """A model call's step index, uncached input, cache reads and output from its
+    generation metadata, or None when it recorded no usage.
+
+    Field 1 holds the call: its field 4 is the usage Antigravity also prints for the step,
+    with uncached input in field 2, cache reads in field 5 and output including thinking
+    in field 3, and its field 20 entries are key and value pairs naming last_step_index.
+    """
+    call = next((value for field, value in _protobuf_fields(data)
+                 if field == 1 and isinstance(value, bytes)), None)
+    if call is None:
+        return None
+    usage = step = None
+    for field, value in _protobuf_fields(call):
+        if field == 4 and isinstance(value, bytes):
+            usage = {f: v for f, v in _protobuf_fields(value) if isinstance(v, int)}
+        elif field == 20 and isinstance(value, bytes):
+            entry = dict(_protobuf_fields(value))
+            if entry.get(1) == b"last_step_index" and isinstance(entry.get(2), bytes):
+                try:
+                    step = int(entry[2])
+                except ValueError:
+                    pass
+    if not usage or 2 not in usage:
+        return None
+    return step if step is not None else -1, usage.get(2, 0), usage.get(5, 0), usage.get(3, 0)
+
+
 def _agy_slug(display_name: str) -> str:
     """Antigravity's slug for a display name: "Gemini 3.5 Flash (High)" is gemini-3.5-flash-high."""
     return "-".join(display_name.lower().replace("(", "").replace(")", "").split())
 
 
 def _load_agy_models(db: duckdb.DuckDBPyConnection, transcript_paths: list[str]) -> None:
-    """Record each session's model from Antigravity's conversation database.
+    """Record each session's model, and each model call's usage, from Antigravity's
+    conversation database.
 
     Transcripts do not name the model; each model call's generation metadata in
     conversations/<session>.db does. A session's model is the selected model most of its
@@ -639,6 +708,7 @@ def _load_agy_models(db: duckdb.DuckDBPyConnection, transcript_paths: list[str])
     serving name most of its calls used.
     """
     rows = []
+    usage_rows = []
     for transcript in transcript_paths:
         path = Path(transcript)
         session = path.parents[2].name
@@ -653,6 +723,9 @@ def _load_agy_models(db: duckdb.DuckDBPyConnection, transcript_paths: list[str])
             try:
                 for (data,) in source.execute("SELECT data FROM gen_metadata ORDER BY idx"):
                     data = data or b""
+                    usage = _agy_generation_usage(data)
+                    if usage:
+                        usage_rows.append((session, *usage))
                     display = AGY_SELECTED_FIELD.search(data)
                     if display and display.group(1)[0] == len(display.group(2)):
                         name = _agy_slug(display.group(2).decode())
@@ -676,13 +749,21 @@ def _load_agy_models(db: duckdb.DuckDBPyConnection, transcript_paths: list[str])
     db.execute(f"CREATE OR REPLACE TEMP TABLE {AGY_MODELS_TABLE} (session VARCHAR, model VARCHAR)")
     if rows:
         db.executemany(f"INSERT INTO {AGY_MODELS_TABLE} VALUES (?, ?)", rows)
+    db.execute(f"""CREATE OR REPLACE TEMP TABLE {AGY_USAGE_TABLE} (session VARCHAR,
+                   step_index BIGINT, input BIGINT, cache_read BIGINT, output BIGINT)""")
+    if usage_rows:
+        db.executemany(f"INSERT INTO {AGY_USAGE_TABLE} VALUES (?, ?, ?, ?, ?)", usage_rows)
 
 
 def _agy_sql(source_expr: str, metadata_expr: str | None = None,
-             models_table: str | None = None) -> str:
-    """Load top-level Antigravity sessions and estimate processed model tokens.
+             models_table: str | None = None, usage_table: str | None = None) -> str:
+    """Load top-level Antigravity sessions with each model call's usage.
 
-    models_table maps sessions to models when transcripts do not name them.
+    models_table maps sessions to models when transcripts do not name them. usage_table
+    holds the exact usage of each call that the session's conversation database recorded;
+    a call is timed by the transcript step it ended on. A session without recorded usage
+    is estimated from its transcript, charging each response the whole transcript so far
+    as uncached input.
     """
     if metadata_expr is None:
         metadata_paths = _agy_metadata_paths()
@@ -722,6 +803,13 @@ metadata AS (
         f"conversation_models AS (SELECT session, model FROM {models_table}),"
         if models_table else
         "conversation_models AS (SELECT NULL::VARCHAR as session, NULL::VARCHAR as model WHERE false),"
+    )
+    usage_cte = (
+        f"generation_usage AS (SELECT * FROM {usage_table}),"
+        if usage_table else
+        """generation_usage AS (SELECT NULL::VARCHAR as session, NULL::BIGINT as step_index,
+               NULL::BIGINT as input, NULL::BIGINT as cache_read, NULL::BIGINT as output
+           WHERE false),"""
     )
 
     return f"""
@@ -787,6 +875,7 @@ events AS (
 ),
 {metadata_cte}
 {models_cte}
+{usage_cte}
 session_meta AS (
     SELECT
         filename,
@@ -844,6 +933,25 @@ turns AS (
         END::BIGINT as total_tokens
     FROM ordered
     WHERE type = 'PLANNER_RESPONSE'
+      AND filename NOT IN (SELECT filename FROM sessions
+                           WHERE session IN (SELECT session FROM generation_usage))
+    UNION ALL
+    SELECT
+        s.filename,
+        left(cast(step.created_at as VARCHAR), 10) as date,
+        {_utc_timestamp("step.created_at")} as timestamp,
+        true as is_exact,
+        u.input as input_tokens,
+        u.output as output_tokens,
+        u.cache_read as cache_read_tokens,
+        u.input + u.cache_read + u.output as total_tokens
+    FROM generation_usage u
+    JOIN sessions s USING (session)
+    ASOF LEFT JOIN (
+        SELECT filename, step_index, min(created_at) as created_at FROM events
+        WHERE step_index IS NOT NULL AND created_at IS NOT NULL GROUP BY ALL
+    ) step ON step.filename = s.filename AND u.step_index >= step.step_index
+    WHERE u.input + u.cache_read + u.output > 0
 ),
 retained_daily AS (
     SELECT
@@ -1815,7 +1923,8 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
                 continue
             if tool_name == "Agy":
                 _load_agy_models(db, paths)
-                parts.append(builder(_sql_file_list(paths), models_table=AGY_MODELS_TABLE))
+                parts.append(builder(_sql_file_list(paths), models_table=AGY_MODELS_TABLE,
+                                     usage_table=AGY_USAGE_TABLE))
                 continue
             parts.append(builder(_sql_file_list(paths)))
     return parts

@@ -240,8 +240,10 @@ roots. Compact copies, chunk mirrors, internal trajectories, duplicate events, a
 
 Antigravity transcripts do not name the model. Each session's model comes from its conversation database, `conversations/<session>.db`, whose generation metadata records every model call. Most records name the model the user selected, such as `Gemini 3.5 Flash (High)`, which is stored in Antigravity's slug form `gemini-3.5-flash-high`. Sessions whose records lack that name use the last model selection noted in the conversation, then the serving model name. Serving names can be aliases: `gemini-default` and `gemini-3-flash-a` both ran Gemini 3.5 Flash (High) in July and August 2026.
 
-When complete API usage metadata is retained for a model turn, those counters are reported exactly.
-Otherwise, Agy reports a processed-token estimate. Each completed `PLANNER_RESPONSE` is a model turn,
+The same generation metadata records each model call's usage, which Agy reports exactly: one row per call, with uncached input, cache reads and output including thinking, timed by the transcript step the call ended on. On one 2,524-call session this gives 386 million tokens, 95% of them cache reads, where the transcript estimate below gave over 5 billion uncached input tokens, because it charges every response the whole transcript so far while Antigravity keeps the context under its 256,000-token window and serves most of it from cache.
+
+When complete API usage metadata is retained in the transcript for a model turn, those counters are reported exactly.
+Otherwise, for sessions without a conversation database, Agy reports a processed-token estimate. Each completed `PLANNER_RESPONSE` is a model turn,
 its output is estimated from that response, and its input is estimated from the cumulative retained
 context preceding it. Tool results such as `RUN_COMMAND` and `VIEW_FILE` are input to a later model
 turn, not model output. `retained_tokens` counts the same retained text once so it is directly
