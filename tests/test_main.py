@@ -663,6 +663,61 @@ class TestSourceLoaders(Case):
         self.monkeypatch.delenv("GEMINI_CLI_HOME")
         assert main_mod._gemini_home() == Path(main_mod.HOME)
 
+    def test_muse_counts_each_model_call_once(self):
+        session = self.tmp_path / "muse" / "sessions" / "2026" / "10" / "25" / "01a1739f-session"
+        subagent = session / "subagent" / "01a1739f-child" / "session.jsonl"
+        subagent.parent.mkdir(parents=True)
+
+        def record(payload_type, payload, at=1792941172328640):
+            return json.dumps({"schema_version": 1, "stream": {"kind": "session", "id": "x"},
+                               "recorded_at": at, "payload_type": payload_type,
+                               "payload": payload}) + "\n"
+
+        def call(model, input_tokens, cached, output, kind="model_completed", **usage):
+            return record("runtime.session", {"kind": "run", "event": {
+                "kind": kind, "model": model,
+                "usage": {"input_tokens": input_tokens, "cached_tokens": cached,
+                          "cache_read_tokens": cached, "cache_write_tokens": 0,
+                          "output_tokens": output, "reasoning_tokens": 1, **usage}}})
+
+        # As Muse Code 1.4.12 writes them. Attribution records repeat each call's usage,
+        # and a review's usage is in the session log and again in approval-review/.
+        attribution = record("runtime.session", {"kind": "run", "event": {
+            "kind": "goal_usage_attribution", "record": {"usage_family": "provider",
+            "quantity": {"input_tokens": 34317, "cached_tokens": 0, "output_tokens": 151}}}})
+        (session / "session.jsonl").write_text(
+            record("runtime.session.metadata", {"kind": "metadata",
+                   "record": {"workspace_root": "/code/My-Project"}})
+            + attribution + call("muse-wonder-1.0", 34317, 0, 151)
+            + call("muse-wonder-1.0", 36017, 35828, 494)
+            + record("runtime.session", {"kind": "run", "event": {
+                "kind": "automated_review_completed",
+                "model": {"model_id": "muse-spark-1.3", "provider_id": "meta"},
+                "usage": {"input_tokens": 17740, "cached_input_tokens": 0,
+                          "output_tokens": 526, "total_tokens": 18266}}}))
+        subagent.write_text(attribution + call("muse-spark-1.3", 5083, 0, 814))
+        paths = [(session / "session.jsonl").as_posix(), subagent.as_posix()]
+        db = duckdb.connect()
+
+        for read in (paths, paths[1:]):
+            with self.subTest(read=len(read)):
+                main_mod._path_table(db, "muse_logs", read)
+                relation = db.sql(main_mod._muse_sql(main_mod._sql_file_list(
+                    [*read, *main_mod._muse_parent_logs(read)])))
+                columns = [item[0] for item in relation.description]
+                rows = sorted(tuple(dict(zip(columns, row))[key] for key in (
+                    "model", "execution_type", "input_tokens", "cache_read_tokens",
+                    "output_tokens", "total_tokens", "project", "session"))
+                    for row in relation.fetchall())
+                expected = [
+                    ("muse-spark-1.3", "subagent", 5083, 0, 814, 5897, "my-project", "01a1739f-session"),
+                    ("muse-spark-1.3", "subagent", 17740, 0, 526, 18266, "my-project", "01a1739f-session"),
+                    ("muse-wonder-1.0", "interactive", 189, 35828, 494, 36511, "my-project", "01a1739f-session"),
+                    ("muse-wonder-1.0", "interactive", 34317, 0, 151, 34468, "my-project", "01a1739f-session"),
+                ]
+                # A subagent log read alone still takes the session's project.
+                assert rows == (expected if len(read) == 2 else expected[:1])
+
     def test_gemini_timestamp_schema_shape_is_cast_before_slicing(self):
         tmp_path = self.tmp_path
         chat = tmp_path / "tmp" / ("a" * 64) / "chats" / "session.json"

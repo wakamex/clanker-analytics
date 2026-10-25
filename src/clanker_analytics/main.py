@@ -82,6 +82,9 @@ AOP_RESULT_TOOL = "AOP result"
 ZCODE_TOOL = "Zcode"
 ZCODE_USAGE_TABLE = "zcode_model_usage"
 
+MUSE_TOOL = "Muse"
+
+
 def _gemini_home() -> Path:
     return Path(os.environ.get("GEMINI_CLI_HOME") or HOME).expanduser()
 
@@ -119,6 +122,9 @@ SOURCE_TREES = [
      "conversation_metadata.json"),
     (AOP_RESULT_TOOL, AOP_RESULTS, ""),
     (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
+    # A session's log and each subagent's, under sessions/YYYY/MM/DD/<session>/.
+    (MUSE_TOOL, Path(os.environ.get("XDG_DATA_HOME") or Path(HOME) / ".local" / "share")
+     / "muse" / "sessions", "session.jsonl"),
 ]
 
 TOKEN_SCHEMA = """
@@ -978,6 +984,7 @@ SELECT
         WHEN 'hermes' THEN 'Hermes'
         WHEN 'opencode' THEN 'OpenCode'
         WHEN 'zcode' THEN 'Zcode'
+        WHEN 'muse' THEN 'Muse'
         ELSE coalesce(nullif(provider, ''), 'AOP')
     END as tool,
     lower(regexp_extract(owner_path, '([^/]+)$', 1)) as project,
@@ -1061,6 +1068,86 @@ def _load_zcode_usage(db: duckdb.DuckDBPyConnection, paths: list[str]) -> None:
         )
 
 
+def _muse_parent_logs(paths: list[str]) -> list[str]:
+    """The session logs of the subagent logs in paths, which name the session's workspace."""
+    parents = {path.split("/subagent/")[0] + "/session.jsonl" for path in paths if "/subagent/" in path}
+    return sorted(parent for parent in parents if parent not in paths and os.path.exists(parent))
+
+
+def _muse_sql(source_expr: str) -> str:
+    """Muse Code usage: one row per model call. A call records a model_completed event in
+    its session's or subagent's log; an automated approval review records its usage once,
+    as automated_review_completed in the session's log. Input counts include cached input."""
+    return f"""
+WITH lines AS (
+    SELECT replace(filename, '\\', '/') as filename, json,
+           regexp_extract(replace(filename, '\\', '/'),
+                          '/sessions/[0-9]{{4}}/[0-9]{{2}}/[0-9]{{2}}/([^/]+)/', 1) as session
+    FROM read_json_objects({source_expr}, format='newline_delimited', filename=true,
+                           ignore_errors=true, maximum_object_size=67108864)
+),
+workspaces AS (
+    SELECT session, max(json_extract_string(json, '$.payload.record.workspace_root')) as workspace
+    FROM lines GROUP BY session
+),
+calls AS (
+    SELECT filename, session,
+        json_extract_string(json, '$.payload.event.kind') as kind,
+        -- A model call names its model; a review records it as an object with model_id.
+        coalesce(json_extract_string(json, '$.payload.event.model.model_id'),
+                 json_extract_string(json, '$.payload.event.model')) as model,
+        try_cast(json_extract_string(json, '$.recorded_at') as BIGINT) as recorded_us,
+        coalesce(try_cast(json_extract_string(json, '$.payload.event.usage.input_tokens') as BIGINT), 0) as input,
+        coalesce(try_cast(json_extract_string(json, '$.payload.event.usage.cached_tokens') as BIGINT),
+                 try_cast(json_extract_string(json, '$.payload.event.usage.cached_input_tokens') as BIGINT),
+                 0) as cached,
+        coalesce(try_cast(json_extract_string(json, '$.payload.event.usage.cache_write_tokens') as BIGINT), 0)
+            as cache_write,
+        coalesce(try_cast(json_extract_string(json, '$.payload.event.usage.output_tokens') as BIGINT), 0) as output
+    FROM lines
+    WHERE json_extract_string(json, '$.payload_type') = 'runtime.session'
+      AND (json_extract_string(json, '$.payload.event.kind') = 'model_completed'
+           OR (json_extract_string(json, '$.payload.event.kind') = 'automated_review_completed'
+               AND filename NOT LIKE '%/subagent/%'))
+      AND json_extract(json, '$.payload.event.usage') IS NOT NULL
+),
+timed AS (
+    SELECT calls.*, strftime(make_timestamp(recorded_us), '%Y-%m-%dT%H:%M:%S.%gZ') as ts,
+           workspace
+    FROM calls LEFT JOIN workspaces USING (session)
+)
+SELECT
+    'Muse' as tool,
+    lower(coalesce(regexp_extract(workspace, '([^/]+)/?$', 1), 'muse')) as project,
+    session,
+    left(ts, 10) as date,
+    coalesce(model, '') as model,
+    greatest(input - cached - cache_write, 0)::INT as input_tokens,
+    output::INT as output_tokens,
+    cache_write::INT as cache_write_tokens,
+    cached::INT as cache_read_tokens,
+    (input + output)::BIGINT as total_tokens,
+    CASE WHEN filename LIKE '%/subagent/%' OR kind = 'automated_review_completed'
+         THEN 'subagent' ELSE 'interactive' END as execution_type,
+    workspace as project_path,
+    'exact' as token_count_type,
+    1 as turn_count,
+    NULL::BIGINT as retained_tokens,
+    'native' as source_kind,
+    NULL::DOUBLE as cost_usd,
+    filename as source_file,
+    ts as timestamp,
+    '' as rate_mode,
+    NULL::DOUBLE as quota_used_pct,
+    NULL::BIGINT as quota_resets_at,
+    NULL::INTEGER as quota_window_minutes,
+    NULL::VARCHAR as quota_limit_id
+FROM timed
+WHERE input + output > 0
+  AND filename IN (SELECT path FROM muse_logs)
+"""
+
+
 def _zcode_sql(source_expr: str) -> str:
     """Normalize requests that _load_zcode_usage copied from the source databases.
 
@@ -1132,6 +1219,7 @@ SOURCES = {
     "agy": ("Agy", _agy_sql),
     "aop": (AOP_RESULT_TOOL, _aop_sql),
     "zcode": (ZCODE_TOOL, _zcode_sql),
+    "muse": (MUSE_TOOL, _muse_sql),
 }
 
 # API-equivalent cost of each row, priced by model-prices when the cache is built. Rows
@@ -1712,6 +1800,12 @@ def _build_source_sql(db: duckdb.DuckDBPyConnection,
         if paths:
             if tool_name == ZCODE_TOOL:
                 _load_zcode_usage(db, paths)
+            if tool_name == MUSE_TOOL:
+                # A subagent's log names no workspace; its session's log does, so that
+                # is read alongside without adding its rows.
+                _path_table(db, "muse_logs", paths)
+                parts.append(builder(_sql_file_list([*paths, *_muse_parent_logs(paths)])))
+                continue
             if tool_name == "Gemini":
                 # Chats in the older single-document format and in JSON Lines.
                 for builder, chats in ((_gemini_sql, [p for p in paths if not p.endswith(".jsonl")]),

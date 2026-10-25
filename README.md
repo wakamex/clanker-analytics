@@ -2,7 +2,7 @@
 
 Token usage analytics for AI coding tools. It reads local session logs and normalized runs from [Agent Orchestration Process (AOP)](https://github.com/wakamex/agent-orchestration-process), a tool for running bounded jobs across multiple agent CLI harnesses, then shows per-project breakdowns using DuckDB.
 
-Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, Zcode, and every harness recorded by AOP.
+Supports Claude Code, Codex, Gemini CLI, Agy / Antigravity, Zcode, Muse Code, and every harness recorded by AOP.
 
 ![clanker-analytics chart](share.png)
 ![clanker-analytics table](table.png)
@@ -30,7 +30,7 @@ Each view is a command. Without one, `clanker-analytics` runs `table`. Run `clan
 clanker-analytics                          # table of the last 7 days by project
 clanker-analytics table --since 24h        # last 24 hours (also: 7d, 2w, 2026-03-01)
 clanker-analytics table --by date          # grouped by date (also: model, session, execution)
-clanker-analytics table --tool claude      # Claude Code only (also: codex, gemini, agy, aop, zcode)
+clanker-analytics table --tool claude      # Claude Code only (also: codex, gemini, agy, aop, zcode, muse)
 clanker-analytics chart                    # PNG bar chart of cost by tool per day over the last 7 days
 clanker-analytics chart -o month.png       # save it elsewhere (also on share and regime)
 clanker-analytics share                    # chart + copy to clipboard + open X
@@ -60,7 +60,7 @@ The option-style form of version 0.4, such as `--table`, `--record-quota` or `--
 ## How it works
 
 DuckDB reads session logs directly from `~/.claude/projects/`, `~/.codex/sessions/`, `~/.codex/archived_sessions/`, and
-`~/.gemini/tmp/`, and per-request Zcode usage from `~/.zcode/cli/db/db.sqlite`. Gemini CLI chats are read from `${GEMINI_CLI_HOME:-~}/.gemini/tmp/*/chats/`, both the single-document `.json` chats it wrote until April 2026 and the JSON Lines `.jsonl` chats it writes since; a message Gemini CLI rewrites is appended again with the same id, and only its last line counts. Codex moves a conversation's log to `archived_sessions` when it is archived; the log keeps its file name, so a log read before and after the move is counted once. Claude Code transcripts are also read from the `projects/` directory of every other Claude Code home: `CLAUDE_CONFIG_DIR` when it is set, and each directory added to clanker-usage with `clanker-usage claude configure --config-dir`. It also reads AOP's archive of run results, `$XDG_STATE_HOME/aop/results/*.json` (default `~/.local/state/aop/results/`), which AOP 0.3.0 and later writes with every result, so a run's usage is found even after the project holding its `.aop` is deleted. Each AOP run is attributed to the directory that owns the `.aop` named in its `state_root`. Run `aop migrate-results` once to archive results written before 0.3.0. Results
+`~/.gemini/tmp/`, and per-request Zcode usage from `~/.zcode/cli/db/db.sqlite`. Gemini CLI chats are read from `${GEMINI_CLI_HOME:-~}/.gemini/tmp/*/chats/`, both the single-document `.json` chats it wrote until April 2026 and the JSON Lines `.jsonl` chats it writes since; a message Gemini CLI rewrites is appended again with the same id, and only its last line counts. Muse Code usage is read from `${XDG_DATA_HOME:-~/.local/share}/muse/sessions/YYYY/MM/DD/<session>/`, from the session's `session.jsonl` and each subagent's `subagent/<id>/session.jsonl`: each model call records a `model_completed` event with its model and usage, and an automated approval review records its usage once, as `automated_review_completed` in the session's log. A session's project is its `workspace_root`. Codex moves a conversation's log to `archived_sessions` when it is archived; the log keeps its file name, so a log read before and after the move is counted once. Claude Code transcripts are also read from the `projects/` directory of every other Claude Code home: `CLAUDE_CONFIG_DIR` when it is set, and each directory added to clanker-usage with `clanker-usage claude configure --config-dir`. It also reads AOP's archive of run results, `$XDG_STATE_HOME/aop/results/*.json` (default `~/.local/state/aop/results/`), which AOP 0.3.0 and later writes with every result, so a run's usage is found even after the project holding its `.aop` is deleted. Each AOP run is attributed to the directory that owns the `.aop` named in its `state_root`. Run `aop migrate-results` once to archive results written before 0.3.0. Results
 are cached to `~/.cache/clanker-analytics/tokens.parquet` (ZSTD compressed) with a per-file manifest
 at `~/.cache/clanker-analytics/tokens-meta.json`.
 
