@@ -36,9 +36,19 @@ PLAN_PROVIDERS = {
 }
 
 
+# Raised when the rules in price_tokens change, so cached prices are recomputed.
+PRICING_RULES = 2
+
+
 def pricing_basis() -> str:
-    """Identify the price data, so cached prices are recomputed when it changes."""
+    """Identify the price data."""
     return model_prices.pricing_basis()
+
+
+def cache_pricing_key() -> str:
+    """Identify the price data and pricing rules, so cached prices are recomputed when
+    either changes."""
+    return f"{pricing_basis()}; rules {PRICING_RULES}"
 
 
 def refresh_prices() -> None:
@@ -198,18 +208,29 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
                 {", ".join(f"'{part}': 'DOUBLE'" for part in (*COST_PARTS, *PROMPT_BOUNDS))}}}) prices
             WHERE tokens.rowid = prices.id
         """)
+    # An AOP run's recorded cost prices each of its model calls at that call's own model,
+    # which a result's total usage under one model cannot reproduce, so it is the run's
+    # cost. Its parts and its cost at today's prices are model-prices' own, scaled to it.
+    scale = "cost_usd / api_cost_usd"
+    recorded = "source_kind = 'aop' AND cost_usd IS NOT NULL"
     db.execute(f"""
         UPDATE tokens SET
             pricing = CASE
+                WHEN {recorded} THEN 'aop'
                 WHEN api_cost_usd IS NOT NULL AND model_assumed THEN 'assumed model'
                 WHEN api_cost_usd IS NOT NULL AND estimated_from IS NOT NULL THEN 'estimated'
                 WHEN api_cost_usd IS NOT NULL THEN 'model-prices'
-                WHEN source_kind = 'aop' AND cost_usd IS NOT NULL THEN 'aop'
                 ELSE 'unpriced'
             END,
-            api_cost_usd = coalesce(
-                api_cost_usd, CASE WHEN source_kind = 'aop' THEN cost_usd END),
-            current_api_cost_usd = coalesce(
-                current_api_cost_usd, CASE WHEN source_kind = 'aop' THEN cost_usd END)
+            api_cost_usd = CASE WHEN {recorded} THEN cost_usd ELSE api_cost_usd END,
+            current_api_cost_usd = CASE
+                WHEN {recorded} AND api_cost_usd > 0 THEN current_api_cost_usd * {scale}
+                WHEN {recorded} THEN cost_usd
+                ELSE current_api_cost_usd END,
+            estimated_from = CASE WHEN {recorded} THEN NULL ELSE estimated_from END,
+            {", ".join(f"""api_{part}_usd = CASE
+                WHEN {recorded} AND api_cost_usd > 0 THEN api_{part}_usd * {scale}
+                WHEN {recorded} THEN NULL ELSE api_{part}_usd END"""
+                       for part in (*COST_PARTS, *PROMPT_BOUNDS))}
         WHERE {selected}
     """)

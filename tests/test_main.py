@@ -960,6 +960,7 @@ class TestAOPSourceLoader(Case):
             cache_write_1h_input_tokens=300,
             output_tokens=100,
             reasoning_output_tokens=0,
+            cost_usd=None,
         )
 
         db = self._load_aop([result_path])
@@ -1552,6 +1553,29 @@ class TestCostCalculation(Case):
         assert db.sql(f"SELECT sum({COST_PER_ROW}), any_value(pricing) FROM tokens").fetchone() == (
             0, "unpriced"
         )
+
+    def test_aop_runs_are_priced_at_their_recorded_cost(self):
+        # A Muse run's usage covers calls on two models; AOP priced each call at its own.
+        db = _make_db()
+        db.execute("""
+            INSERT INTO tokens (tool, date, timestamp, model, input_tokens, output_tokens,
+                                cache_write_tokens, cache_read_tokens, total_tokens,
+                                source_kind, cost_usd)
+            VALUES ('Muse', '2026-10-25', '2026-10-25T12:00:00Z', 'muse-wonder-1.0',
+                    49747, 300, 0, 0, 50047, 'aop', 0.14268),
+                   ('Muse', '2026-10-25', '2026-10-25T12:00:00Z', 'muse-wonder-1.0',
+                    49747, 300, 0, 0, 50047, 'aop', NULL)
+        """)
+        price_tokens(db, all_rows=False)
+
+        recorded, repriced = db.sql("""
+            SELECT api_cost_usd, current_api_cost_usd, api_input_usd + api_output_usd, pricing
+            FROM tokens ORDER BY cost_usd NULLS LAST
+        """).fetchall()
+        assert recorded[0] == approx(0.14268) and recorded[3] == "aop"
+        # Today's price and the parts follow model-prices, scaled to the recorded cost.
+        assert recorded[1] == approx(0.14268) and recorded[2] == approx(0.14268)
+        assert repriced[0] > recorded[0] and repriced[3] == "model-prices"
 
     def test_aop_runs_of_unknown_models_keep_their_recorded_cost(self):
         db = _make_db()

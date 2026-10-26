@@ -265,7 +265,7 @@ Prices are computed once per row when the cache is built, into `api_cost_usd` (r
 
 - `model-prices`: priced from the model's API price history.
 - `assumed model`: an AOP run that recorded no model and has no native log of its own. It is priced as the model its tool ran most that day.
-- `aop`: an AOP run whose model model-prices cannot price, which keeps the API-equivalent cost AOP recorded.
+- `aop`: an AOP run that recorded its cost, which is used as the run's cost. AOP prices each model call at that call's own model, such as a Muse run's main calls at the run's model and its reminder and subagent calls at `muse-spark-1.3`, which the run's total usage under one model cannot reproduce. The run's cost at today's prices and its cost by token type are model-prices' own, scaled to the recorded cost. An AOP run without a recorded cost is priced from its usage like any other row.
 - `estimated`: a model sold with no per-token price, such as Muse Wonder Full, which Meta sells only in Muse Code subscriptions, priced at the rates model-prices estimates for it. The `estimated_from` column names the model whose rates stood in, such as `meta/muse-wonder-1.0`, and `quota-history` and `value` flag such periods `estimated_pricing`. AOP prices the same runs the same way.
 - `unpriced`: no price is known, such as Codex's internal `codex-auto-review`. These rows count as zero in cost totals.
 

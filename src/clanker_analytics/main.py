@@ -24,7 +24,8 @@ from typing import Iterable
 import duckdb
 
 from clanker_analytics.pricing import (
-    configured_plans, normalize_plan, plan_choice, plan_price, price_tokens, pricing_basis,
+    cache_pricing_key, configured_plans, normalize_plan, plan_choice, plan_price, price_tokens,
+    pricing_basis,
     refresh_prices,
 )
 
@@ -1860,7 +1861,7 @@ def _write_cache_meta(files: dict[str, SourceSnapshot],
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": CACHE_SCHEMA_VERSION,
-        "pricing_basis": pricing_basis(),
+        "pricing_basis": cache_pricing_key(),
         "files": {path: meta.to_json() for path, meta in sorted(files.items())},
         "positions": {path: position.to_json() for path, position in sorted(positions.items())},
         "missing": sorted(missing),
@@ -2373,7 +2374,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     if CACHE_FILE.exists() and meta and meta[0] == CACHE_SCHEMA_VERSION:
         _, cached_files, cached_basis, _, _ = meta
         # Price data changed since the cache was written: reprice every row.
-        reprice = cached_basis != pricing_basis()
+        reprice = cached_basis != cache_pricing_key()
         changed = sorted(
             path for path, snapshot in files.items()
             if cached_files.get(path) != snapshot
