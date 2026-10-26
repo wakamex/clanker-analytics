@@ -23,6 +23,7 @@ TOOL_PROVIDERS = {
     "DeepSeek Harness": "deepseek",
     "Gemini": "google",
     "Grok": "xai",
+    "Muse": "meta",
     "Zcode": "zai",
 }
 
@@ -117,11 +118,15 @@ PROMPT_BOUNDS = ("prompt_uncached", "prompt_read")
 
 
 def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
-    """Yield (rowid, cost when run, cost at today's prices, the cost when run split into
-    COST_PARTS, then PROMPT_BOUNDS) for each fetched row."""
+    """Yield (rowid, cost when run, cost at today's prices, the model whose rates stood in
+    for an estimated price, the cost when run split into COST_PARTS, then PROMPT_BOUNDS)
+    for each fetched row.
+
+    A model sold with no per-token price, such as Muse Wonder Full, which Meta sells only
+    in Muse Code subscriptions, is priced at the rates model-prices estimates for it."""
     for rowid, tool, model, timestamp, date, uncached, output, written, read, written_1h in rows:
         at = timestamp or date
-        historical = current = None
+        historical = current = estimated_from = None
         parts: tuple = (None,) * (len(COST_PARTS) + len(PROMPT_BOUNDS))
         if model and at:
             # cache_write_tokens counts both cache lifetimes; the one-hour part is priced apart.
@@ -132,8 +137,10 @@ def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
                 "cache_write_1h_tokens": written_1h, "cache_read_tokens": read or 0,
             }
             try:
-                found = model_prices.rates(model, provider=TOOL_PROVIDERS.get(tool), at=at)
+                found = model_prices.rates(model, provider=TOOL_PROVIDERS.get(tool), at=at,
+                                           estimate=True)
                 if found is not None:
+                    estimated_from = found.estimated_from
                     breakdown = found.breakdown(**usage)
                     historical = breakdown.total
                     prompt = sum(usage[key] for key in (
@@ -143,10 +150,10 @@ def _price_rows(rows: list[tuple], today: datetime) -> Iterator[tuple]:
                              found.breakdown(input_tokens=prompt).input,
                              found.breakdown(cache_read_tokens=prompt).cache_read)
                 current = model_prices.cost(model, provider=TOOL_PROVIDERS.get(tool),
-                                          at=at, prices_at=today, **usage)
+                                          at=at, prices_at=today, estimate=True, **usage)
             except ValueError:
                 pass
-        yield rowid, historical, current, *parts
+        yield rowid, historical, current, estimated_from, *parts
 
 
 def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
@@ -157,7 +164,8 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
     """
     columns = {row[0] for row in db.sql("DESCRIBE tokens").fetchall()}
     for column, kind in (("api_cost_usd", "DOUBLE"), ("current_api_cost_usd", "DOUBLE"),
-                         ("pricing", "VARCHAR"), ("cache_write_1h_tokens", "INT"),
+                         ("pricing", "VARCHAR"), ("estimated_from", "VARCHAR"),
+                         ("cache_write_1h_tokens", "INT"),
                          ("model_assumed", "BOOLEAN"),
                          *((f"api_{part}_usd", "DOUBLE")
                            for part in (*COST_PARTS, *PROMPT_BOUNDS))):
@@ -180,11 +188,13 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
         db.execute(f"""
             UPDATE tokens SET api_cost_usd = prices.historical,
                               current_api_cost_usd = prices.current,
+                              estimated_from = prices.estimated_from,
                               {", ".join(f"api_{part}_usd = prices.{part}"
                                          for part in (*COST_PARTS, *PROMPT_BOUNDS))}
             FROM read_csv('{path.as_posix()}', header = false, auto_detect = false,
                           delim = ',', columns = {{
                 'id': 'BIGINT', 'historical': 'DOUBLE', 'current': 'DOUBLE',
+                'estimated_from': 'VARCHAR',
                 {", ".join(f"'{part}': 'DOUBLE'" for part in (*COST_PARTS, *PROMPT_BOUNDS))}}}) prices
             WHERE tokens.rowid = prices.id
         """)
@@ -192,6 +202,7 @@ def price_tokens(db: duckdb.DuckDBPyConnection, all_rows: bool) -> None:
         UPDATE tokens SET
             pricing = CASE
                 WHEN api_cost_usd IS NOT NULL AND model_assumed THEN 'assumed model'
+                WHEN api_cost_usd IS NOT NULL AND estimated_from IS NOT NULL THEN 'estimated'
                 WHEN api_cost_usd IS NOT NULL THEN 'model-prices'
                 WHEN source_kind = 'aop' AND cost_usd IS NOT NULL THEN 'aop'
                 ELSE 'unpriced'

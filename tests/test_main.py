@@ -1559,13 +1559,29 @@ class TestCostCalculation(Case):
             INSERT INTO tokens (tool, date, model, input_tokens, output_tokens,
                                 cache_write_tokens, cache_read_tokens, total_tokens,
                                 source_kind, cost_usd)
-            VALUES ('Devin', '2026-09-01', 'swe-2-medium', 10, 1, 0, 0, 11, 'aop', 0.5)
+            VALUES ('Devin', '2026-09-01', 'no-such-model', 10, 1, 0, 0, 11, 'aop', 0.5)
         """)
         price_tokens(db, all_rows=False)
 
         assert db.sql("SELECT api_cost_usd, current_api_cost_usd, pricing FROM tokens").fetchone() == (
             0.5, 0.5, "aop"
         )
+
+    def test_models_without_a_per_token_price_are_estimated_and_labelled(self):
+        db = _make_db()
+        db.execute("""
+            INSERT INTO tokens (tool, date, model, input_tokens, output_tokens,
+                                cache_write_tokens, cache_read_tokens, total_tokens, source_kind)
+            VALUES ('Muse', '2026-10-26', 'muse-wonder-full-1.0', 1000000, 0, 0, 0, 1000000, 'native'),
+                   ('Muse', '2026-10-26', 'muse-wonder-1.0', 1000000, 0, 0, 0, 1000000, 'native')
+        """)
+        price_tokens(db, all_rows=False)
+
+        rows = db.sql("SELECT model, api_cost_usd, pricing, estimated_from FROM tokens ORDER BY model").fetchall()
+        # Muse Wonder Full is sold only in Muse Code subscriptions; model-prices prices it at
+        # Muse Wonder's rates, $4 per million input tokens.
+        assert rows == [("muse-wonder-1.0", approx(4.0), "model-prices", None),
+                        ("muse-wonder-full-1.0", approx(4.0), "estimated", "meta/muse-wonder-1.0")]
 
     def test_null_cost_on_empty(self):
         assert self._cost() is None

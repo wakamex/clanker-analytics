@@ -1079,6 +1079,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             count(*) FILTER (WHERE t.pricing = 'unpriced' AND t.total_tokens > 0)
                 as unpriced_rows,
             count(*) FILTER (WHERE t.pricing = 'aop') as aop_priced_rows,
+            count(*) FILTER (WHERE t.pricing = 'estimated') as estimated_rows,
             coalesce(sum(t.input_tokens), 0)::BIGINT as input_tokens,
             coalesce(sum(t.output_tokens), 0)::BIGINT as output_tokens,
             coalesce(sum(t.cache_write_tokens), 0)::BIGINT as cache_write_tokens,
@@ -1151,6 +1152,8 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
                 pricing = "unpriced"
             elif row["aop_priced_rows"]:
                 pricing = "aop_recorded"
+            elif row["estimated_rows"]:
+                pricing = "estimated"
             else:
                 pricing = "model-prices"
             period["model_mix"].append({
@@ -1185,6 +1188,8 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
             pricing_flags.append("unpriced_models")
         if any(item["pricing"] == "aop_recorded" for item in period["model_mix"]):
             pricing_flags.append("aop_recorded_pricing")
+        if any(item["pricing"] == "estimated" for item in period["model_mix"]):
+            pricing_flags.append("estimated_pricing")
         if any(item["rate_mode"] != "default" for item in period["model_mix"]):
             pricing_flags.append("unsupported_rate_mode")
         period["pricing_flags"] = pricing_flags
