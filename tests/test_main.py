@@ -1695,6 +1695,10 @@ class TestPlanDetection(Case):
             ("gemini", "g1-pro-tier", "Gemini", ("pro", 19.99)),
             # Google AI Ultra has two tiers that the plan name cannot tell apart.
             ("gemini", "g1-ultra-tier", "Gemini", ("ultra", 0)),
+            # As clanker-usage names Google plans, with the tier id: $100 Ultra is ultra_100.
+            ("gemini", "Google AI Ultra (g1-ultra-lite-tier)", "Gemini", ("ultra_100", 99.99)),
+            ("agy", "Google AI Ultra (g1-ultra-lite-tier)", "Gemini", ("ultra_100", 99.99)),
+            ("agy", "Google AI Ultra", "Gemini", ("Google AI Ultra", 0)),
             ("zcode", "lite", "Zcode", ("lite", 18)),
         ]:
             with self.subTest(provider=provider, plan=plan):

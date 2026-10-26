@@ -6,6 +6,7 @@ import csv
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import tempfile
 import tomllib
 from typing import Iterator
@@ -52,11 +53,21 @@ CONFIG_PATH = (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
                / "clanker-analytics" / "config.toml")
 
 
+# Google's plan tier ids. Google names both Ultra tiers "Google AI Ultra"; only the id tells
+# them apart. g1-ultra-lite-tier is the $100 tier. g1-ultra-tier, which may be the $200
+# tier, has not been seen from a live account, so it stays the unpriced "ultra".
+GOOGLE_TIERS = {"g1-pro-tier": "pro", "g1-ultra-lite-tier": "ultra_100", "g1-ultra-tier": "ultra"}
+
+
 def normalize_plan(plan: str) -> str:
-    """A usage package's plan name as the model-prices plan id."""
-    return (plan.replace("default_claude_", "")
-                .replace("g1-pro-tier", "pro")
-                .replace("g1-ultra-tier", "ultra"))
+    """A usage package's plan name as the model-prices plan id. Google plans are reported
+    as "Google AI Ultra (g1-ultra-lite-tier)", the name followed by the tier id."""
+    tier = re.fullmatch(r".*\((g1-[a-z-]+)\)", plan.strip())
+    if tier and tier.group(1) in GOOGLE_TIERS:
+        return GOOGLE_TIERS[tier.group(1)]
+    if plan in GOOGLE_TIERS:
+        return GOOGLE_TIERS[plan]
+    return plan.replace("default_claude_", "")
 
 
 def plan_price(tool: str, plan: str, at: datetime | str | None = None) -> float:

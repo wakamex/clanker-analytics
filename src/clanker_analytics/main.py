@@ -49,11 +49,14 @@ def detect_plans() -> dict[str, tuple[str, float]]:
         plan = normalize_plan(data["plan"])
         return tool, (plan, plan_price(tool, plan))
 
-    with ThreadPoolExecutor(max_workers=len(cmds)) as executor:
+    with ThreadPoolExecutor(max_workers=len(cmds) + 1) as executor:
         futures = [executor.submit(fetch_plan, tool, cmd) for tool, cmd in cmds.items()]
+        # Antigravity reports the same Google AI plan, which covers a Gemini CLI that signs
+        # in with an API key and so reports none.
+        futures.append(executor.submit(fetch_plan, "Gemini", "agy"))
         for future in as_completed(futures):
             tool, result = future.result()
-            if result is not None:
+            if result is not None and (tool not in plans or not plans[tool][1]):
                 plans[tool] = result
 
     return plans
