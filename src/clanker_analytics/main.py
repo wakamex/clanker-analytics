@@ -106,26 +106,33 @@ def _claude_config_dirs() -> list[Path]:
     return list(homes.values())[1:]
 
 
-SOURCE_TREES = [
-    ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
-    *(("Claude Code", home / "projects", "*.jsonl") for home in _claude_config_dirs()),
-    ("Codex", Path(HOME) / ".codex" / "sessions", "*.jsonl"),
-    # Codex moves a conversation's log here when it is archived.
-    ("Codex", Path(HOME) / ".codex" / "archived_sessions", "*.jsonl"),
-    # Gemini CLI keeps its home in GEMINI_CLI_HOME when set, and writes chats as JSON Lines
-    # since April 2026, after a single JSON document each before.
-    ("Gemini", _gemini_home() / ".gemini" / "tmp", "chats/*.json"),
-    ("Gemini", _gemini_home() / ".gemini" / "tmp", "chats/*.jsonl"),
-    ("Agy", Path(HOME) / ".gemini" / "antigravity-cli" / "brain",
-     "*/.system_generated/logs/transcript_full.jsonl"),
-    (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
-     "conversation_metadata.json"),
-    (AOP_RESULT_TOOL, AOP_RESULTS, ""),
-    (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
-    # A session's log and each subagent's, under sessions/YYYY/MM/DD/<session>/.
-    (MUSE_TOOL, Path(os.environ.get("XDG_DATA_HOME") or Path(HOME) / ".local" / "share")
-     / "muse" / "sessions", "session.jsonl"),
-]
+def _home_trees() -> list[tuple[str, Path, str]]:
+    """Each source's (tool, directory, glob) under this machine's home, following the
+    variables each harness resolves its home with."""
+    codex = Path(os.environ.get("CODEX_HOME") or Path(HOME) / ".codex").expanduser()
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path(HOME) / ".local" / "share").expanduser()
+    return [
+        ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
+        *(("Claude Code", home / "projects", "*.jsonl") for home in _claude_config_dirs()),
+        ("Codex", codex / "sessions", "*.jsonl"),
+        # Codex moves a conversation's log here when it is archived.
+        ("Codex", codex / "archived_sessions", "*.jsonl"),
+        # Gemini CLI keeps its home in GEMINI_CLI_HOME when set, and writes chats as JSON
+        # Lines since April 2026, after a single JSON document each before.
+        ("Gemini", _gemini_home() / ".gemini" / "tmp", "chats/*.json"),
+        ("Gemini", _gemini_home() / ".gemini" / "tmp", "chats/*.jsonl"),
+        ("Agy", Path(HOME) / ".gemini" / "antigravity-cli" / "brain",
+         "*/.system_generated/logs/transcript_full.jsonl"),
+        (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
+         "conversation_metadata.json"),
+        (AOP_RESULT_TOOL, AOP_RESULTS, ""),
+        (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
+        # A session's log and each subagent's, under sessions/YYYY/MM/DD/<session>/.
+        (MUSE_TOOL, data / "muse" / "sessions", "session.jsonl"),
+    ]
+
+
+SOURCE_TREES = _home_trees()
 
 TOKEN_SCHEMA = """
     tool VARCHAR,
