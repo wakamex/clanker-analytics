@@ -1948,10 +1948,10 @@ def _codex_tokens(timestamp, total, last=None):
     return _codex_line(timestamp, "event_msg", {"type": "token_count", "info": info})
 
 
-def _claude_line(timestamp, output):
+def _claude_line(timestamp, output, message_id=None):
     return json.dumps({
         "type": "assistant", "timestamp": timestamp, "sessionId": "s1", "cwd": "/code/alpha",
-        "message": {"model": "claude-opus-4-6", "usage": {
+        "message": {"id": message_id or f"msg_{timestamp}", "model": "claude-opus-4-6", "usage": {
             "input_tokens": 5, "output_tokens": output, "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": 100}},
     }) + "\n"
@@ -2046,6 +2046,31 @@ class TestAppendOnlyLogs(Case):
         assert len(self.load()[0]) == 2
         assert len(self.load(refresh=True)[0]) == 2
 
+    def test_each_claude_response_counts_once(self):
+        # A response written as three content-block lines whose output grows, then a second
+        # response, and a fork that copies the first response into its own transcript.
+        fork = self.claude.with_name("fork.jsonl")
+        self.claude.write_text(_claude_line("2026-10-08T10:00:01Z", 6, "msg_a")
+                               + _claude_line("2026-10-08T10:00:02Z", 6, "msg_a")
+                               + _claude_line("2026-10-08T10:00:03Z", 1682, "msg_a")
+                               + _claude_line("2026-10-08T10:00:04Z", 40, "msg_b"))
+        fork.write_text(_claude_line("2026-10-08T10:00:03Z", 1682, "msg_a"))
+
+        db = duckdb.connect()
+        register_macros(db)
+        with mock.patch("sys.stderr"):
+            main_mod.load_tokens(db, refresh=False)
+        assert db.sql("SELECT message_id, output_tokens FROM tokens ORDER BY 1").fetchall() == [
+            ("msg_a", 1682), ("msg_b", 40)]
+        # A later line of a response read in an update replaces its earlier row.
+        self.append(self.claude, _claude_line("2026-10-08T10:00:05Z", 90, "msg_b"))
+        db = duckdb.connect()
+        register_macros(db)
+        with mock.patch("sys.stderr"):
+            main_mod.load_tokens(db, refresh=False)
+        assert db.sql("SELECT message_id, output_tokens FROM tokens ORDER BY 1").fetchall() == [
+            ("msg_a", 1682), ("msg_b", 90)]
+
     def test_new_lines_parse_as_the_whole_log_does(self):
         self.claude.write_text(_claude_line("2026-10-08T10:00:01Z", 10)
                                + _claude_line("2026-10-08T10:00:02Z", 20))
@@ -2089,7 +2114,8 @@ class TestAppendOnlyLogs(Case):
         assert len(positions[self.codex.as_posix()].context) == 4
 
         # A rewritten log is read again from its start.
-        self.claude.write_text(_claude_line("2026-10-08T11:00:00Z", 99) * 3)
+        self.claude.write_text("".join(_claude_line("2026-10-08T11:00:00Z", 99, f"msg_{index}")
+                                       for index in range(3)))
         rows, _ = self.load()
         assert rows == self.rebuilt_rows()
         assert [row[6] for row in rows if row[0] == "Claude Code"] == [99, 99, 99]

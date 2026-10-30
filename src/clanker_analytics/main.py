@@ -75,7 +75,7 @@ def plans_for(args: argparse.Namespace) -> dict[str, tuple[str, float]]:
 CACHE_DIR = Path.home() / ".cache" / "clanker-analytics"
 CACHE_FILE = CACHE_DIR / "tokens.parquet"
 CACHE_META_FILE = CACHE_DIR / "tokens-meta.json"
-CACHE_SCHEMA_VERSION = 30
+CACHE_SCHEMA_VERSION = 31
 
 AGY_METADATA_TOOL = "Agy metadata"
 # AOP 0.3.0 and later copies every result it writes here as <run_id>.json, so a run's
@@ -164,7 +164,8 @@ TOKEN_SCHEMA = """
     quota_resets_at BIGINT,
     quota_window_minutes INTEGER,
     quota_limit_id VARCHAR,
-    quota_plan VARCHAR
+    quota_plan VARCHAR,
+    message_id VARCHAR
 """
 
 # On Windows, discover WSL home paths for additional data sources
@@ -216,8 +217,8 @@ def _utc_timestamp(expr: str) -> str:
 # a schema from sampled files, which fails for some mixes of transcripts and other records.
 CLAUDE_COLUMNS = """{
     'type': 'VARCHAR', 'timestamp': 'VARCHAR', 'sessionId': 'VARCHAR',
-    'isSidechain': 'BOOLEAN', 'cwd': 'VARCHAR',
-    'message': 'STRUCT(model VARCHAR, usage STRUCT(input_tokens BIGINT, output_tokens BIGINT,
+    'isSidechain': 'BOOLEAN', 'cwd': 'VARCHAR', 'requestId': 'VARCHAR',
+    'message': 'STRUCT(id VARCHAR, model VARCHAR, usage STRUCT(input_tokens BIGINT, output_tokens BIGINT,
         cache_creation_input_tokens BIGINT, cache_read_input_tokens BIGINT,
         cache_creation STRUCT(ephemeral_1h_input_tokens BIGINT)))'
 }"""
@@ -263,7 +264,9 @@ SELECT
     NULL::DOUBLE as quota_used_pct,
     NULL::BIGINT as quota_resets_at,
     NULL::INTEGER as quota_window_minutes,
-    NULL::VARCHAR as quota_limit_id
+    NULL::VARCHAR as quota_limit_id,
+    -- One API response; Claude Code writes a line for each of its content blocks.
+    coalesce(cast(message.id as VARCHAR), cast(requestId as VARCHAR)) as message_id
 FROM read_json({source_expr},
     format='newline_delimited', filename=true, columns={CLAUDE_COLUMNS},
     ignore_errors=true, maximum_object_size=67108864)
@@ -2042,6 +2045,7 @@ def _rebuild_tokens(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapsh
     _carry_over_vanished_rows(db, files, timer)
     _drop_other_copies_of_aop_runs(db, list(files), timer)
     _drop_moved_codex_logs(db, files, timer)
+    _count_claude_messages_once(db, timer)
     _name_claude_projects(db, timer)
     _deduplicate_aop(db, timer)
     with timer.span("price rows"):
@@ -2147,6 +2151,28 @@ def _drop_moved_codex_logs(db: duckdb.DuckDBPyConnection, read: dict[str, Source
               AND {name} IN (SELECT regexp_extract(path, '[^/]+$') FROM read_logs)
         """)
         db.execute("DROP TABLE read_logs")
+
+
+def _count_claude_messages_once(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
+    """Keep one row per Claude Code API response.
+
+    Claude Code writes a transcript line for each content block of a response, each with
+    the response's usage, and only output_tokens grows on the later lines. A forked or
+    resumed session copies earlier responses into its own transcript. So each response
+    keeps its row with the most output, from the first transcript by path that has it.
+    """
+    with timer.span("count Claude messages once"):
+        db.execute("""
+            DELETE FROM tokens WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid, row_number() OVER (
+                        PARTITION BY message_id
+                        ORDER BY output_tokens DESC, source_file, timestamp) AS copy
+                    FROM tokens
+                    WHERE tool = 'Claude Code' AND message_id IS NOT NULL
+                      AND coalesce(source_kind, 'native') = 'native')
+                WHERE copy > 1)
+        """)
 
 
 def _name_claude_projects(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
@@ -2416,6 +2442,7 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
         _read_changed_files(db, {path: files[path] for path in changed}, positions, timer)
         _drop_other_copies_of_aop_runs(db, changed, timer)
         _drop_moved_codex_logs(db, {path: files[path] for path in changed}, timer)
+        _count_claude_messages_once(db, timer)
         _name_claude_projects(db, timer)
         _deduplicate_aop(db, timer)
         with timer.span("price rows"):
