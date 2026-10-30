@@ -1958,6 +1958,36 @@ def _claude_line(timestamp, output, message_id=None):
 
 
 class TestClaudeHomes(Case):
+    def test_session_costs_reads_only_that_sessions_transcripts(self):
+        home = self.tmp_path / "home"
+        project = home / ".claude" / "projects" / "-code-alpha"
+        session = "860ccb1c-fa05-4b90-b5ef-34f1ca111152"
+        subagents = project / session / "subagents"
+        subagents.mkdir(parents=True)
+        (project / f"{session}.jsonl").write_text(
+            _claude_line("2026-10-08T10:00:01Z", 6, "msg_a")
+            + _claude_line("2026-10-08T10:00:02Z", 1682, "msg_a"))
+        (subagents / "agent-1.jsonl").write_text(_claude_line("2026-10-08T10:00:03Z", 40, "msg_b"))
+        (subagents / "agent-acompact-1.jsonl").write_text(
+            _claude_line("2026-10-08T10:00:04Z", 9, "msg_c"))
+        (project / "other.jsonl").write_text(_claude_line("2026-10-08T10:00:05Z", 7, "msg_d"))
+        self.monkeypatch.setattr(main_mod, "HOME", home.as_posix())
+        self.monkeypatch.setenv("XDG_CONFIG_HOME", str(self.tmp_path / "config"))
+        self.monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        self.monkeypatch.setattr(main_mod, "refresh_prices", lambda: None)
+        capsys = self.capsys
+
+        assert main_mod.main(["session-costs", "860ccb1c", "--json"]) == 0
+
+        report = json.loads(capsys.readouterr().out)
+        assert report["session"] == session
+        assert [(item["message_id"], item["output_tokens"], item["timestamp"])
+                for item in report["responses"]] == [
+            ("msg_a", 1682, "2026-10-08T10:00:02.000Z"), ("msg_b", 40, "2026-10-08T10:00:03.000Z")]
+        assert all(item["api_cost_usd"] > 0 for item in report["responses"])
+        with raises(SystemExit, match="no Claude Code session"):
+            main_mod.main(["session-costs", "ffff"])
+
     def test_claude_homes_come_from_the_environment_and_clanker_usage(self):
         home = self.tmp_path / "home"
         config = self.tmp_path / "config" / "clanker-usage"

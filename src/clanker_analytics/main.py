@@ -2472,6 +2472,67 @@ def load_tokens(db: duckdb.DuckDBPyConnection, refresh: bool,
     rebuild()
 
 
+SESSION_COST_COLUMNS = (
+    "timestamp", "message_id", "model", "execution_type", "input_tokens", "output_tokens",
+    "cache_write_tokens", "cache_write_1h_tokens", "cache_read_tokens", "total_tokens",
+    "api_cost_usd", "pricing", "source_file")
+
+
+def _session_transcripts(session: str) -> list[str]:
+    """The transcript of the Claude Code session whose id is or starts with session, and
+    its subagents' transcripts, in every Claude Code home."""
+    found: dict[str, list[str]] = {}
+    for home in (Path(HOME) / ".claude", *_claude_config_dirs()):
+        for transcript in (home / "projects").glob(f"*/{glob_escape(session)}*.jsonl"):
+            subagents = transcript.with_suffix("") / "subagents"
+            found.setdefault(transcript.stem, []).extend(
+                path.as_posix() for path in [transcript, *sorted(subagents.glob("agent-*.jsonl"))]
+                if "agent-acompact-" not in path.name)
+    if len(found) > 1:
+        raise SystemExit(f"error: {session!r} matches {len(found)} sessions: "
+                         + ", ".join(sorted(found)))
+    if not found:
+        raise SystemExit(f"error: no Claude Code session {session!r}")
+    return next(iter(found.values()))
+
+
+def glob_escape(text: str) -> str:
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def _session_costs(session: str, as_json: bool, timer: DebugTimer) -> int:
+    """Price one session's responses as the cache does, without scanning or loading it.
+
+    A response a forked or resumed session copied from another is included here, since its
+    copy carries this session's id; the full cache counts each copy once across sessions.
+    """
+    with timer.span("find transcripts", session):
+        paths = _session_transcripts(session)
+    db = duckdb.connect()
+    _empty_tokens_table(db)
+    with timer.span("read transcripts", f"{len(paths)} files"):
+        db.execute(f"INSERT INTO tokens BY NAME {_claude_sql(_sql_file_list(paths))}")
+        _count_claude_messages_once(db, timer)
+    with timer.span("refresh prices"):
+        refresh_prices()
+    with timer.span("price rows"):
+        price_tokens(db, all_rows=True)
+    rows = db.execute(f"SELECT {', '.join(SESSION_COST_COLUMNS)} FROM tokens "
+                      "ORDER BY timestamp, message_id").fetchall()
+    responses = [dict(zip(SESSION_COST_COLUMNS, row)) for row in rows]
+    if as_json:
+        print(json.dumps({"session": Path(paths[0]).stem, "pricing_basis": pricing_basis(),
+                          "transcripts": paths, "responses": responses}, indent=2))
+        return 0
+    cost = sum(item["api_cost_usd"] or 0 for item in responses)
+    tokens = sum(item["total_tokens"] or 0 for item in responses)
+    unpriced = sum(1 for item in responses if item["api_cost_usd"] is None)
+    print(f"{Path(paths[0]).stem}: {len(responses)} responses, {tokens:,} tokens, "
+          f"${cost:,.2f} at API rates" + (f", {unpriced} unpriced" if unpriced else ""))
+    print(f"pricing: {pricing_basis()}, rates in effect when each request ran")
+    return 0
+
+
 def _get_version() -> str:
     try:
         from importlib.metadata import version
@@ -2490,6 +2551,9 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         for error in errors:
             print(f"  warning: {error}", file=sys.stderr)
         return 1 if len(errors) == len(QUOTA_PROVIDERS) else 0
+
+    if args.command == "session-costs":
+        return _session_costs(args.session, args.json, timer)
 
     db = duckdb.connect()
     with timer.span("register macros"):
@@ -2795,6 +2859,10 @@ def main(argv: list[str] | None = None):
     command("quota-history", "Audit API-equivalent usage across every observed fixed quota "
                              "period", quota_db, as_json)
     command("record-quota", "Fetch and retain current provider quota percentages", quota_db)
+    session = command("session-costs", "Each response of one Claude Code session with its "
+                                       "API-equivalent cost, read from that session's "
+                                       "transcripts alone", as_json)
+    session.add_argument("session", help="The session id, or a unique prefix of it")
 
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parser.parse_args(_modernize_argv(argv, set(commands.choices)))

@@ -205,6 +205,8 @@ The included service expects the executable at `~/.local/bin/clanker-analytics`,
 
 It ends with an estimate of what Claude Code subagents would have paid for prompt tokens on the one-hour cache, which turns their cold starts after five minutes to an hour of idling into cache reads at a higher write price.
 
+`session-costs SESSION` prices one Claude Code session's responses, counting each response once and pricing it as the cache does, from that session's transcript and its subagents' transcripts alone, so it takes about a second however large the cache is. SESSION is the session id or a unique prefix of it. `--json` prints each response's time, message id, model, token counts, `api_cost_usd` and `pricing`. A response that a forked or resumed session copied from another session is included, because its copy carries this session's id; the cache counts each copy once across sessions.
+
 `throughput` reports, for each UTC day of `--since` (default 7 days), the output tokens and output tokens per second averaged over the whole day including idle time, the busiest hour's rate, the hours with any output, and how many transcripts (main conversations or subagents) made requests in the same hour: the median over active hours and the peak. It shows whether parallel agents added output or mostly waited. AOP runs are recorded as one summary at completion, so they are counted as finished runs rather than streams.
 
 ## Columns
