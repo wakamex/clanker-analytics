@@ -1961,7 +1961,7 @@ class TestClaudeHomes(Case):
     def test_session_costs_reads_only_that_sessions_transcripts(self):
         home = self.tmp_path / "home"
         project = home / ".claude" / "projects" / "-code-alpha"
-        session = "860ccb1c-fa05-4b90-b5ef-34f1ca111152"
+        session = "0a1b2c3d-0000-4000-8000-00000000c0de"
         subagents = project / session / "subagents"
         subagents.mkdir(parents=True)
         (project / f"{session}.jsonl").write_text(
@@ -1977,7 +1977,7 @@ class TestClaudeHomes(Case):
         self.monkeypatch.setattr(main_mod, "refresh_prices", lambda: None)
         capsys = self.capsys
 
-        assert main_mod.main(["session-costs", "860ccb1c", "--json"]) == 0
+        assert main_mod.main(["session-costs", "0a1b2c3d", "--json"]) == 0
 
         report = json.loads(capsys.readouterr().out)
         assert report["session"] == session
