@@ -14,7 +14,7 @@ import clanker_analytics.main as main_mod
 from support import Case
 
 HARNESSES = Path(__file__).with_name("harnesses.toml")
-HARNESSES_COMMIT = "55725a0"
+HARNESSES_COMMIT = "4bbed9a"
 READER = "clanker-analytics"
 
 # Spec sheet entry -> the tool its usage is reported as.
@@ -25,6 +25,7 @@ TOOLS = {
     "gemini": "Gemini",
     "zcode": main_mod.ZCODE_TOOL,
     "muse": main_mod.MUSE_TOOL,
+    "opencode": main_mod.OPENCODE_TOOL,
 }
 
 # Session files listed in the sheet that clanker-analytics does not discover on purpose.

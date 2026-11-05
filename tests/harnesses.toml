@@ -43,8 +43,8 @@ readers = ["sch", "clanker-analytics", "wakterm"]
 name = "OpenCode"
 home = "${XDG_DATA_HOME:-~/.local/share}/opencode"
 sessions = ["opencode.db"]
-format = "SQLite: session, message and part tables with JSON data"
-readers = ["sch", "wakterm"]
+format = "SQLite in WAL mode, so read the -wal file too. In 1.19.3 the conversation is in the message and part tables (JSON in data) and session.parent_id marks a subagent. An assistant message records its call in data.tokens {input, output, reasoning, cache {read, write}, total}, with providerID, modelID and cost. Whether output includes reasoning depends on the provider: for openai models total = input + output + cache, for others total = input + output + reasoning + cache, so take total when present instead of adding reasoning to output. The file is opencode.db for the latest, beta and prod channels and opencode-<channel>.db for other builds; OPENCODE_DB names another file, relative to the home or absolute. The newer session_message, event and session_input tables exist but are empty on this host."
+readers = ["sch", "clanker-analytics", "wakterm"]
 
 [zcode]
 name = "Zcode"
