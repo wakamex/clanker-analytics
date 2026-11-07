@@ -27,6 +27,7 @@ PROVIDER_TO_TOOL = {
     "openai": "Codex",
     "antigravity": "Agy",
     "zai": "Zcode",
+    "muse": "Muse",
 }
 
 PROVIDER_SHORT_NAMES = {
@@ -34,6 +35,7 @@ PROVIDER_SHORT_NAMES = {
     "openai": "codex",
     "antigravity": "agy",
     "zai": "zcode",
+    "muse": "muse",
 }
 
 # Snapshots are recorded every five minutes; a rise across a longer gap than this between
@@ -228,6 +230,7 @@ QUOTA_PROVIDERS = {
     "openai": "codex",
     "antigravity": "agy",
     "zai": "zcode",
+    "muse": "muse-code",
 }
 
 
@@ -690,10 +693,12 @@ def history_calibration(periods: list[dict[str, Any]], bucket: dict[str, Any],
     own = [period for period in matching if period.get("account") == account]
     candidates = own or [period for period in matching if period.get("account") in (None, "default")]
     def plan_name(value: str | None) -> str | None:
-        """The plan as a priced plan id, or None when unknown or ambiguous, such as a
-        Google AI Ultra reading from before the tier id was recorded."""
-        plan = normalize_plan(value) if value else None
-        return plan if plan and plan_price(PLAN_TOOLS.get(tool, tool), plan) else None
+        """The plan's family, such as pro for pro_200 or ultra for Google AI Ultra, so a
+        reading that names its tier and one that does not compare as the same plan."""
+        if not value:
+            return None
+        name = normalize_plan(value).lower().removeprefix("google ai ")
+        return re.sub(r"_\d+$", "", re.sub(r"\s*\([^)]*\)$", "", name))
 
     plan = plan_name(bucket.get("plan"))
     if plan:
@@ -706,16 +711,22 @@ def history_calibration(periods: list[dict[str, Any]], bucket: dict[str, Any],
     unaccounted = [period for period in completed if period["api_equivalent_cost_usd"] <= 0]
     cost = sum(period["api_equivalent_cost_usd"] for period in measured)
     points = sum(period["used_pct"] for period in measured)
+    unaccounted_points = sum(period["used_pct"] for period in unaccounted)
+    # When most of the window's use shows in no local log, the measured part is too
+    # small and too uncertain a sample of what a point costs to price it.
+    priced = points > 0 and points >= unaccounted_points
     return {
         "method": "completed_periods_local_cost_divided_by_used_pct",
-        "api_usd_per_quota_percentage_point": cost / points if points else None,
+        "api_usd_per_quota_percentage_point": cost / points if priced else None,
+        "measured_api_usd_per_quota_percentage_point": cost / points if points else None,
+        "mostly_unaccounted": points > 0 and not priced,
         "periods": len(measured),
         "api_usd": cost,
         "quota_pp": points,
         "first_resets_at": min((p["resets_at"] for p in measured), default=None),
         "last_resets_at": max((p["resets_at"] for p in measured), default=None),
         "unaccounted_periods": len(unaccounted),
-        "unaccounted_pp": sum(period["used_pct"] for period in unaccounted),
+        "unaccounted_pp": unaccounted_points,
         "min_used_pct": HISTORY_MIN_USED_PCT,
         "plan": plan,
         # Set when the price comes from a sibling window instead of this one's periods.
@@ -782,7 +793,9 @@ def _derive_missing_prices(connection: sqlite3.Connection,
     sibling window of the same account and models, the one they rose together most with."""
     for bucket in buckets:
         history = bucket["token_calibration"]["history"]
-        if history["api_usd_per_quota_percentage_point"] is not None:
+        # A window whose own periods show its use mostly missing from the local logs is
+        # left unpriced: a sibling's price rests on the same logs.
+        if history["api_usd_per_quota_percentage_point"] is not None or history["mostly_unaccounted"]:
             continue
         derived = [found for sibling in buckets
                    if sibling is not bucket and sibling["provider"] == bucket["provider"]
@@ -1063,7 +1076,7 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
 
 
 # Codex logs carry their own quota history, so recorder samples are needed only here.
-HISTORY_RECORDER_PROVIDERS = ("anthropic", "antigravity", "zai")
+HISTORY_RECORDER_PROVIDERS = ("anthropic", "antigravity", "zai", "muse")
 
 QUOTA_OBSERVATION_COLUMNS = """
     tool VARCHAR,

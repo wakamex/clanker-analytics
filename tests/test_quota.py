@@ -506,6 +506,15 @@ class TestQuota(Case):
         assert price["api_usd_per_quota_percentage_point"] == approx(30 / 100)
         assert (price["periods"], price["quota_pp"], price["unaccounted_periods"],
                 price["unaccounted_pp"]) == (2, 100, 1, 30)
+        assert price["mostly_unaccounted"] is False
+
+        # When most used points have no local cost, the small measured part is no price.
+        mostly_unseen = [period("2026-10-29T10:00:00Z", 20, 1.0),
+                         *(period(f"2026-10-29T{hour}:00:00Z", 40, 0.0) for hour in (15, 20))]
+        unpriced = quota.history_calibration(mostly_unseen, bucket, now)
+        assert unpriced["api_usd_per_quota_percentage_point"] is None
+        assert unpriced["measured_api_usd_per_quota_percentage_point"] == approx(1 / 20)
+        assert (unpriced["mostly_unaccounted"], unpriced["unaccounted_pp"]) == (True, 80)
 
         # A period on another priced plan buys a different amount of use per point.
         codex = {"provider": "openai", "account_key": "acct", "bucket_id": "1w", "scope_id": "",
@@ -514,6 +523,9 @@ class TestQuota(Case):
                         plan="pro", tool="Codex", minutes=10080),
                  period("2026-10-20T00:00:00Z", 50, 100.0, account="default", limit="codex",
                         plan="plus", tool="Codex", minutes=10080)]
+        assert quota.history_calibration(weeks, codex, now)["api_usd_per_quota_percentage_point"] == approx(2)
+        # A plan named without its tier is still a different plan from plus.
+        weeks[0]["plan"] = "pro_200"
         assert quota.history_calibration(weeks, codex, now)["api_usd_per_quota_percentage_point"] == approx(2)
 
     def test_window_without_periods_is_priced_from_a_sibling_window(self):
