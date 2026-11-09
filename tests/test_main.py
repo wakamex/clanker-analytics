@@ -1792,7 +1792,9 @@ class TestPlanDetection(Case):
             ("claude", "pro", "Claude Code", ("pro", 20)),
             ("claude", "max_5x", "Claude Code", ("max_5x", 100)),
             ("claude", "default_claude_max_5x", "Claude Code", ("max_5x", 100)),
-            ("codex", "pro", "Codex", ("pro", 200)),
+            # ChatGPT Pro's three tiers share the plan name, so it has no one price.
+            ("codex", "pro", "Codex", ("pro", 0)),
+            ("codex", "pro_200", "Codex", ("pro_200", 200)),
             ("codex", "plus", "Codex", ("plus", 20)),
             ("gemini", "g1-pro-tier", "Gemini", ("pro", 19.99)),
             # Google AI Ultra has two tiers that the plan name cannot tell apart.
@@ -1832,7 +1834,7 @@ class TestPlanDetection(Case):
             assert detect_plans() == {}
 
     def test_subscription_cost_sum(self):
-        with self._run({"claude": {"plan": "max_20x"}, "codex": {"plan": "pro"},
+        with self._run({"claude": {"plan": "max_20x"}, "codex": {"plan": "pro_200"},
                         "gemini": {"plan": "g1-pro-tier"}}):
             plans = detect_plans()
         assert sum(c for _, c in plans.values()) == approx(419.99)

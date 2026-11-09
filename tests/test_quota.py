@@ -989,8 +989,9 @@ class TestQuota(Case):
             item = build_value_report(history, {"Codex": current}, forced)["tools"][0]
             return item["plan"], item["plan_usd_per_month"]
 
-        # A downgrade after the week ended does not reprice it.
-        assert plan(("plus", 20)) == ("pro", 200)
+        # A downgrade after the week ended does not reprice it. Codex reports every Pro
+        # tier as "pro", which model-prices leaves unpriced since it covers three prices.
+        assert plan(("plus", 20)) == ("pro", None)
         # Codex reports every Pro tier as "pro", so a configured tier names it exactly.
         assert plan(("pro_100", 100)) == ("pro_100", 100)
         # --plan applies to every week.
