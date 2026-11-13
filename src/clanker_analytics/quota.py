@@ -28,6 +28,9 @@ PROVIDER_TO_TOOL = {
     "antigravity": "Agy",
     "zai": "Zcode",
     "muse": "Muse",
+    "opencode": "OpenCode",
+    "cursor": "Cursor",
+    "devin": "Devin",
 }
 
 PROVIDER_SHORT_NAMES = {
@@ -36,6 +39,9 @@ PROVIDER_SHORT_NAMES = {
     "antigravity": "agy",
     "zai": "zcode",
     "muse": "muse",
+    "opencode": "opencode",
+    "cursor": "cursor",
+    "devin": "devin",
 }
 
 # Snapshots are recorded every five minutes; a rise across a longer gap than this between
@@ -231,6 +237,10 @@ QUOTA_PROVIDERS = {
     "antigravity": "agy",
     "zai": "zcode",
     "muse": "muse-code",
+    # Recorded under clanker-usage's own provider names.
+    "opencode": "opencode",
+    "cursor": "cursor",
+    "devin": "devin",
 }
 
 
@@ -1076,7 +1086,7 @@ def build_report(connection: sqlite3.Connection, token_db: Any, lookbacks: Itera
 
 
 # Codex logs carry their own quota history, so recorder samples are needed only here.
-HISTORY_RECORDER_PROVIDERS = ("anthropic", "antigravity", "zai", "muse")
+HISTORY_RECORDER_PROVIDERS = ("anthropic", "antigravity", "zai", "muse", "opencode", "cursor", "devin")
 
 QUOTA_OBSERVATION_COLUMNS = """
     tool VARCHAR,

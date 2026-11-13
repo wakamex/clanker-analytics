@@ -68,7 +68,7 @@ The cache is incremental: unchanged source files are reused and changed files ar
 
 ## Quota pace comparison
 
-`record-quota` asks [clanker-usage](https://github.com/wakamex/clanker-usage) for fresh Claude, Codex, Antigravity, Zcode, and Muse Code quota
+`record-quota` asks [clanker-usage](https://github.com/wakamex/clanker-usage) for fresh Claude, Codex, Antigravity, Zcode, Muse Code, OpenCode, Cursor, and Devin quota
 percentages and stores normalized snapshots in
 `~/.local/state/clanker-analytics/quota.sqlite3`. The provider percentage remains authoritative and
 includes activity that local session logs may miss. Claude, Antigravity, and Zcode history starts when the
