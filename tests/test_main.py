@@ -455,6 +455,27 @@ class TestSourceLoaders(Case):
         assert row[5:10] == (80, 40, 0, 20, 140)
         assert row[11:13] == ("/code/project", "exact")
 
+    def test_agy_counts_a_running_conversation_named_only_by_its_workspace(self):
+        session = "f0000000-0000-4000-8000-000000000001"
+        transcript = self.tmp_path / "brain" / session / ".system_generated" / "logs" / "transcript_full.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({
+            "step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+            "created_at": "2026-11-13T05:20:00Z", "content": "x" * 400, "model": "gemini-4-carbon",
+        }) + "\n")
+        # The index is rewritten later; the workspace map names the conversation already.
+        index = self.tmp_path / "conversation_metadata.json"
+        index.write_text(json.dumps({"conversations": {"other": {"summary": {"ID": "other"}}}}))
+        latest = self.tmp_path / "last_conversations.json"
+        latest.write_text(json.dumps({"/code/w3sim": session}))
+
+        rows = duckdb.sql(main_mod._agy_sql(
+            main_mod._sql_literal(transcript.as_posix()),
+            main_mod._sql_file_list([index.as_posix(), latest.as_posix()]),
+        )).fetchall()
+
+        assert [(row[1], row[2], row[11]) for row in rows] == [("w3sim", session, "/code/w3sim")]
+
     @staticmethod
     def _agy_session_model(tmp_path, blobs):
         session = "11111111-2222-3333-4444-555555555555"

@@ -627,11 +627,16 @@ WHERE m.tokens IS NOT NULL
 """
 
 
+# Antigravity's conversation index, and the map from each workspace to its latest
+# conversation, which names a running conversation before the index is rewritten.
+AGY_METADATA_FILES = ("conversation_metadata.json", "last_conversations.json")
+
+
 def _agy_metadata_paths() -> list[str]:
     homes = [HOME, *_WSL_HOMES]
     paths = [
-        Path(home) / ".gemini" / "antigravity-cli" / "cache" / "conversation_metadata.json"
-        for home in homes
+        Path(home) / ".gemini" / "antigravity-cli" / "cache" / name
+        for home in homes for name in AGY_METADATA_FILES
     ]
     return [path.as_posix() for path in paths if path.exists()]
 
@@ -805,18 +810,28 @@ metadata_raw AS (
     FROM read_json_objects({metadata_expr}, format='auto', ignore_errors=true) source,
          json_each(source.json, '$.conversations') entry
 ),
+latest_raw AS (
+    SELECT entry.key as workspace_path, json_extract_string(entry.value, '$') as session
+    FROM read_json_objects({metadata_expr}, format='auto', ignore_errors=true) source,
+         json_each(source.json) entry
+    WHERE json_type(entry.value) = 'VARCHAR'
+),
 metadata AS (
-    SELECT
-        json_extract_string(conversation, '$.summary.ID') as session,
-        regexp_replace(
-            json_extract_string(conversation, '$.summary.WorkspaceURIs[0]'),
-            '^file://', ''
-        ) as workspace_path
-    FROM metadata_raw
-    WHERE json_extract_string(conversation, '$.summary.ID') IS NOT NULL
+    SELECT session, workspace_path FROM (
+        SELECT
+            json_extract_string(conversation, '$.summary.ID') as session,
+            regexp_replace(
+                json_extract_string(conversation, '$.summary.WorkspaceURIs[0]'),
+                '^file://', ''
+            ) as workspace_path,
+            0 as source_rank
+        FROM metadata_raw
+        UNION ALL
+        SELECT session, workspace_path, 1 FROM latest_raw
+    )
+    WHERE session IS NOT NULL
     QUALIFY row_number() OVER (
-        PARTITION BY json_extract_string(conversation, '$.summary.ID')
-        ORDER BY json_extract_string(conversation, '$.summary.WorkspaceURIs[0]') IS NOT NULL DESC
+        PARTITION BY session ORDER BY workspace_path IS NOT NULL DESC, source_rank
     ) = 1
 ),
 """
