@@ -1528,6 +1528,23 @@ SUMMARY_COLS = f"""
     sum(total_tokens)::BIGINT as _sort
 """
 
+def table_view(db: duckdb.DuckDBPyConnection, query: str) -> duckdb.DuckDBPyRelation:
+    """A table query's rows, without columns that say nothing about them: count basis and
+    retained text when no row is an estimate, and first and last seen when every row falls
+    within two consecutive dates, as the last 24 hours do."""
+    db.execute(f"CREATE OR REPLACE TEMP TABLE shown AS {query}")
+    columns = db.sql("SELECT * FROM shown").columns
+    hidden = []
+    if "count_basis" in columns and not db.sql(
+            "SELECT count(*) FROM shown WHERE count_basis != 'exact'").fetchone()[0]:
+        hidden += ["count_basis", "retained_text"]
+    if "first_seen" in columns and db.sql(
+            "SELECT max(last_seen::DATE) - min(first_seen::DATE) <= 1 FROM shown").fetchone()[0]:
+        hidden += ["first_seen", "last_seen"]
+    exclude = f" EXCLUDE ({', '.join(hidden)})" if hidden else ""
+    return db.sql(f"SELECT *{exclude} FROM shown")
+
+
 QUERIES = {
     "project": f"""
         SELECT * EXCLUDE (_sort) FROM (
@@ -2871,7 +2888,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
 
     if args.command == "table":
         with timer.span("render table", args.by):
-            db.sql(QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
+            table_view(db, QUERIES[args.by].format(limit=args.limit)).show(max_rows=100)
         print(f"pricing: {basis}")
         return 0
 

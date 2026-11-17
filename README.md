@@ -218,7 +218,8 @@ It ends with an estimate of what Claude Code subagents would have paid for promp
 - `output` - output tokens only
 - `cache` - cache read hits as a percentage of input tokens
 - `api_cost` - estimated cost at API rates
-- `count_basis` - `exact` or `processed estimate`
+- `first_seen`, `last_seen` - the first and last date of a project's usage; `table` leaves them out when all its rows fall within two consecutive dates, as the last 24 hours do
+- `count_basis` - `exact` or `processed estimate`; `table` shows it, with `retained_text`, only when some row is an estimate
 - `retained_text` - unique retained transcript text estimated at four characters per token when the
   source supports it
 - `execution_type` - `interactive`, `exec`, `subagent`, or `unknown`; available through

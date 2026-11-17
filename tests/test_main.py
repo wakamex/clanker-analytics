@@ -1791,6 +1791,23 @@ class TestQueries(Case):
         assert agy["retained_text"].strip() == "30"
 
 
+    def test_table_hides_columns_that_say_nothing_about_its_rows(self):
+        agy_row = ("Agy", "project", "agy-session", "2026-03-16", "",
+                   100, 20, 0, 0, 120)
+        db = _make_db(SONNET_ROW, agy_row)
+        db.execute("UPDATE tokens SET retained_tokens = 30 WHERE tool = 'Agy'")
+        query = main_mod.QUERIES["project"].format(limit=50)
+
+        columns = main_mod.table_view(db, query).columns
+        assert not {"count_basis", "retained_text", "first_seen", "last_seen"} & set(columns)
+        assert "api_cost" in columns
+
+        db.execute("UPDATE tokens SET token_count_type = 'estimated_processed' WHERE tool = 'Agy'")
+        db.execute("UPDATE tokens SET date = '2026-03-17' WHERE tool = 'Agy'")
+        columns = main_mod.table_view(db, query).columns
+        assert {"count_basis", "retained_text", "first_seen", "last_seen"} <= set(columns)
+
+
 # ===========================================================================
 # Plan detection tests
 # ===========================================================================
