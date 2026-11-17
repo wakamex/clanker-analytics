@@ -757,16 +757,17 @@ def sibling_calibration(connection: sqlite3.Connection, bucket: dict[str, Any],
     the points each rose by give how many sibling points one of this window's points is
     worth. Intervals on another plan are left out. Returns None without enough joint rise.
     """
-    rows = connection.execute("""
-        SELECT a.effective_at, a.used_pct, a.resets_at, b.used_pct, b.resets_at, a.plan
-        FROM quota_samples a JOIN quota_samples b
-          ON b.provider = a.provider AND b.account_key = a.account_key
-         AND b.effective_at = a.effective_at
-        WHERE a.provider = ? AND a.account_key = ? AND a.bucket_id = ? AND b.bucket_id = ?
-          AND a.scope_id = ? AND b.scope_id = ?
-        ORDER BY a.effective_at
-    """, (bucket["provider"], bucket["account_key"], bucket["bucket_id"], sibling["bucket_id"],
-          bucket["scope_id"], sibling["scope_id"])).fetchall()
+    def readings(window: dict[str, Any]) -> list[tuple]:
+        return connection.execute("""
+            SELECT effective_at, used_pct, resets_at, plan FROM quota_samples
+            WHERE provider = ? AND account_key = ? AND bucket_id = ? AND scope_id = ?
+        """, (bucket["provider"], bucket["account_key"], window["bucket_id"],
+              window["scope_id"])).fetchall()
+
+    # Readings of both windows taken from the same snapshot share its time.
+    theirs = {at: (used, resets) for at, used, resets, _ in readings(sibling)}
+    rows = sorted((at, used, resets, *theirs[at], plan)
+                  for at, used, resets, plan in readings(bucket) if at in theirs)
     plan = bucket.get("plan")
     own = other = 0.0
     intervals = 0

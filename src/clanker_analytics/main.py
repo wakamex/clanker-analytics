@@ -2491,19 +2491,20 @@ def _cache_lock(timer: DebugTimer):
     """Hold the cache's lock file, waiting while another clanker-analytics process holds
     it, so concurrent runs neither write the cache at once nor read it half written."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CACHE_DIR / "tokens.lock", "a+b") as lock, timer.span("wait for cache lock"):
-        if os.name == "nt":
-            import msvcrt
-            lock.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-                    break
-                except OSError:
-                    continue
-        else:
-            import fcntl
-            fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(CACHE_DIR / "tokens.lock", "a+b") as lock:
+        with timer.span("wait for cache lock"):
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                while True:
+                    try:
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                        break
+                    except OSError:
+                        continue
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
         yield
 
 
