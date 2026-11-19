@@ -22,20 +22,21 @@ class TestModelRates(Case):
     def _pool(self):
         """Two accounts on one plan, each in use half of every day for three weeks, read
         every five minutes in whole points a minute behind their usage, with each hour's
-        model mix drawn at random. The second account's week resets on day 10."""
+        model mix drawn at random. Their weeks reset on different days."""
         rng = np.random.default_rng(1)
         quota = connect(self.tmp_path / "quota.sqlite3")
         tokens = duckdb.connect()
         tokens.execute("CREATE TABLE tokens (tool VARCHAR, model VARCHAR, timestamp VARCHAR, "
                        "api_cost_usd DOUBLE)")
         used = {"a": 0.0, "b": 0.0}
-        resets = {"a": START + timedelta(days=28), "b": START + timedelta(days=10)}
+        resets = {"a": START + timedelta(days=7), "b": START + timedelta(days=10)}
         requests, samples = [], []
         for minute in range(0, 21 * 24 * 60, 5):
             now = START + timedelta(minutes=minute)
             account = "a" if now.hour < 12 else "b"
-            if now >= resets["b"]:
-                used["b"], resets["b"] = 0.0, resets["b"] + timedelta(days=7)
+            for name in used:
+                if now >= resets[name]:
+                    used[name], resets[name] = 0.0, resets[name] + timedelta(days=7)
             # Readings show the points of usage up to a minute before.
             for name in used:
                 samples.append((name, _text(now), math.floor(used[name]), _text(resets[name])))
@@ -44,7 +45,7 @@ class TestModelRates(Case):
                 mix = {model: rng.uniform(0, 1) for model in PRICES}
             for model, price in PRICES.items():
                 if rng.random() < 0.6:
-                    usd = rng.exponential(mix[model])
+                    usd = 3 * rng.exponential(mix[model])
                     requests.append(("Claude Code", model, _text(now + timedelta(minutes=1)), usd))
                     used[account] += usd / price
         quota.executemany("""
@@ -69,22 +70,38 @@ class TestModelRates(Case):
             assert prices[model]["usd_per_point_low"] <= price <= prices[model]["usd_per_point_high"]
         assert result["accounts"] == {"a": ["max_20x"], "b": ["max_20x"]}
 
-    def test_units_stop_at_a_left_out_interval(self):
+    def test_units_are_cut_by_usage_and_stop_at_an_unusable_interval(self):
         at = [START + timedelta(hours=hour) for hour in range(6)]
-        intervals = [(at[0], at[1], 1.0), (at[1], at[2], 1.0), (at[3], at[4], 1.0),
-                     (at[4], at[5], 2.0)]
+        intervals = [(at[0], at[1], 1.0, True), (at[1], at[2], 0.0, True),
+                     (at[2], at[3], 0.0, False), (at[3], at[4], 2.0, True),
+                     (at[4], at[5], 1.0, True)]
+        spend = np.array([[3.0, 1.0], [2.0, 0.0], [9.0, 9.0], [1.0, 1.0], [6.0, 0.0]])
 
-        assert model_rates.units(intervals, 2) == [(at[0], at[2], 2.0), (at[3], at[5], 3.0)]
+        merged, dollars = model_rates.units(intervals, spend, 5)
 
-    def test_intervals_across_a_reset_or_into_a_full_window_are_left_out(self):
+        assert merged == [(at[0], at[2], 1.0), (at[3], at[5], 3.0)]
+        assert dollars.tolist() == [[5.0, 1.0], [7.0, 1.0]]
+
+    def test_intervals_across_a_reset_or_at_a_full_window_are_unusable(self):
         week = START + timedelta(days=7)
-        readings = {"a": [(START, 98, week, None), (START + timedelta(hours=1), 99, week, None),
-                          (START + timedelta(hours=2), 100, week, None),
-                          (START + timedelta(hours=3), 3, week + timedelta(days=7), None),
-                          (START + timedelta(hours=4), 4, week + timedelta(days=7), None)]}
+        later = week + timedelta(days=7)
+        readings = {"a": [(START + timedelta(hours=hour), used, resets, None)
+                          for hour, used, resets in ((0, 98, week), (1, 99, week), (2, 100, week),
+                                                     (3, 3, later), (4, 4, later))]}
 
-        assert model_rates.rise_intervals(readings) == [
-            (START + timedelta(hours=3), START + timedelta(hours=4), 1.0)]
+        assert [(rise, usable) for _, _, rise, usable in model_rates.reading_intervals(readings)] == [
+            (1.0, True), (1.0, False), (-97.0, False), (1.0, True)]
+
+    def test_idle_rate_counts_only_time_long_after_usage(self):
+        at = [START + timedelta(hours=hour) for hour in range(9)]
+        # Usage in the first hour, a lagging rise an hour later, then an idle rise.
+        intervals = [(at[i], at[i + 1], rise, True)
+                     for i, rise in enumerate([1.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.5, 0.0])]
+        spent = np.array([5.0, 0, 0, 0, 0, 0, 0, 0])
+
+        rate, hours = model_rates.idle_rate(intervals, spent)
+
+        assert (rate, hours) == (0.25, 4.0)
 
     def test_nnls_keeps_coefficients_non_negative(self):
         a = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
