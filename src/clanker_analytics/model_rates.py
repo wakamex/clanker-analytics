@@ -4,7 +4,8 @@ A provider's accounts on one plan share a price per point, so a window's reading
 of them are fitted together against all of the tool's local usage: no request needs to be
 attributed to an account. Readings are whole points that trail usage by a minute or more, so
 a short interval's rise is a noisy measure of its usage. The sample unit is therefore a run
-of consecutive intervals between readings that holds enough usage for a few points of rise.
+of consecutive intervals between readings that holds enough usage for a few points of rise
+and lasts long enough that little of its rise shows in the next unit.
 Units are cut by usage and reading times alone, never by the rise they are fitted to, which
 would bias every price. A unit ends where any account's reading falls, its reset time moves,
 or it reads 100%; those intervals are left out. Rises that local usage does not explain, such
@@ -14,6 +15,8 @@ taken off its rise. Fitted jointly with the models, such a term trades off again
 that runs at all hours. Each unit's remaining rise is fitted by non-negative least squares
 on each model's API dollars in it. Intervals are percentile ranges of a stationary block bootstrap whose expected
 block length is chosen from the data (Politis and White 2004, with the 2009 correction).
+Each model's fit is checked against the units it had to itself, and against fits of each
+half of the window, which show a price that changed within it.
 """
 
 from __future__ import annotations
@@ -39,6 +42,10 @@ RESET_TOLERANCE = timedelta(hours=1)
 # readings, rises between 1 and 3 hours after usage still occur and none after 3 hours.
 READOUT_LAG = timedelta(hours=3)
 BOOTSTRAP_DRAWS = 1000
+# A unit is a model's own, for the single-model check, when the model spent this share of it.
+SINGLE_MODEL_SHARE = 0.97
+# The share of a unit's rise that may show in the next unit, which sets how long units last.
+LAG_SHARE = 0.1
 
 
 def account_readings(connection: sqlite3.Connection, provider: str, bucket_id: str,
@@ -87,11 +94,11 @@ def reading_intervals(series: dict[str, list[tuple]]) -> list[tuple[datetime, da
     return intervals
 
 
-def units(intervals: list[tuple], spend: np.ndarray,
-          threshold: float) -> tuple[list[tuple[datetime, datetime, float]], np.ndarray]:
+def units(intervals: list[tuple], spend: np.ndarray, threshold: float,
+          duration: timedelta = timedelta(0)) -> tuple[list[tuple[datetime, datetime, float]], np.ndarray]:
     """Consecutive usable intervals merged until each unit holds at least threshold API
-    dollars of usage, with each unit's rise and each model's dollars. A unit ends at an
-    unusable interval, and one left short there is kept."""
+    dollars of usage and lasts at least duration, with each unit's rise and each model's
+    dollars. A unit ends at an unusable interval, and one left short there is kept."""
     merged, rows = [], []
     current, dollars = None, None
     for (start, end, rise, usable), row in zip(intervals, spend):
@@ -105,7 +112,7 @@ def units(intervals: list[tuple], spend: np.ndarray,
             current, dollars = (current[0], end, current[2] + rise), dollars + row
         else:
             current, dollars = (start, end, rise), row.copy()
-        if dollars.sum() >= threshold:
+        if dollars.sum() >= threshold and current[1] - current[0] >= duration:
             merged.append(current)
             rows.append(dollars)
             current = None
@@ -140,6 +147,22 @@ def interval_spend(token_db: Any, tool: str,
     for index, model, usd in rows:
         spend[index, names.index(model if model in kept else "other")] += usd
     return names, spend
+
+
+def readout_lag(intervals: list[tuple], dollars: np.ndarray) -> timedelta:
+    """How long readings trail usage on average: the mean time after the last usage at which
+    the rise seen in the following idle READOUT_LAG showed, weighted by that rise."""
+    trailing: list[tuple[timedelta, float]] = []
+    last_use = None
+    for (start, end, rise, usable), spent in zip(intervals, dollars):
+        if spent > 0:
+            last_use = end
+        elif usable and last_use is not None and start - last_use < READOUT_LAG and rise > 0:
+            trailing.append((end - last_use, rise))
+    total = sum(rise for _, rise in trailing)
+    if not total:
+        return timedelta(0)
+    return sum((age * rise for age, rise in trailing), timedelta(0)) / total
 
 
 def idle_rate(intervals: list[tuple], dollars: np.ndarray) -> tuple[float, float]:
@@ -215,6 +238,68 @@ def stationary_bootstrap(n: int, mean_block: float, rng: np.random.Generator) ->
     return (rng.integers(n, size=len(first))[block] + offset) % n
 
 
+def _ratio_range(dollars: np.ndarray, points: np.ndarray,
+                 rng: np.random.Generator) -> tuple[float, float, float] | None:
+    """Dollars per point over units in time order, with a stationary block bootstrap range,
+    or None for fewer than five units or no rise."""
+    if len(dollars) < 5 or points.sum() <= 0:
+        return None
+    block = block_length(points)
+    draws = []
+    for _ in range(BOOTSTRAP_DRAWS):
+        pick = stationary_bootstrap(len(points), block, rng)
+        if points[pick].sum() > 0:
+            draws.append(dollars[pick].sum() / points[pick].sum())
+    return (float(dollars.sum() / points.sum()), float(np.percentile(draws, 2.5)),
+            float(np.percentile(draws, 97.5)))
+
+
+def single_model_prices(elementary: list[tuple], elementary_dollars: np.ndarray,
+                        unit_spans: list[tuple], spend: np.ndarray, rise: np.ndarray,
+                        lag: timedelta, seed: int) -> list[dict[str, Any]]:
+    """Each model's price from the units it had to itself, as a check on the joint fit.
+
+    A unit counts for a model when the model spent at least SINGLE_MODEL_SHARE of the unit's
+    usage and of the usage in the readout lag before it, whose rise can still show in the
+    unit. The price is the units' dollars over their rise, with a stationary block bootstrap
+    range over them in time order."""
+    ends = np.array([end.timestamp() for _, end, *_ in elementary])
+    cumulative = np.vstack([np.zeros(spend.shape[1]), np.cumsum(elementary_dollars, axis=0)])
+    rng = np.random.default_rng(seed)
+    checks = []
+    for index in range(spend.shape[1]):
+        own = []
+        for unit, (start, _, _) in enumerate(unit_spans):
+            before = (cumulative[np.searchsorted(ends, start.timestamp(), side="right")]
+                      - cumulative[np.searchsorted(ends, (start - lag).timestamp(), side="right")])
+            window = spend[unit] + before
+            if spend[unit].sum() > 0 and window[index] >= SINGLE_MODEL_SHARE * window.sum():
+                own.append(unit)
+        check: dict[str, Any] = {"alone_units": len(own)}
+        priced = _ratio_range(spend[own, index], rise[own], rng)
+        if priced:
+            check.update(zip(("alone_usd_per_point", "alone_usd_per_point_low",
+                              "alone_usd_per_point_high"), priced))
+        checks.append(check)
+    return checks
+
+
+def _joint_fit(a: np.ndarray, b: np.ndarray,
+               rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Coefficients by non-negative least squares, their 95% bootstrap bounds, and the
+    bootstrap's expected block length."""
+    estimate = nnls(a, b)
+    mean_block = block_length(b)
+    draws = np.array([nnls(a[i], b[i]) for i in (
+        stationary_bootstrap(len(b), mean_block, rng) for _ in range(BOOTSTRAP_DRAWS))])
+    low, high = np.percentile(draws, [2.5, 97.5], axis=0)
+    return estimate, low, high, mean_block
+
+
+def _per_point(coefficient: float) -> float | None:
+    return 1 / coefficient if coefficient > 0 else None
+
+
 def fit_window(token_db: Any, connection: sqlite3.Connection, provider: str, bucket_id: str,
                start: datetime | None, end: datetime | None, points: float = 5,
                seed: int = 0) -> dict[str, Any]:
@@ -238,26 +323,32 @@ def fit_window(token_db: Any, connection: sqlite3.Connection, provider: str, buc
     if not usable.any() or rises[usable].sum() <= 0:
         return result
     drift, idle_hours = idle_rate(intervals, interval_dollars.sum(axis=1))
-    # Enough usage for about points of rise at the window's overall price.
+    lag = readout_lag(intervals, interval_dollars.sum(axis=1))
+    # Enough usage for about points of rise at the window's overall price. A unit's rise
+    # from usage in its last lag shows in the next unit, about lag over its length, so a
+    # unit lasts long enough to keep that near LAG_SHARE.
     threshold = points * interval_dollars[usable].sum() / rises[usable].sum()
-    intervals, spend = units(intervals, interval_dollars, threshold)
+    elementary = intervals
+    intervals, spend = units(intervals, interval_dollars, threshold, lag / LAG_SHARE)
     result["units"] = len(intervals)
     if len(intervals) < 20:
         return result
     hours = np.array([(e - s).total_seconds() / 3600 for s, e, *_ in intervals])
     a = spend
     b = np.array([rise for _, _, rise in intervals]) - drift * hours
-    estimate = nnls(a, b)
-    mean_block = block_length(b)
     rng = np.random.default_rng(seed)
-    draws = np.array([nnls(a[i], b[i]) for i in (
-        stationary_bootstrap(len(b), mean_block, rng) for _ in range(BOOTSTRAP_DRAWS))])
-    low, high = np.percentile(draws, [2.5, 97.5], axis=0)
+    estimate, low, high, mean_block = _joint_fit(a, b, rng)
+    per_point = _per_point
+    # Each half of the window, split where half its usage is reached, fitted on its own:
+    # a model whose halves' ranges do not overlap changed price within the window.
+    split = int(np.searchsorted(np.cumsum(spend.sum(axis=1)), spend.sum() / 2))
+    halves: list[tuple | None] = []
+    for part in (slice(0, split), slice(split, None)):
+        halves.append(_joint_fit(a[part], b[part], rng) if len(b[part]) >= 10 else None)
 
-    def per_point(coefficient: float) -> float | None:
-        return 1 / coefficient if coefficient > 0 else None
-
+    alone = single_model_prices(elementary, interval_dollars, intervals, spend, b, lag, seed)
     result.update({
+        "readout_lag_minutes": lag.total_seconds() / 60,
         "points": float(sum(rise for _, _, rise in intervals)),
         "api_usd": float(spend.sum()),
         "mean_block_units": mean_block,
@@ -268,11 +359,38 @@ def fit_window(token_db: Any, connection: sqlite3.Connection, provider: str, buc
             # A smaller coefficient is a higher price, so the bounds swap.
             "usd_per_point_low": per_point(high[index]),
             "usd_per_point_high": per_point(low[index]),
+            **alone[index],
+            **({"halves": [{
+                "from": _time_text(intervals[0 if part == 0 else split][0]),
+                "api_usd": float(spend[slice(0, split) if part == 0 else slice(split, None), index].sum()),
+                "usd_per_point": per_point(half[0][index]),
+                "usd_per_point_low": per_point(half[2][index]),
+                "usd_per_point_high": per_point(half[1][index]),
+            } for part, half in enumerate(halves)]} if all(halves) else {}),
         } for index, name in enumerate(names)],
         "unlogged_points_per_hour": drift,
         "idle_hours": idle_hours,
     })
     return result
+
+
+def disagrees(model: dict[str, Any]) -> bool:
+    """Whether a model's joint-fit range and its single-model range do not overlap."""
+    low = model["usd_per_point_low"] or 0.0
+    high = model["usd_per_point_high"] if model["usd_per_point_high"] is not None else math.inf
+    return high < model["alone_usd_per_point_low"] or low > model["alone_usd_per_point_high"]
+
+
+def changed(model: dict[str, Any]) -> bool:
+    """Whether a model's price ranges in the window's two halves do not overlap, among
+    models with at least 5% of their usage in each half."""
+    halves = model.get("halves")
+    if not halves or min(h["api_usd"] for h in halves) < 0.05 * model["api_usd"]:
+        return False
+    bounds = [(h["usd_per_point_low"] or 0.0,
+               h["usd_per_point_high"] if h["usd_per_point_high"] is not None else math.inf)
+              for h in halves]
+    return bounds[0][1] < bounds[1][0] or bounds[1][1] < bounds[0][0]
 
 
 def print_fit(result: dict[str, Any]) -> None:
@@ -290,11 +408,27 @@ def print_fit(result: dict[str, Any]) -> None:
     def money(value: float | None, missing: str) -> str:
         return f"${value:,.2f}" if value is not None else missing
 
+    print(f"  readings trail usage by {result['readout_lag_minutes']:.0f} minutes on average, "
+          f"so each unit lasts at least {result['readout_lag_minutes'] / LAG_SHARE / 60:.1f} hours")
     # No price means the fit found no rise from that model's usage.
     for model in result["models"]:
-        print(f"  {model['model']:<28} ${model['api_usd']:>9,.0f}"
-              f"  {money(model['usd_per_point'], 'no rise'):>10} per point"
-              f"  (95% {money(model['usd_per_point_low'], 'no rise')} to"
-              f" {money(model['usd_per_point_high'], 'unbounded')})")
+        line = (f"  {model['model']:<28} ${model['api_usd']:>9,.0f}"
+                f"  {money(model['usd_per_point'], 'no rise'):>10} per point"
+                f"  (95% {money(model['usd_per_point_low'], 'no rise')} to"
+                f" {money(model['usd_per_point_high'], 'unbounded')})")
+        if "alone_usd_per_point" in model:
+            line += (f"; alone in {model['alone_units']} units {money(model['alone_usd_per_point'], '')}"
+                     f" ({money(model['alone_usd_per_point_low'], '')} to"
+                     f" {money(model['alone_usd_per_point_high'], '')})")
+            if disagrees(model):
+                line += " DISAGREES"
+        print(line)
+        if changed(model):
+            print("    CHANGED within the window: "
+                  + ", then ".join(f"from {h['from'][:10]} {money(h['usd_per_point'], 'no rise')}"
+                                   f" ({money(h['usd_per_point_low'], 'no rise')} to"
+                                   f" {money(h['usd_per_point_high'], 'unbounded')})"
+                                   for h in model["halves"])
+                  + "; fit each stretch with --from and --to")
     print(f"  {UNLOGGED}, over {result['idle_hours']:.0f} idle hours: "
           f"{result['unlogged_points_per_hour']:.3f}")

@@ -103,6 +103,24 @@ class TestModelRates(Case):
 
         assert (rate, hours) == (0.25, 4.0)
 
+    def test_readout_lag_is_the_rise_weighted_time_after_usage(self):
+        at = [START + timedelta(minutes=10 * step) for step in range(6)]
+        intervals = [(at[i], at[i + 1], rise, True) for i, rise in enumerate([0.0, 3.0, 1.0, 0.0, 0.0])]
+        spent = np.array([5.0, 0, 0, 0, 0])
+
+        # 3 points by 10 minutes after the usage ended and 1 by 20 minutes.
+        assert model_rates.readout_lag(intervals, spent) == timedelta(minutes=12.5)
+
+    def test_a_price_counts_as_changed_only_when_both_halves_disagree_and_hold_usage(self):
+        def model(first, second, usd=(50.0, 50.0)):
+            return {"api_usd": sum(usd), "halves": [
+                {"api_usd": usd[0], "usd_per_point_low": first[0], "usd_per_point_high": first[1]},
+                {"api_usd": usd[1], "usd_per_point_low": second[0], "usd_per_point_high": second[1]}]}
+
+        assert model_rates.changed(model((1.0, 2.0), (3.0, None)))
+        assert not model_rates.changed(model((1.0, 2.0), (1.5, 4.0)))
+        assert not model_rates.changed(model((1.0, 2.0), (3.0, 4.0), usd=(99.0, 1.0)))
+
     def test_nnls_keeps_coefficients_non_negative(self):
         a = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
         b = np.array([2.0, -1.0, 1.0])
