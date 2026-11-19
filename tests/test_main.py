@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1259,6 +1260,36 @@ class TestAOPSourceLoader(Case):
             ("in-state-root", "native", "in-state-root", 60),
             ("in-state-root", "native", "in-state-root", 50),
         ]
+
+    def test_a_claude_run_in_a_state_root_keeps_its_aop_project_on_later_updates(self):
+        result_path = self.tmp_path / "concord" / ".aop" / "runs" / "run" / "result.json"
+        _write_aop_result(result_path, provider="claude", session_id="run")
+        db = duckdb.connect()
+        register_macros(db)
+        db.execute("CREATE TABLE tokens AS "
+                   + main_mod._aop_sql(main_mod._sql_file_list([result_path.as_posix()])))
+        # The run worked in the worktree AOP records, so its transcript's folder encodes it.
+        worktree = db.sql("SELECT project_path FROM tokens").fetchone()[0]
+        folder = re.sub(r"[^a-zA-Z0-9]", "-", worktree)
+        transcript = (f"/code/concord/.aop/provider-state/haiku-xml/claude/home/.claude/projects/"
+                      f"{folder}/run.jsonl")
+        db.execute("""
+            INSERT INTO tokens (tool, session, project, project_path, total_tokens, source_kind,
+                                source_file)
+            VALUES ('Claude Code', 'run', 'worktree', ?, 100, 'native', ?)
+        """, [worktree, transcript])
+        timer = main_mod.DebugTimer(False)
+        main_mod._name_claude_projects(db, timer)
+        main_mod._deduplicate_aop(db, timer)
+        project = db.sql("SELECT DISTINCT project FROM tokens").fetchall()
+
+        # A later update names projects again, with the run's AOP row already gone.
+        main_mod._name_claude_projects(db, timer)
+        main_mod._deduplicate_aop(db, timer)
+
+        assert db.sql("SELECT DISTINCT project, source_kind FROM tokens").fetchall() == [
+            (project[0][0], "native")]
+        assert project[0][0] == "concord"
 
     def test_finds_claude_and_antigravity_homes_in_the_state_roots_aop_lists(self):
         results = self.tmp_path / "state" / "aop" / "results"

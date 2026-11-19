@@ -2350,15 +2350,16 @@ def _name_claude_projects(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> N
     character other than a letter or digit replaced by '-'>. The launch directory is the
     ancestor of any of the folder's request directories that encodes to that name, so
     requests made in a subdirectory or another repository keep the session's project.
+    A transcript in an AOP run's state root keeps the project AOP attributes the run to.
     """
     with timer.span("name Claude projects"):
-        db.execute("""
+        db.execute(f"""
             WITH requests AS (
                 SELECT DISTINCT regexp_extract(source_file, '/projects/([^/]+)/', 1) AS folder,
                        project_path AS cwd
                 FROM tokens
                 WHERE tool = 'Claude Code' AND coalesce(source_kind, 'native') = 'native'
-                  AND project_path IS NOT NULL
+                  AND project_path IS NOT NULL AND NOT {AOP_STATE_ROOT_FILE}
             ),
             launch AS (
                 SELECT folder, min(dir) AS dir FROM (
@@ -2373,6 +2374,7 @@ def _name_claude_projects(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> N
             FROM launch
             WHERE tokens.tool = 'Claude Code' AND coalesce(tokens.source_kind, 'native') = 'native'
               AND regexp_extract(tokens.source_file, '/projects/([^/]+)/', 1) = launch.folder
+              AND NOT {AOP_STATE_ROOT_FILE}
         """)
 
 
