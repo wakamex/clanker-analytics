@@ -1230,6 +1230,50 @@ class TestAOPSourceLoader(Case):
             ("other", "gpt-5.5", "native"), ("resumed", "gpt-5.6-sol", "aop"),
         ]
 
+    def test_agy_log_in_an_aop_state_root_replaces_its_runs_aop_rows(self):
+        db = duckdb.connect()
+        register_macros(db)
+        results = []
+        for session in ("in-state-root", "in-home"):
+            result_path = self.tmp_path / session / ".aop" / "runs" / "run" / "result.json"
+            _write_aop_result(result_path, provider="agy", session_id=session, run_id=session)
+            results.append(result_path.as_posix())
+        db.execute("CREATE TABLE tokens AS " + main_mod._aop_sql(main_mod._sql_file_list(results)))
+        brain = "/r/.aop/provider-state/p/agy/gemini/antigravity-cli/brain"
+        db.execute(f"""
+            INSERT INTO tokens (tool, session, project, model, total_tokens, source_kind,
+                                source_file, timestamp)
+            VALUES ('Agy', 'in-state-root', 'workdir', 'm', 60, 'native',
+                    '{brain}/in-state-root/t.jsonl', '2026-08-14T12:00:10Z'),
+                   ('Agy', 'in-state-root', 'workdir', 'm', 50, 'native',
+                    '{brain}/in-state-root/t.jsonl', '2026-08-14T12:00:40Z'),
+                   ('Agy', 'in-home', 'home', 'm', 110, 'native',
+                    '/h/.gemini/antigravity-cli/brain/in-home/t.jsonl', '2026-08-14T12:00:10Z')
+        """)
+
+        main_mod._deduplicate_aop(db, main_mod.DebugTimer(False))
+
+        assert db.sql("""SELECT session, source_kind, project, total_tokens FROM tokens
+                         ORDER BY session, timestamp""").fetchall() == [
+            ("in-home", "aop", "in-home", 110),
+            ("in-state-root", "native", "in-state-root", 60),
+            ("in-state-root", "native", "in-state-root", 50),
+        ]
+
+    def test_finds_antigravity_homes_in_the_state_roots_aop_lists(self):
+        results = self.tmp_path / "state" / "aop" / "results"
+        results.mkdir(parents=True)
+        root = self.tmp_path / "project" / ".aop"
+        home = root / "provider-state" / "review" / "agy" / "gemini" / "antigravity-cli"
+        (home / "brain").mkdir(parents=True)
+        (root / "provider-state" / "review" / "claude" / "home").mkdir(parents=True)
+        (results.parent / "state-roots").write_text(f"{root}\n{root}\n{self.tmp_path / 'gone' / '.aop'}\n")
+        self.monkeypatch.setattr(main_mod, "AOP_RESULTS", results)
+
+        assert main_mod._aop_agy_homes() == [home]
+        assert ("Agy", home / "brain", "*/.system_generated/logs/transcript_full.jsonl") in main_mod._home_trees()
+
+
 def _write_zcode_db(path: Path, requests: list[tuple]) -> sqlite3.Connection:
     """Create a minimal Zcode database; each request is
     (session, model, started_at_ms, input, output, cache_write, cache_read)."""

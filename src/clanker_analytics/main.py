@@ -84,6 +84,8 @@ AGY_METADATA_TOOL = "Agy metadata"
 AOP_RESULTS = (Path(os.environ.get("XDG_STATE_HOME", Path(HOME) / ".local" / "state"))
                / "aop" / "results")
 AOP_RESULT_TOOL = "AOP result"
+# A native row read from a harness home inside an AOP run's state root.
+AOP_STATE_ROOT_FILE = "replace(source_file, '\\', '/') LIKE '%/.aop/provider-state/%'"
 ZCODE_TOOL = "Zcode"
 ZCODE_USAGE_TABLE = "zcode_model_usage"
 
@@ -121,6 +123,18 @@ def _claude_config_dirs() -> list[Path]:
     return list(homes.values())[1:]
 
 
+def _aop_agy_homes() -> list[Path]:
+    """The Antigravity homes AOP gives runs inside their state roots, at
+    <root>/provider-state/<name>/agy/<dir>/antigravity-cli. AOP lists every state root it
+    has used in state-roots, beside its results archive."""
+    try:
+        roots = (AOP_RESULTS.parent / "state-roots").read_text().splitlines()
+    except OSError:
+        return []
+    return [home for root in dict.fromkeys(roots) if root
+            for home in sorted(Path(root).glob("provider-state/*/agy/*/antigravity-cli"))]
+
+
 def _home_trees() -> list[tuple[str, Path, str]]:
     """Each source's (tool, directory, glob) under this machine's home, following the
     variables each harness resolves its home with."""
@@ -140,6 +154,10 @@ def _home_trees() -> list[tuple[str, Path, str]]:
          "*/.system_generated/logs/transcript_full.jsonl"),
         (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
          "conversation_metadata.json"),
+        # Antigravity's own log of an AOP run times each model call, where the run's
+        # result records its usage once, when the run ends.
+        *(("Agy", home / "brain", "*/.system_generated/logs/transcript_full.jsonl")
+          for home in _aop_agy_homes()),
         (AOP_RESULT_TOOL, AOP_RESULTS, ""),
         (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
         # A session's log and each subagent's, under sessions/YYYY/MM/DD/<session>/.
@@ -633,11 +651,9 @@ AGY_METADATA_FILES = ("conversation_metadata.json", "last_conversations.json")
 
 
 def _agy_metadata_paths() -> list[str]:
-    homes = [HOME, *_WSL_HOMES]
-    paths = [
-        Path(home) / ".gemini" / "antigravity-cli" / "cache" / name
-        for home in homes for name in AGY_METADATA_FILES
-    ]
+    homes = [Path(home) / ".gemini" / "antigravity-cli" for home in [HOME, *_WSL_HOMES]]
+    homes += [root.parent for tool, root, _ in SOURCE_TREES if tool == "Agy"]
+    paths = [home / "cache" / name for home in dict.fromkeys(homes) for name in AGY_METADATA_FILES]
     return [path.as_posix() for path in paths if path.exists()]
 
 
@@ -2398,6 +2414,25 @@ def _deduplicate_aop(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> None:
             ) AS daily
             WHERE tokens.source_kind = 'aop' AND coalesce(tokens.model, '') = ''
               AND tokens.tool = daily.tool AND tokens.date = daily.date
+        """)
+        # A run's native log read from its AOP state root times each model call, so it
+        # replaces the run's AOP rows and takes the project AOP attributes the run to.
+        from_state_root = f"coalesce(source_kind, 'native') != 'aop' AND {AOP_STATE_ROOT_FILE}"
+        db.execute(f"""
+            UPDATE tokens SET project = run.project, project_path = run.project_path,
+                              execution_type = run.execution_type
+            FROM (
+                SELECT tool, session, any_value(project) AS project,
+                       any_value(project_path) AS project_path,
+                       any_value(execution_type) AS execution_type
+                FROM tokens WHERE source_kind = 'aop' GROUP BY ALL
+            ) AS run
+            WHERE {from_state_root} AND tokens.tool = run.tool AND tokens.session = run.session
+        """)
+        db.execute(f"""
+            DELETE FROM tokens
+            WHERE source_kind = 'aop'
+              AND (tool, session) IN (SELECT tool, session FROM tokens WHERE {from_state_root})
         """)
         db.execute("""
             DELETE FROM tokens
