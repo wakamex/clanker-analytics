@@ -11,6 +11,7 @@ dependencies = [
     "matplotlib>=3.9",
     "clanker-usage>=0.4.0",
     "model-prices>=0.0.10",
+    "numpy>=1.23",
 ]
 
 [project.urls]

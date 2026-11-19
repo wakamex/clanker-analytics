@@ -46,6 +46,7 @@ clanker-analytics pace --json              # versioned machine-readable comparis
 clanker-analytics pace --all-buckets       # include inactive quota buckets
 clanker-analytics pace --model-mix         # include the model mix column
 clanker-analytics quota-history            # implied full-quota API cost for every observed period
+clanker-analytics model-rates --from 2026-10-14   # API dollars per quota point for each model
 clanker-analytics value                    # API-equivalent value of each subscription vs its price
 clanker-analytics value --plan codex=pro_500     # what-if with a different plan or price
 clanker-analytics sql "SELECT ..."         # custom SQL against the 'tokens' table
@@ -191,6 +192,14 @@ The included service expects the executable at `~/.local/bin/clanker-analytics`,
 `uv tool install clanker-analytics` installs it by default.
 
 `--debug-timing` prints cache decisions and per-stage timings. `--profile` adds a Python `cProfile` summary; it is mainly useful for filesystem scanning and Python-side overhead, not DuckDB query execution time.
+
+## Quota price of each model
+
+`model-rates` estimates, for each model, the API-equivalent dollars of its usage that raise a recorded quota window by one percentage point, so you can see whether a subscription's discount depends on the model. By default it fits the weekly windows of Claude Code, its weekly Fable window, and Codex's weekly window; `--window PROVIDER:BUCKET` picks others, such as `antigravity:Gemini:1w`, and `--from` and `--to` limit the fit to a stretch of time, such as one plan's months. `--json` prints the fits as JSON.
+
+A provider's accounts on one plan pay the same price per point, so the readings of all its accounts are fitted together against all of the tool's local usage, and no request has to be attributed to an account. The header names each account's recorded plans; fit only a stretch in which they share one. Readings are whole points that trail usage by a minute or more, so a fit of each one-point rise would mismeasure the usage behind it and overstate every price. Each sample unit is a run of consecutive rises holding at least `--points` points (default 5); a unit never spans a reset, a reading of 100%, or a reading that fell. Each unit's rise is fitted by non-negative least squares on each model's API dollars in it, with effort variants such as `gemini-4-argon-high` counted as their model and models under 2% of the usage fitted together as `other`, plus the unit's hours, which measures rises that local usage does not explain, such as use on the provider's website. The 95% ranges come from a stationary block bootstrap of the units, with the expected block length chosen from the data by the method of [Politis and White (2004)](https://doi.org/10.1081/ETC-120028836). `no rise` means the fit found that a model's usage moves the window by nothing measurable.
+
+A model that runs whenever others run cannot be told apart from them or from that hours term, and its range is wide; a stretch in which models alternate gives tight ranges. Compare fits with `--points 3` and `--points 10` before relying on a price: a price that moves with the unit size is limited by the reading resolution.
 
 ## Diagnosing a jump in usage
 

@@ -2823,6 +2823,21 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
             return 1
         return 0
 
+    if args.command == "model-rates":
+        from clanker_analytics.model_rates import fit_window, print_fit
+        from clanker_analytics.quota import connect
+        start, end = (datetime.fromisoformat(value).replace(tzinfo=timezone.utc) if value else None
+                      for value in (args.start, args.end))
+        with connect(Path(args.quota_db)) as quota_db:
+            results = [fit_window(db, quota_db, *window.split(":", 1), start, end, args.points)
+                       for window in args.window or DEFAULT_RATE_WINDOWS]
+        if args.json:
+            print(json.dumps(results, indent=2))
+        else:
+            for result in results:
+                print_fit(result)
+        return 0
+
     if args.command in ("quota-history", "value"):
         from clanker_analytics.quota import (
             account_labels, build_quota_history, build_value_report, connect, print_quota_history,
@@ -2962,6 +2977,10 @@ def _since_delta(since: str | None, now: datetime, default: str) -> timedelta:
         return now - (start if start.tzinfo else start.replace(tzinfo=timezone.utc))
 
 
+# The weekly windows model-rates fits by default.
+DEFAULT_RATE_WINDOWS = ("anthropic:1w", "anthropic:Fable:1w", "openai:1w")
+
+
 # Options that chose a mode before commands existed, and the command each maps to.
 LEGACY_MODES = {
     "--record-quota": "record-quota", "--pace": "pace", "--quota-history": "quota-history",
@@ -3091,6 +3110,18 @@ def main(argv: list[str] | None = None):
     command("quota-history", "Audit API-equivalent usage across every observed fixed quota "
                              "period", quota_db, as_json)
     command("record-quota", "Fetch and retain current provider quota percentages", quota_db)
+    rates = command("model-rates", "API dollars of each model's usage that move a quota window "
+                                   "by one point, fitted across the provider's accounts",
+                    quota_db, as_json)
+    rates.add_argument("--window", action="append", metavar="PROVIDER:BUCKET",
+                       help="A recorded window, such as anthropic:1w or anthropic:Fable:1w "
+                            "(default: " + ", ".join(DEFAULT_RATE_WINDOWS) + ")")
+    rates.add_argument("--points", type=float, default=5,
+                       help="Points of rise per sample unit (default: 5)")
+    rates.add_argument("--from", dest="start", metavar="DATE",
+                       help="Fit readings from this UTC date or time")
+    rates.add_argument("--to", dest="end", metavar="DATE",
+                       help="Fit readings up to this UTC date or time")
     session = command("session-costs", "Each response of one session, in any harness, with "
                                        "its API-equivalent cost, read from that session's "
                                        "files alone", as_json)
