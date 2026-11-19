@@ -123,16 +123,16 @@ def _claude_config_dirs() -> list[Path]:
     return list(homes.values())[1:]
 
 
-def _aop_agy_homes() -> list[Path]:
-    """The Antigravity homes AOP gives runs inside their state roots, at
-    <root>/provider-state/<name>/agy/<dir>/antigravity-cli. AOP lists every state root it
-    has used in state-roots, beside its results archive."""
+def _aop_run_homes(pattern: str) -> list[Path]:
+    """The harness homes AOP gives runs inside their state roots, matching pattern under
+    <root>/provider-state/<name>/. AOP lists every state root it has used in state-roots,
+    beside its results archive."""
     try:
         roots = (AOP_RESULTS.parent / "state-roots").read_text().splitlines()
     except OSError:
         return []
     return [home for root in dict.fromkeys(roots) if root
-            for home in sorted(Path(root).glob("provider-state/*/agy/*/antigravity-cli"))]
+            for home in sorted(Path(root).glob(f"provider-state/*/{pattern}"))]
 
 
 def _home_trees() -> list[tuple[str, Path, str]]:
@@ -143,6 +143,10 @@ def _home_trees() -> list[tuple[str, Path, str]]:
     return [
         ("Claude Code", Path(HOME) / ".claude" / "projects", "*.jsonl"),
         *(("Claude Code", home / "projects", "*.jsonl") for home in _claude_config_dirs()),
+        # Each AOP run's own Claude Code home, whose transcript times each response, where
+        # the run's result records its usage once, when the run ends.
+        *(("Claude Code", home / "projects", "*.jsonl")
+          for home in _aop_run_homes("claude/home/.claude")),
         ("Codex", codex / "sessions", "*.jsonl"),
         # Codex moves a conversation's log here when it is archived.
         ("Codex", codex / "archived_sessions", "*.jsonl"),
@@ -154,10 +158,9 @@ def _home_trees() -> list[tuple[str, Path, str]]:
          "*/.system_generated/logs/transcript_full.jsonl"),
         (AGY_METADATA_TOOL, Path(HOME) / ".gemini" / "antigravity-cli" / "cache",
          "conversation_metadata.json"),
-        # Antigravity's own log of an AOP run times each model call, where the run's
-        # result records its usage once, when the run ends.
+        # Likewise each AOP run's own Antigravity home.
         *(("Agy", home / "brain", "*/.system_generated/logs/transcript_full.jsonl")
-          for home in _aop_agy_homes()),
+          for home in _aop_run_homes("agy/*/antigravity-cli")),
         (AOP_RESULT_TOOL, AOP_RESULTS, ""),
         (ZCODE_TOOL, Path(HOME) / ".zcode" / "cli" / "db", "db.sqlite"),
         # A session's log and each subagent's, under sessions/YYYY/MM/DD/<session>/.

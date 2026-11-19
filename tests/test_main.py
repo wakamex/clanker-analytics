@@ -1260,18 +1260,22 @@ class TestAOPSourceLoader(Case):
             ("in-state-root", "native", "in-state-root", 50),
         ]
 
-    def test_finds_antigravity_homes_in_the_state_roots_aop_lists(self):
+    def test_finds_claude_and_antigravity_homes_in_the_state_roots_aop_lists(self):
         results = self.tmp_path / "state" / "aop" / "results"
         results.mkdir(parents=True)
         root = self.tmp_path / "project" / ".aop"
         home = root / "provider-state" / "review" / "agy" / "gemini" / "antigravity-cli"
         (home / "brain").mkdir(parents=True)
-        (root / "provider-state" / "review" / "claude" / "home").mkdir(parents=True)
+        claude = root / "provider-state" / "review" / "claude" / "home" / ".claude"
+        (claude / "projects").mkdir(parents=True)
         (results.parent / "state-roots").write_text(f"{root}\n{root}\n{self.tmp_path / 'gone' / '.aop'}\n")
         self.monkeypatch.setattr(main_mod, "AOP_RESULTS", results)
 
-        assert main_mod._aop_agy_homes() == [home]
-        assert ("Agy", home / "brain", "*/.system_generated/logs/transcript_full.jsonl") in main_mod._home_trees()
+        trees = main_mod._home_trees()
+        assert [tree for tree in trees if root in tree[1].parents] == [
+            ("Claude Code", claude / "projects", "*.jsonl"),
+            ("Agy", home / "brain", "*/.system_generated/logs/transcript_full.jsonl"),
+        ]
 
 
 def _write_zcode_db(path: Path, requests: list[tuple]) -> sqlite3.Connection:
