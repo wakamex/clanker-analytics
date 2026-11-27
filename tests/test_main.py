@@ -156,10 +156,10 @@ class TestSourceLoaders(Case):
         for value, expected in values:
             with self.subTest(value=value):
                 sql = main_mod._utc_timestamp(main_mod._sql_literal(value))
-                assert db.sql(f"SELECT {sql}").fetchone()[0] == expected
+                assert db.sql(f"SELECT {sql}").fetchall()[0][0] == expected
         # DuckDB may detect a log's timestamps as zone-less TIMESTAMP values.
         sql = main_mod._utc_timestamp("TIMESTAMP '2026-10-06 12:00:12.88'")
-        assert db.sql(f"SELECT {sql}").fetchone()[0] == "2026-10-06T12:00:12.880Z"
+        assert db.sql(f"SELECT {sql}").fetchall()[0][0] == "2026-10-06T12:00:12.880Z"
 
     def test_codex_uses_own_session_metadata_once(self):
         tmp_path = self.tmp_path
@@ -292,7 +292,7 @@ class TestSourceLoaders(Case):
 
                 result = duckdb.sql(
                     main_mod._codex_sql(main_mod._sql_literal(path.as_posix()))
-                ).fetchone()
+                ).fetchall()[0]
 
                 assert result[10] == expected
                 assert result[11] == metadata.get("cwd", "/code/project")
@@ -450,7 +450,7 @@ class TestSourceLoaders(Case):
         row = duckdb.sql(main_mod._agy_sql(
             main_mod._sql_literal(transcript.as_posix()),
             main_mod._sql_literal(metadata.as_posix()),
-        )).fetchone()
+        )).fetchall()[0]
 
         assert row[1:5] == ("project", session, "2026-08-14", "gemini-3.5-flash")
         assert row[5:10] == (80, 40, 0, 20, 140)
@@ -504,7 +504,7 @@ class TestSourceLoaders(Case):
             main_mod._sql_literal(transcript.as_posix()),
             main_mod._sql_literal(metadata.as_posix()),
             models_table=main_mod.AGY_MODELS_TABLE,
-        )).fetchone()
+        )).fetchall()[0]
         return row[4]
 
     # Generation metadata protobuf, as recorded by Antigravity: field 19 after the request
@@ -889,7 +889,7 @@ class TestSourceLoaders(Case):
             }],
         }))
 
-        row = duckdb.sql(main_mod._gemini_sql(main_mod._sql_literal(chat.as_posix()))).fetchone()
+        row = duckdb.sql(main_mod._gemini_sql(main_mod._sql_literal(chat.as_posix()))).fetchall()[0]
 
         assert row[2:4] == ("session", "2026-08-14")
 
@@ -920,7 +920,7 @@ class TestAOPSourceLoader(Case):
         _write_aop_result(archive, state_root=Path("/code/Sycophant/.aop"))
 
         relation = duckdb.sql(main_mod._aop_sql(main_mod._sql_literal(archive.as_posix())))
-        row = dict(zip([item[0] for item in relation.description], relation.fetchone()))
+        row = dict(zip([item[0] for item in relation.description], relation.fetchall()[0]))
 
         assert row["project"] == "sycophant"
         assert row["project_path"] == "/code/Sycophant/.aop/worktrees/task-1"
@@ -929,7 +929,7 @@ class TestAOPSourceLoader(Case):
         result = json.loads(archive.read_text())
         archive.write_text(json.dumps({**result, "project_dir": "/code/w3sim-r5c/"}))
         relation = duckdb.sql(main_mod._aop_sql(main_mod._sql_literal(archive.as_posix())))
-        row = dict(zip([item[0] for item in relation.description], relation.fetchone()))
+        row = dict(zip([item[0] for item in relation.description], relation.fetchall()[0]))
 
         assert row["project"] == "w3sim-r5c"
         assert row["project_path"] == "/code/w3sim-r5c/.aop/worktrees/task-1"
@@ -953,7 +953,7 @@ class TestAOPSourceLoader(Case):
             db = duckdb.connect()
             register_macros(db)
             main_mod.load_tokens(db, refresh=refresh)
-            return db.sql("SELECT count(*), sum(total_tokens), min(project) FROM tokens").fetchone()
+            return db.sql("SELECT count(*), sum(total_tokens), min(project) FROM tokens").fetchall()[0]
 
         # A cache that read the run directory, as before the archive existed.
         def scan_run_directory(_root):
@@ -997,7 +997,7 @@ class TestAOPSourceLoader(Case):
                     main_mod._sql_literal(result_path.as_posix())
                 ))
                 columns = [item[0] for item in relation.description]
-                row = dict(zip(columns, relation.fetchone()))
+                row = dict(zip(columns, relation.fetchall()[0]))
 
                 assert row["tool"] == tool
                 assert (
@@ -1060,7 +1060,7 @@ class TestAOPSourceLoader(Case):
         cost, write_cost, write_1h_cost = db.sql("""
             SELECT api_cost_usd, api_cache_write_usd, api_cache_write_1h_usd
             FROM tokens
-        """).fetchone()
+        """).fetchall()[0]
         breakdown = model_prices.rates(
             "claude-sonnet-4-6",
             provider="anthropic",
@@ -1083,7 +1083,7 @@ class TestAOPSourceLoader(Case):
 
         row = duckdb.sql(main_mod._aop_sql(
             main_mod._sql_literal(result_path.as_posix())
-        )).fetchone()
+        )).fetchall()[0]
 
         assert (row[5], row[6], row[8], row[9]) == (70, 10, 30, 110)
 
@@ -1182,10 +1182,10 @@ class TestAOPSourceLoader(Case):
         main_mod._deduplicate_aop(db, main_mod.DebugTimer(False))
         price_tokens(db, all_rows=True)
 
-        assert db.sql("SELECT count(*) FROM tokens").fetchone()[0] == 2
-        assert db.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 330
-        assert db.sql("SELECT sum(turn_count) FROM tokens").fetchone()[0] == 2
-        assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0] == 0.75
+        assert db.sql("SELECT count(*) FROM tokens").fetchall()[0][0] == 2
+        assert db.sql("SELECT sum(total_tokens) FROM tokens").fetchall()[0][0] == 330
+        assert db.sql("SELECT sum(turn_count) FROM tokens").fetchall()[0][0] == 2
+        assert db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchall()[0][0] == 0.75
 
 
     def test_aop_run_without_a_model_or_native_log_assumes_the_days_model(self):
@@ -1196,7 +1196,7 @@ class TestAOPSourceLoader(Case):
         db = duckdb.connect()
         register_macros(db)
         db.execute("CREATE TABLE tokens AS " + main_mod._aop_sql(source_expr))
-        date = db.sql("SELECT date FROM tokens").fetchone()[0]
+        date = db.sql("SELECT date FROM tokens").fetchall()[0][0]
         db.execute("""
             INSERT INTO tokens (tool, session, date, model, total_tokens, source_kind, source_file)
             VALUES ('Codex', 'busy', ?, 'gpt-5.6-sol', 900, 'native', '/native/one.jsonl'),
@@ -1269,7 +1269,7 @@ class TestAOPSourceLoader(Case):
         db.execute("CREATE TABLE tokens AS "
                    + main_mod._aop_sql(main_mod._sql_file_list([result_path.as_posix()])))
         # The run worked in the worktree AOP records, so its transcript's folder encodes it.
-        worktree = db.sql("SELECT project_path FROM tokens").fetchone()[0]
+        worktree = db.sql("SELECT project_path FROM tokens").fetchall()[0][0]
         folder = re.sub(r"[^a-zA-Z0-9]", "-", worktree)
         transcript = (f"/code/concord/.aop/provider-state/haiku-xml/claude/home/.claude/projects/"
                       f"{folder}/run.jsonl")
@@ -1389,7 +1389,7 @@ class TestZcodeSourceLoader(Case):
             ("Zcode", "proj", "child", "2026-09-27", "zai/glm-5.3-flash", 100, 10, 0, 110,
              "subagent", "2026-09-27T14:11:47.654Z"),
         ]
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchall()[0][0]
         assert cost == approx(
             (100 * 1.40 + 900 * 0.26 + 50 * 4.40 + 100 * 0.15 + 10 * 0.50) / 1e6
         )
@@ -1405,7 +1405,7 @@ class TestZcodeSourceLoader(Case):
         db = self._load()
         connection.close()
 
-        assert db.sql("SELECT timestamp FROM tokens").fetchone()[0] == "2026-09-27T15:24:52.694Z"
+        assert db.sql("SELECT timestamp FROM tokens").fetchall()[0][0] == "2026-09-27T15:24:52.694Z"
 
     def test_usage_limit_errors_become_full_quota_observations(self):
         tmp_path = self.tmp_path
@@ -1444,12 +1444,12 @@ class TestZcodeSourceLoader(Case):
         monkeypatch = self.monkeypatch
         path = self._configure(tmp_path, monkeypatch)
         connection = _write_zcode_db(path, [("main", "GLM-5.3", 1790518307654, 10, 1, 0, 0)])
-        assert self._load().sql("SELECT count(*) FROM tokens").fetchone()[0] == 1
+        assert self._load().sql("SELECT count(*) FROM tokens").fetchall()[0][0] == 1
 
         add_zcode_requests(connection, [("main", "GLM-5.3", 1790518307655, 10, 1, 0, 0)])
         assert Path(f"{path}-wal").exists()
 
-        assert self._load().sql("SELECT count(*) FROM tokens").fetchone()[0] == 2
+        assert self._load().sql("SELECT count(*) FROM tokens").fetchall()[0][0] == 2
         connection.close()
 
 # ===========================================================================
@@ -1600,12 +1600,12 @@ class TestTokenCounting(Case):
 
     def test_total_tokens(self):
         db = _make_db(*ALL_ROWS)
-        total = db.sql("SELECT sum(total_tokens)::BIGINT FROM tokens").fetchone()[0]
+        total = db.sql("SELECT sum(total_tokens)::BIGINT FROM tokens").fetchall()[0][0]
         assert total == 9700 + 18500 + 4600 + 750 + 2450
 
     def test_per_tool_totals(self):
         db = _make_db(*ALL_ROWS)
-        claude = db.sql("SELECT sum(total_tokens)::BIGINT FROM tokens WHERE tool='Claude Code'").fetchone()[0]
+        claude = db.sql("SELECT sum(total_tokens)::BIGINT FROM tokens WHERE tool='Claude Code'").fetchall()[0][0]
         assert claude == 9700 + 18500 + 2450
 
     def test_project_names(self):
@@ -1640,7 +1640,7 @@ class TestTokenCounting(Case):
             SELECT sum(total_tokens)::BIGINT,
                    (sum(total_tokens) - 0.9 * sum(cache_read_tokens))::BIGINT
             FROM tokens
-        """).fetchone()
+        """).fetchall()[0]
         assert row[1] < row[0]
         assert row[1] > 0
 
@@ -1652,7 +1652,7 @@ class TestTokenCounting(Case):
 class TestCostCalculation(Case):
     @staticmethod
     def _cost(*rows):
-        return _make_db(*rows).sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        return _make_db(*rows).sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchall()[0][0]
 
     def test_rows_are_priced_by_model_prices_at_their_date(self):
         for row in [SONNET_ROW, OPUS_ROW, HAIKU_ROW, GEMINI_ROW]:
@@ -1684,7 +1684,7 @@ class TestCostCalculation(Case):
     def test_current_prices_reprice_every_row(self):
         db = _make_db(("Codex", "p", "s", "2026-08-20", "gpt-5.6-sol", 1000, 100, 0, 0, 1100))
 
-        current = db.sql("SELECT sum(current_api_cost_usd) FROM tokens").fetchone()[0]
+        current = db.sql("SELECT sum(current_api_cost_usd) FROM tokens").fetchall()[0][0]
         assert current == approx((1000 * 4 + 100 * 20) / 1e6)
 
     def test_deepseek_peak_hours_use_the_request_time(self):
@@ -1712,7 +1712,7 @@ class TestCostCalculation(Case):
     def test_unknown_models_stay_unpriced(self):
         db = _make_db(CODEX_ROW)
 
-        assert db.sql(f"SELECT sum({COST_PER_ROW}), any_value(pricing) FROM tokens").fetchone() == (
+        assert db.sql(f"SELECT sum({COST_PER_ROW}), any_value(pricing) FROM tokens").fetchall()[0] == (
             0, "unpriced"
         )
 
@@ -1749,7 +1749,7 @@ class TestCostCalculation(Case):
         """)
         price_tokens(db, all_rows=False)
 
-        assert db.sql("SELECT api_cost_usd, current_api_cost_usd, pricing FROM tokens").fetchone() == (
+        assert db.sql("SELECT api_cost_usd, current_api_cost_usd, pricing FROM tokens").fetchall()[0] == (
             0.5, 0.5, "aop"
         )
 
@@ -1780,22 +1780,22 @@ class TestCostCalculation(Case):
 class TestMacros(Case):
     def test_fmt_macro(self):
         db = _make_db(SONNET_ROW)
-        result = db.sql("SELECT fmt(9700)").fetchone()[0]
+        result = db.sql("SELECT fmt(9700)").fetchall()[0][0]
         assert "9.7k" in result
 
     def test_fmtcost_macro_small(self):
         db = _make_db(SONNET_ROW)
-        result = db.sql("SELECT fmtcost(8.5)").fetchone()[0]
+        result = db.sql("SELECT fmtcost(8.5)").fetchall()[0][0]
         assert result == "$8.50"
 
     def test_fmtcost_macro_medium(self):
         db = _make_db(SONNET_ROW)
-        result = db.sql("SELECT fmtcost(91.1)").fetchone()[0]
+        result = db.sql("SELECT fmtcost(91.1)").fetchall()[0][0]
         assert result == "$91.1"
 
     def test_fmtcost_macro_large(self):
         db = _make_db(SONNET_ROW)
-        result = db.sql("SELECT fmtcost(3841.0)").fetchone()[0]
+        result = db.sql("SELECT fmtcost(3841.0)").fetchall()[0][0]
         assert result == "$3841"
 
 
@@ -2071,13 +2071,13 @@ class TestChartGeneration(Case):
 class TestEdgeCases(Case):
     def test_empty_table_returns_no_data(self):
         db = _make_db()
-        count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+        count = db.sql("SELECT count(*) FROM tokens").fetchall()[0][0]
         assert count == 0
 
     def test_since_filter_removes_all_data(self):
         db = _make_db(SONNET_ROW)  # date 2026-03-15
         db.execute("DELETE FROM tokens WHERE date < '2026-04-01'")
-        count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+        count = db.sql("SELECT count(*) FROM tokens").fetchall()[0][0]
         assert count == 0
 
     def test_single_tool_only(self):
@@ -2088,13 +2088,13 @@ class TestEdgeCases(Case):
     def test_zero_cache_tokens(self):
         row = ("Claude Code", "p", "s", "2026-03-15", "claude-sonnet-4-6", 1000, 200, 0, 0, 1200)
         db = _make_db(row)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchall()[0][0]
         assert cost > 0
 
     def test_all_cache_tokens(self):
         row = ("Claude Code", "p", "s", "2026-03-15", "claude-sonnet-4-6", 0, 0, 0, 10000, 10000)
         db = _make_db(row)
-        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+        cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchall()[0][0]
         expected = (10000 * 0.30) / 1e6
         assert abs(cost - expected) < 0.0001
 
@@ -2731,7 +2731,7 @@ class TestDebugHooks(Case):
         db = duckdb.connect()
         register_macros(db)
         main_mod.load_tokens(db, refresh=False)
-        assert db.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 4
+        assert db.sql("SELECT sum(total_tokens) FROM tokens").fetchall()[0][0] == 4
 
         resumed = original + [
             event(2, "SYSTEM", "CONVERSATION_HISTORY", "x" * 400),
@@ -2747,7 +2747,7 @@ class TestDebugHooks(Case):
         timer = main_mod.DebugTimer(True)
         main_mod.load_tokens(db2, refresh=False, timing=timer)
 
-        assert db2.sql("SELECT sum(total_tokens) FROM tokens").fetchone()[0] == 12
+        assert db2.sql("SELECT sum(total_tokens) FROM tokens").fetchall()[0][0] == 12
         assert any(sample.label == "drop changed rows" for sample in timer.samples)
         assert any(sample.label == "append changed files" for sample in timer.samples)
 
@@ -2793,7 +2793,7 @@ class TestDebugHooks(Case):
         db = duckdb.connect()
         register_macros(db)
         main_mod.load_tokens(db, refresh=False)
-        assert db.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/one"
+        assert db.sql("SELECT project_path FROM tokens").fetchall()[0][0] == "/code/one"
 
         write_metadata("/code/two")
         stat = metadata.stat()
@@ -2804,7 +2804,7 @@ class TestDebugHooks(Case):
         timer = main_mod.DebugTimer(True)
         main_mod.load_tokens(db2, refresh=False, timing=timer)
 
-        assert db2.sql("SELECT project_path FROM tokens").fetchone()[0] == "/code/two"
+        assert db2.sql("SELECT project_path FROM tokens").fetchall()[0][0] == "/code/two"
         assert any(sample.label == "append changed files" for sample in timer.samples)
 
     def test_claude_projects_are_named_after_the_launch_directory(self):
@@ -2849,7 +2849,7 @@ class TestDebugHooks(Case):
             db = duckdb.connect()
             register_macros(db)
             main_mod.load_tokens(db, refresh=refresh)
-            return db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone()
+            return db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchall()[0]
 
         # The first copy is read, then discovery lists only the second, then both.
         assert load(copies[:1]) == (1, 110)
@@ -2879,7 +2879,7 @@ class TestDebugHooks(Case):
             db = duckdb.connect()
             register_macros(db)
             main_mod.load_tokens(db, refresh=refresh)
-            return db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone()
+            return db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchall()[0]
 
         assert load(5) == (5, 550)
         # Five more arrive in one update, then everything is rebuilt.
@@ -2926,7 +2926,7 @@ class TestDebugHooks(Case):
         db = duckdb.connect()
         register_macros(db)
         main_mod.load_tokens(db, refresh=False)
-        assert db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (1, 110)
+        assert db.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchall()[0] == (1, 110)
 
         second = archive / "run-2.json"
         _write_aop_result(
@@ -2945,8 +2945,8 @@ class TestDebugHooks(Case):
         timer = main_mod.DebugTimer(True)
         main_mod.load_tokens(db2, refresh=False, timing=timer)
 
-        assert db2.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (2, 330)
-        assert db2.sql("SELECT count(DISTINCT session) FROM tokens").fetchone()[0] == 1
+        assert db2.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchall()[0] == (2, 330)
+        assert db2.sql("SELECT count(DISTINCT session) FROM tokens").fetchall()[0][0] == 1
 
         # A result rewritten in an older format keeps its cached usage until AOP migrates it.
         value = json.loads(second.read_text())
@@ -2957,7 +2957,7 @@ class TestDebugHooks(Case):
             db3 = duckdb.connect()
             register_macros(db3)
             main_mod.load_tokens(db3, refresh=refresh)
-            assert db3.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchone() == (2, 330)
+            assert db3.sql("SELECT count(*), sum(total_tokens) FROM tokens").fetchall()[0] == (2, 330)
         assert any(sample.label == "append changed files" for sample in timer.samples)
         metadata = json.loads((cache_dir / "tokens-meta.json").read_text())
         assert set(metadata["files"]) == {first.as_posix(), second.as_posix()}

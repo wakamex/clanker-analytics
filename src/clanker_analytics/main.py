@@ -1555,10 +1555,10 @@ def table_view(db: duckdb.DuckDBPyConnection, query: str) -> duckdb.DuckDBPyRela
     columns = db.sql("SELECT * FROM shown").columns
     hidden = []
     if "count_basis" in columns and not db.sql(
-            "SELECT count(*) FROM shown WHERE count_basis != 'exact'").fetchone()[0]:
+            "SELECT count(*) FROM shown WHERE count_basis != 'exact'").fetchall()[0][0]:
         hidden += ["count_basis", "retained_text"]
     if "first_seen" in columns and db.sql(
-            "SELECT max(last_seen::DATE) - min(first_seen::DATE) <= 1 FROM shown").fetchone()[0]:
+            "SELECT max(last_seen::DATE) - min(first_seen::DATE) <= 1 FROM shown").fetchall()[0][0]:
         hidden += ["first_seen", "last_seen"]
     exclude = f" EXCLUDE ({', '.join(hidden)})" if hidden else ""
     return db.sql(f"SELECT *{exclude} FROM shown")
@@ -2160,7 +2160,7 @@ def _write_cache(db: duckdb.DuckDBPyConnection, files: dict[str, SourceSnapshot]
                  positions: dict[str, ReadPosition], timer: DebugTimer, action: str,
                  detail: str = "", missing: Iterable[str] = ()) -> int:
     with timer.span("count token rows"):
-        row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+        row_count = db.sql("SELECT count(*) FROM tokens").fetchall()[0][0]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with timer.span("write parquet cache", CACHE_FILE.as_posix()):
         db.execute(f"COPY tokens TO '{CACHE_FILE.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)")
@@ -2365,8 +2365,8 @@ def _name_claude_projects(db: duckdb.DuckDBPyConnection, timer: DebugTimer) -> N
                 SELECT folder, min(dir) AS dir FROM (
                     SELECT folder, unnest(list_filter(
                         list_transform(range(2, len(string_split(cwd, '/')) + 1),
-                                       i -> array_to_string(string_split(cwd, '/')[1:i], '/')),
-                        dir -> regexp_replace(dir, '[^a-zA-Z0-9]', '-', 'g') = folder)) AS dir
+                                       lambda i: array_to_string(string_split(cwd, '/')[1:i], '/')),
+                        lambda dir: regexp_replace(dir, '[^a-zA-Z0-9]', '-', 'g') = folder)) AS dir
                     FROM requests)
                 GROUP BY folder
             )
@@ -2870,7 +2870,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         return 0
 
     with timer.span("count rows"):
-        row_count = db.sql("SELECT count(*) FROM tokens").fetchone()[0]
+        row_count = db.sql("SELECT count(*) FROM tokens").fetchall()[0][0]
     if row_count == 0:
         print("No data found.")
         return 1
@@ -2960,7 +2960,7 @@ def _run(args: argparse.Namespace, timing: DebugTimer | None = None) -> int:
         pass
     elif args.command == "share":
         with timer.span("share card"):
-            total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchone()[0]
+            total_cost = db.sql(f"SELECT sum({COST_PER_ROW}) FROM tokens").fetchall()[0][0]
             sub_cost = sum(c for _, c in plans.values())
             copy_and_open(path, total_cost or 0, since, sub_cost, cost_mode)
     else:

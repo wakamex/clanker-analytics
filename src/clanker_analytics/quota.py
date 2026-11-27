@@ -1275,7 +1275,7 @@ def build_quota_history(token_db: Any, cost_expression: str, pricing_basis: str,
              > coalesce(o.other_account_seen, '-infinity'::TIMESTAMPTZ)
          AND try_cast(t.timestamp AS TIMESTAMPTZ) <= o.observed_at
          AND (len(o.model_patterns) = 0
-              OR len(list_filter(o.model_patterns, pattern -> lower(t.model) LIKE pattern)) > 0)
+              OR len(list_filter(o.model_patterns, lambda pattern: lower(t.model) LIKE pattern)) > 0)
         GROUP BY
             o.quota_tool, o.quota_resets_at, o.quota_window_minutes, o.quota_limit_id,
             o.last_used_pct, o.max_used_pct, o.first_observed_at,

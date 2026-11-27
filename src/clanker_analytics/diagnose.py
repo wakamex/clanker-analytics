@@ -90,7 +90,7 @@ def build_diagnosis(db: duckdb.DuckDBPyConnection, recent: timedelta, baseline: 
                    coalesce(sum(cache_write_tokens), 0), count(cold_start),
                    coalesce(sum(write_cost) FILTER (WHERE cold_start IS NOT NULL), 0), count(*)
             FROM periods WHERE period = ?
-        """, [name]).fetchone()
+        """, [name]).fetchall()[0]
         cost, output, read, prompt, written, colds, cold_cost, requests = row
         per_day = days[name]
         summary[name] = {
@@ -121,7 +121,7 @@ def build_diagnosis(db: duckdb.DuckDBPyConnection, recent: timedelta, baseline: 
                coalesce(sum(api_cost_usd) FILTER (WHERE period = 'baseline'), 0),
                coalesce(sum(api_cost_usd) FILTER (WHERE period = 'recent'), 0)
         FROM periods
-    """).fetchone()
+    """).fetchall()[0]
     width = len(COST_PARTS)
     by_part = [(part.replace("_", " "), totals[i], totals[width + i]) for i, part in enumerate(COST_PARTS)]
     # Costs without a token split, such as AOP's own records for unpriced models.
@@ -196,7 +196,7 @@ def _simulate_one_hour_subagents(db: duckdb.DuckDBPyConnection) -> dict[str, flo
                    END)
         FROM cache_window
         WHERE tool = 'Claude Code' AND execution_type = 'subagent'
-    """).fetchone()
+    """).fetchall()[0]
     if not row or not row[0]:
         return None
     return {"actual": row[0], "one_hour": row[1]}

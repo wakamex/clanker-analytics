@@ -163,7 +163,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
                sum({COST_SQL}),
                count(*) FILTER (WHERE token_count_type != 'exact') > 0
         FROM tokens
-    """).fetchone()
+    """).fetchall()[0]
     total_tokens, billable_tokens, n_tools, n_projects, total_cost, has_estimates = totals
     total_tokens = total_tokens or 0
     billable_tokens = billable_tokens or 0
@@ -186,7 +186,7 @@ def generate(db: duckdb.DuckDBPyConnection, since_label: str | None,
     group = {t: (t if t in order else OTHER) for t, _, _ in tool_costs}
 
     # Get chart data — use per-project bars for short ranges, daily bars for longer
-    n_dates = db.sql("SELECT count(DISTINCT date) FROM tokens").fetchone()[0]
+    n_dates = db.sql("SELECT count(DISTINCT date) FROM tokens").fetchall()[0][0]
     use_bars = n_dates <= 3
 
     if use_bars:
